@@ -287,6 +287,111 @@ func TestQuery_Get_CoalescesConcurrentReads(t *testing.T) {
 	}
 }
 
+func TestQuery_GetWindowMany_BatchedAcrossEntities(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	store := fakeStore{}
+	// page-A: last 7d sum = 28 (1+2+3+4+5+6+7)
+	// page-B: last 7d sum = 14 (each day = 2)
+	// page-C: no data → 0
+	for i := 0; i < 7; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		store[state.Key{Entity: "page-A", Bucket: bucket}] = int64(i + 1)
+		store[state.Key{Entity: "page-B", Bucket: bucket}] = 2
+	}
+
+	client, cleanup := startServer(t, mgrpc.Config[int64]{
+		Store:  store,
+		Monoid: core.Sum[int64](),
+		Window: &w,
+		Encode: mgrpc.Int64LE(),
+		Now:    func() time.Time { return now },
+	})
+	defer cleanup()
+
+	resp, err := client.GetWindowMany(context.Background(), connect.NewRequest(&pb.GetWindowManyRequest{
+		Entities:        []string{"page-A", "page-B", "page-C"},
+		DurationSeconds: int64((7 * 24 * time.Hour) / time.Second),
+	}))
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	values := resp.Msg.GetValues()
+	if len(values) != 3 {
+		t.Fatalf("len(values): got %d, want 3", len(values))
+	}
+	want := []int64{28, 14, 0}
+	for i, w := range want {
+		got := decodeInt64(values[i].GetData())
+		if got != w {
+			t.Errorf("[%d]: got %d, want %d", i, got, w)
+		}
+	}
+}
+
+func TestQuery_GetWindowMany_NotWindowed(t *testing.T) {
+	store := fakeStore{}
+	client, cleanup := startServer(t, mgrpc.Config[int64]{
+		Store:  store,
+		Monoid: core.Sum[int64](),
+		Encode: mgrpc.Int64LE(),
+	})
+	defer cleanup()
+
+	_, err := client.GetWindowMany(context.Background(), connect.NewRequest(&pb.GetWindowManyRequest{
+		Entities:        []string{"a", "b"},
+		DurationSeconds: 60,
+	}))
+	if err == nil {
+		t.Fatal("expected error on non-windowed pipeline")
+	}
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("error code: got %s, want failed_precondition", connect.CodeOf(err))
+	}
+}
+
+func TestQuery_GetRangeMany_AbsoluteRange(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	store := fakeStore{}
+	// 10 days of data per entity. Day i → count = i+1.
+	for i := 0; i < 10; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		store[state.Key{Entity: "x", Bucket: bucket}] = int64(i + 1)
+		store[state.Key{Entity: "y", Bucket: bucket}] = int64((i + 1) * 10)
+	}
+
+	client, cleanup := startServer(t, mgrpc.Config[int64]{
+		Store:  store,
+		Monoid: core.Sum[int64](),
+		Window: &w,
+		Encode: mgrpc.Int64LE(),
+		Now:    func() time.Time { return now },
+	})
+	defer cleanup()
+
+	// Range covering days 2-5 ago: x = 3+4+5+6 = 18; y = 30+40+50+60 = 180.
+	start := now.Add(-5 * 24 * time.Hour).Unix()
+	end := now.Add(-2 * 24 * time.Hour).Unix()
+	resp, err := client.GetRangeMany(context.Background(), connect.NewRequest(&pb.GetRangeManyRequest{
+		Entities:  []string{"x", "y"},
+		StartUnix: start,
+		EndUnix:   end,
+	}))
+	if err != nil {
+		t.Fatalf("GetRangeMany: %v", err)
+	}
+	want := []int64{18, 180}
+	for i, w := range want {
+		got := decodeInt64(resp.Msg.GetValues()[i].GetData())
+		if got != w {
+			t.Errorf("[%d]: got %d, want %d", i, got, w)
+		}
+	}
+}
+
 func TestQuery_Get_FreshReadBypassesCoalescing(t *testing.T) {
 	gate := make(chan struct{})
 	close(gate) // released up front so reads return promptly

@@ -110,3 +110,122 @@ func TestGet_NonWindowed(t *testing.T) {
 		t.Fatalf("Get miss: got (%d,%v,%v), want (0,false,nil)", v, ok, err)
 	}
 }
+
+func TestGetWindowMany_BatchedAcrossEntities(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	store := fakeStore{}
+	// Three entities with distinct windowed sums:
+	//   page-A: last 7d sum = 28
+	//   page-B: last 7d sum = 14 (each day = 2)
+	//   page-C: last 7d sum = 0  (no data)
+	for i := 0; i < 7; i++ {
+		bucketTime := now.Add(-time.Duration(i) * 24 * time.Hour)
+		bucket := w.BucketID(bucketTime)
+		store[state.Key{Entity: "page-A", Bucket: bucket}] = int64(i + 1)
+		store[state.Key{Entity: "page-B", Bucket: bucket}] = 2
+	}
+
+	got, err := query.GetWindowMany(
+		context.Background(), store, core.Sum[int64](), w,
+		[]string{"page-A", "page-B", "page-C"},
+		7*24*time.Hour, now,
+	)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	want := []int64{28, 14, 0}
+	if len(got) != len(want) {
+		t.Fatalf("len: got %d, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d]: got %d, want %d", i, got[i], w)
+		}
+	}
+}
+
+func TestGetWindowMany_PreservesOrder(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	store := fakeStore{}
+	for _, e := range []string{"a", "b", "c", "d"} {
+		bucket := w.BucketID(now)
+		store[state.Key{Entity: e, Bucket: bucket}] = int64(e[0])
+	}
+
+	// Request in a non-alphabetical order; result must match input order.
+	want := []int64{int64('c'), int64('a'), int64('d'), int64('b')}
+	got, err := query.GetWindowMany(
+		context.Background(), store, core.Sum[int64](), w,
+		[]string{"c", "a", "d", "b"},
+		24*time.Hour, now,
+	)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] (entity in slot): got %d, want %d", i, got[i], w)
+		}
+	}
+}
+
+func TestGetWindowMany_EmptyEntities(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	got, err := query.GetWindowMany(
+		context.Background(), fakeStore{}, core.Sum[int64](), w,
+		nil, 24*time.Hour, time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("GetWindowMany([]): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len: got %d, want 0", len(got))
+	}
+}
+
+// countingStore wraps a fakeStore and tracks how many calls landed.
+// Used to verify GetWindowMany makes ONE store.GetMany call rather than N.
+type countingStore struct {
+	inner   fakeStore
+	getMany int
+}
+
+func (s *countingStore) Get(ctx context.Context, k state.Key) (int64, bool, error) {
+	return s.inner.Get(ctx, k)
+}
+func (s *countingStore) GetMany(ctx context.Context, ks []state.Key) ([]int64, []bool, error) {
+	s.getMany++
+	return s.inner.GetMany(ctx, ks)
+}
+func (s *countingStore) MergeUpdate(ctx context.Context, k state.Key, d int64, ttl time.Duration) error {
+	return s.inner.MergeUpdate(ctx, k, d, ttl)
+}
+func (*countingStore) Close() error { return nil }
+
+func TestGetWindowMany_OneStoreCall(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	store := &countingStore{inner: fakeStore{}}
+	for i := 0; i < 7; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		for _, e := range []string{"a", "b", "c", "d", "e"} {
+			store.inner[state.Key{Entity: e, Bucket: bucket}] = 1
+		}
+	}
+
+	_, err := query.GetWindowMany(context.Background(), store, core.Sum[int64](), w,
+		[]string{"a", "b", "c", "d", "e"},
+		7*24*time.Hour, now,
+	)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	// 5 entities × 8 buckets = 40 keys, single store.GetMany call.
+	if store.getMany != 1 {
+		t.Errorf("store.GetMany calls: got %d, want 1 (the whole point of WindowMany)", store.getMany)
+	}
+}

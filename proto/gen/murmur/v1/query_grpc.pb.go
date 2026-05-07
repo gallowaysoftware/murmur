@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	QueryService_Get_FullMethodName       = "/murmur.v1.QueryService/Get"
-	QueryService_GetWindow_FullMethodName = "/murmur.v1.QueryService/GetWindow"
-	QueryService_GetRange_FullMethodName  = "/murmur.v1.QueryService/GetRange"
-	QueryService_GetMany_FullMethodName   = "/murmur.v1.QueryService/GetMany"
+	QueryService_Get_FullMethodName           = "/murmur.v1.QueryService/Get"
+	QueryService_GetWindow_FullMethodName     = "/murmur.v1.QueryService/GetWindow"
+	QueryService_GetRange_FullMethodName      = "/murmur.v1.QueryService/GetRange"
+	QueryService_GetMany_FullMethodName       = "/murmur.v1.QueryService/GetMany"
+	QueryService_GetWindowMany_FullMethodName = "/murmur.v1.QueryService/GetWindowMany"
+	QueryService_GetRangeMany_FullMethodName  = "/murmur.v1.QueryService/GetRangeMany"
 )
 
 // QueryServiceClient is the client API for QueryService service.
@@ -58,6 +60,14 @@ type QueryServiceClient interface {
 	// GetMany batches Get calls. Response order matches request order so
 	// callers can zip without an index map.
 	GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*GetManyResponse, error)
+	// GetWindowMany batches GetWindow calls across many entities in a single
+	// round-trip. ONE underlying store fetch over (N entities × M buckets)
+	// keys instead of N separate GetWindow calls; the win is at most N×
+	// for ML-rerank-style use cases that fetch windowed counter features
+	// for hundreds of candidates per query.
+	GetWindowMany(ctx context.Context, in *GetWindowManyRequest, opts ...grpc.CallOption) (*GetWindowManyResponse, error)
+	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
+	GetRangeMany(ctx context.Context, in *GetRangeManyRequest, opts ...grpc.CallOption) (*GetRangeManyResponse, error)
 }
 
 type queryServiceClient struct {
@@ -108,6 +118,26 @@ func (c *queryServiceClient) GetMany(ctx context.Context, in *GetManyRequest, op
 	return out, nil
 }
 
+func (c *queryServiceClient) GetWindowMany(ctx context.Context, in *GetWindowManyRequest, opts ...grpc.CallOption) (*GetWindowManyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWindowManyResponse)
+	err := c.cc.Invoke(ctx, QueryService_GetWindowMany_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) GetRangeMany(ctx context.Context, in *GetRangeManyRequest, opts ...grpc.CallOption) (*GetRangeManyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRangeManyResponse)
+	err := c.cc.Invoke(ctx, QueryService_GetRangeMany_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // QueryServiceServer is the server API for QueryService service.
 // All implementations must embed UnimplementedQueryServiceServer
 // for forward compatibility.
@@ -141,6 +171,14 @@ type QueryServiceServer interface {
 	// GetMany batches Get calls. Response order matches request order so
 	// callers can zip without an index map.
 	GetMany(context.Context, *GetManyRequest) (*GetManyResponse, error)
+	// GetWindowMany batches GetWindow calls across many entities in a single
+	// round-trip. ONE underlying store fetch over (N entities × M buckets)
+	// keys instead of N separate GetWindow calls; the win is at most N×
+	// for ML-rerank-style use cases that fetch windowed counter features
+	// for hundreds of candidates per query.
+	GetWindowMany(context.Context, *GetWindowManyRequest) (*GetWindowManyResponse, error)
+	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
+	GetRangeMany(context.Context, *GetRangeManyRequest) (*GetRangeManyResponse, error)
 	mustEmbedUnimplementedQueryServiceServer()
 }
 
@@ -162,6 +200,12 @@ func (UnimplementedQueryServiceServer) GetRange(context.Context, *GetRangeReques
 }
 func (UnimplementedQueryServiceServer) GetMany(context.Context, *GetManyRequest) (*GetManyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMany not implemented")
+}
+func (UnimplementedQueryServiceServer) GetWindowMany(context.Context, *GetWindowManyRequest) (*GetWindowManyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWindowMany not implemented")
+}
+func (UnimplementedQueryServiceServer) GetRangeMany(context.Context, *GetRangeManyRequest) (*GetRangeManyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRangeMany not implemented")
 }
 func (UnimplementedQueryServiceServer) mustEmbedUnimplementedQueryServiceServer() {}
 func (UnimplementedQueryServiceServer) testEmbeddedByValue()                      {}
@@ -256,6 +300,42 @@ func _QueryService_GetMany_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_GetWindowMany_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWindowManyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).GetWindowMany(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_GetWindowMany_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).GetWindowMany(ctx, req.(*GetWindowManyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_GetRangeMany_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRangeManyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).GetRangeMany(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_GetRangeMany_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).GetRangeMany(ctx, req.(*GetRangeManyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // QueryService_ServiceDesc is the grpc.ServiceDesc for QueryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -278,6 +358,14 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMany",
 			Handler:    _QueryService_GetMany_Handler,
+		},
+		{
+			MethodName: "GetWindowMany",
+			Handler:    _QueryService_GetWindowMany_Handler,
+		},
+		{
+			MethodName: "GetRangeMany",
+			Handler:    _QueryService_GetRangeMany_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

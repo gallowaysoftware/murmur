@@ -36,6 +36,16 @@ service QueryService {
   // GetMany batches Get calls. Response order matches request order so
   // callers can zip without an index map.
   rpc GetMany(GetManyRequest) returns (GetManyResponse);
+
+  // GetWindowMany batches GetWindow calls across many entities in a single
+  // round-trip. ONE underlying store fetch over (N entities × M buckets)
+  // keys instead of N separate GetWindow calls; the win is at most N×
+  // for ML-rerank-style use cases that fetch windowed counter features
+  // for hundreds of candidates per query.
+  rpc GetWindowMany(GetWindowManyRequest) returns (GetWindowManyResponse);
+
+  // GetRangeMany is the absolute-range counterpart to GetWindowMany.
+  rpc GetRangeMany(GetRangeManyRequest) returns (GetRangeManyResponse);
 }
 
 // GetRequest is the input for Get — a single entity lookup.
@@ -98,5 +108,35 @@ message GetRangeResponse {
 
 message GetManyResponse {
   // Same length and order as the request's `entities`.
+  repeated Value values = 1;
+}
+
+// GetWindowManyRequest fetches windowed merges for many entities in one
+// round-trip. Equivalent to N separate GetWindow calls but uses ONE
+// underlying store batch over all (entity, bucket) pairs.
+message GetWindowManyRequest {
+  repeated string entities = 1;
+  int64 duration_seconds = 2;
+  bool fresh_read = 3;
+}
+
+message GetWindowManyResponse {
+  // Same length and order as the request's `entities`. Each value is the
+  // merged windowed result for the corresponding entity. Missing entities
+  // (no bucket data within the range) return the monoid Identity, with
+  // present=true — windowed-empty is a legitimate result, not absence.
+  repeated Value values = 1;
+}
+
+// GetRangeManyRequest is the absolute-range counterpart to
+// GetWindowManyRequest.
+message GetRangeManyRequest {
+  repeated string entities = 1;
+  int64 start_unix = 2;
+  int64 end_unix = 3;
+  bool fresh_read = 4;
+}
+
+message GetRangeManyResponse {
   repeated Value values = 1;
 }

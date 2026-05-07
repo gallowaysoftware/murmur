@@ -27,7 +27,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -281,4 +283,120 @@ func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRan
 	return connect.NewResponse(&pb.GetRangeResponse{
 		Value: &pb.Value{Present: true, Data: s.encode(v)},
 	}), nil
+}
+
+// GetWindowMany implements murmur.v1.QueryService/GetWindowMany. Batches
+// windowed merges across many entities into a single underlying store
+// fetch. Same windowed-pipeline precondition as GetWindow.
+//
+// fresh_read bypasses singleflight. The default path coalesces concurrent
+// identical requests at the (sorted-entities, duration, bucket) granularity.
+func (s *Server[V]) GetWindowMany(ctx context.Context, req *connect.Request[pb.GetWindowManyRequest]) (*connect.Response[pb.GetWindowManyResponse], error) {
+	if s.window == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use GetMany instead"))
+	}
+	entities := req.Msg.GetEntities()
+	now := s.nowFn()
+	d := time.Duration(req.Msg.GetDurationSeconds()) * time.Second
+
+	doFetch := func() ([]V, bool, error) {
+		vs, err := query.GetWindowMany(ctx, s.store, s.mon, *s.window, entities, d, now)
+		return vs, true, err
+	}
+
+	var (
+		vs  []V
+		err error
+	)
+	if req.Msg.GetFreshRead() {
+		vs, _, err = doFetch()
+	} else {
+		// Coalesce key: hash the (sorted) entity list + duration + bucket.
+		// Sorting normalizes equivalent permutations onto the same coalesce
+		// key. For typical query shapes (a fixed candidate set per query),
+		// concurrent identical reads collapse to one store fetch.
+		bucket := s.window.BucketID(now)
+		key := "GetWindowMany|" + sortedJoin(entities) + "|" + strconv.FormatInt(int64(d/time.Second), 10) + "|" + strconv.FormatInt(bucket, 10)
+		vs, _, err = coalesceGetSlice(&s.sf, key, doFetch)
+	}
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	out := &pb.GetWindowManyResponse{Values: make([]*pb.Value, len(vs))}
+	for i, v := range vs {
+		out.Values[i] = &pb.Value{Present: true, Data: s.encode(v)}
+	}
+	return connect.NewResponse(out), nil
+}
+
+// GetRangeMany implements murmur.v1.QueryService/GetRangeMany. Same shape
+// as GetWindowMany over an absolute [start_unix, end_unix] range.
+func (s *Server[V]) GetRangeMany(ctx context.Context, req *connect.Request[pb.GetRangeManyRequest]) (*connect.Response[pb.GetRangeManyResponse], error) {
+	if s.window == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use GetMany instead"))
+	}
+	entities := req.Msg.GetEntities()
+	startUnix := req.Msg.GetStartUnix()
+	endUnix := req.Msg.GetEndUnix()
+
+	doFetch := func() ([]V, bool, error) {
+		start := time.Unix(startUnix, 0).UTC()
+		end := time.Unix(endUnix, 0).UTC()
+		vs, err := query.GetRangeMany(ctx, s.store, s.mon, *s.window, entities, start, end)
+		return vs, true, err
+	}
+
+	var (
+		vs  []V
+		err error
+	)
+	if req.Msg.GetFreshRead() {
+		vs, _, err = doFetch()
+	} else {
+		key := "GetRangeMany|" + sortedJoin(entities) + "|" + strconv.FormatInt(startUnix, 10) + "|" + strconv.FormatInt(endUnix, 10)
+		vs, _, err = coalesceGetSlice(&s.sf, key, doFetch)
+	}
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	out := &pb.GetRangeManyResponse{Values: make([]*pb.Value, len(vs))}
+	for i, v := range vs {
+		out.Values[i] = &pb.Value{Present: true, Data: s.encode(v)}
+	}
+	return connect.NewResponse(out), nil
+}
+
+// coalesceGetSlice is the slice-result analog of coalesceGet. Used by the
+// "Many" endpoints whose return shape is []V instead of (V, bool).
+func coalesceGetSlice[V any](sf *singleflight.Group, key string, fn func() ([]V, bool, error)) ([]V, bool, error) {
+	out, err, _ := sf.Do(key, func() (any, error) {
+		v, ok, err := fn()
+		if err != nil {
+			return nil, err
+		}
+		return coalescedSliceResult[V]{values: v, present: ok}, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	r := out.(coalescedSliceResult[V])
+	return r.values, r.present, nil
+}
+
+type coalescedSliceResult[V any] struct {
+	values  []V
+	present bool
+}
+
+// sortedJoin returns the entities sorted and joined by '|'. Used by the
+// singleflight coalesce keys so two requests with the same set of entities
+// in different orders collapse to the same key.
+func sortedJoin(entities []string) string {
+	if len(entities) == 0 {
+		return ""
+	}
+	cp := make([]string, len(entities))
+	copy(cp, entities)
+	sort.Strings(cp)
+	return strings.Join(cp, "|")
 }

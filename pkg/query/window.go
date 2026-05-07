@@ -67,6 +67,89 @@ func GetRange[V any](
 	return getRangeBuckets(ctx, store, m, entity, lo, hi)
 }
 
+// GetWindowMany returns the windowed merge for each of `entities` in a single
+// fanned-out fetch. Equivalent to calling GetWindow per entity, but uses ONE
+// underlying store.GetMany over (N entities × M buckets) keys instead of N
+// separate GetMany calls of M keys each.
+//
+// For ML rerank with windowed counter features over N=200 candidates with
+// M=7 daily buckets, this is 14 BatchGetItem calls in parallel (~20ms p99)
+// instead of 200 sequential GetWindow calls (~4 seconds).
+//
+// Returns one value per entity in input order. Missing entities (no bucket
+// data within the range) return the monoid Identity rather than an error —
+// callers branch on Identity, not on a separate "present" flag, since
+// "merged-empty" is a legitimate windowed result.
+func GetWindowMany[V any](
+	ctx context.Context,
+	store state.Store[V],
+	m monoid.Monoid[V],
+	w windowed.Config,
+	entities []string,
+	duration time.Duration,
+	now time.Time,
+) ([]V, error) {
+	lo, hi := w.LastN(now, duration)
+	return getRangeBucketsMany(ctx, store, m, entities, lo, hi)
+}
+
+// GetRangeMany is the absolute-range counterpart to GetWindowMany.
+func GetRangeMany[V any](
+	ctx context.Context,
+	store state.Store[V],
+	m monoid.Monoid[V],
+	w windowed.Config,
+	entities []string,
+	start, end time.Time,
+) ([]V, error) {
+	lo, hi := w.BucketRange(start, end)
+	return getRangeBucketsMany(ctx, store, m, entities, lo, hi)
+}
+
+func getRangeBucketsMany[V any](
+	ctx context.Context,
+	store state.Store[V],
+	m monoid.Monoid[V],
+	entities []string,
+	lo, hi int64,
+) ([]V, error) {
+	out := make([]V, len(entities))
+	if hi < lo || len(entities) == 0 {
+		for i := range out {
+			out[i] = m.Identity()
+		}
+		return out, nil
+	}
+	bucketCount := int(hi - lo + 1)
+	totalKeys := bucketCount * len(entities)
+
+	// Layout: keys[i*bucketCount + j] holds entity i at bucket lo+j.
+	// This layout lets us slice per-entity for the monoid merge without
+	// needing a separate index map.
+	keys := make([]state.Key, 0, totalKeys)
+	for _, e := range entities {
+		for b := lo; b <= hi; b++ {
+			keys = append(keys, state.Key{Entity: e, Bucket: b})
+		}
+	}
+
+	vals, _, err := store.GetMany(ctx, keys)
+	if err != nil {
+		// Identity-fill on error so callers don't see a partial slice.
+		for i := range out {
+			out[i] = m.Identity()
+		}
+		return out, err
+	}
+
+	for i := range entities {
+		start := i * bucketCount
+		end := start + bucketCount
+		out[i] = windowed.MergeBuckets(m, vals[start:end])
+	}
+	return out, nil
+}
+
 func getRangeBuckets[V any](
 	ctx context.Context,
 	store state.Store[V],

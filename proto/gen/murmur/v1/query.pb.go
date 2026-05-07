@@ -496,6 +496,231 @@ func (x *GetManyResponse) GetValues() []*Value {
 	return nil
 }
 
+// GetWindowManyRequest fetches windowed merges for many entities in one
+// round-trip. Equivalent to N separate GetWindow calls but uses ONE
+// underlying store batch over all (entity, bucket) pairs.
+type GetWindowManyRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Entities        []string               `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
+	DurationSeconds int64                  `protobuf:"varint,2,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	FreshRead       bool                   `protobuf:"varint,3,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetWindowManyRequest) Reset() {
+	*x = GetWindowManyRequest{}
+	mi := &file_murmur_v1_query_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWindowManyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWindowManyRequest) ProtoMessage() {}
+
+func (x *GetWindowManyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWindowManyRequest.ProtoReflect.Descriptor instead.
+func (*GetWindowManyRequest) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GetWindowManyRequest) GetEntities() []string {
+	if x != nil {
+		return x.Entities
+	}
+	return nil
+}
+
+func (x *GetWindowManyRequest) GetDurationSeconds() int64 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
+func (x *GetWindowManyRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
+type GetWindowManyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Same length and order as the request's `entities`. Each value is the
+	// merged windowed result for the corresponding entity. Missing entities
+	// (no bucket data within the range) return the monoid Identity, with
+	// present=true — windowed-empty is a legitimate result, not absence.
+	Values        []*Value `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWindowManyResponse) Reset() {
+	*x = GetWindowManyResponse{}
+	mi := &file_murmur_v1_query_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWindowManyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWindowManyResponse) ProtoMessage() {}
+
+func (x *GetWindowManyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWindowManyResponse.ProtoReflect.Descriptor instead.
+func (*GetWindowManyResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetWindowManyResponse) GetValues() []*Value {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+// GetRangeManyRequest is the absolute-range counterpart to
+// GetWindowManyRequest.
+type GetRangeManyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entities      []string               `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
+	StartUnix     int64                  `protobuf:"varint,2,opt,name=start_unix,json=startUnix,proto3" json:"start_unix,omitempty"`
+	EndUnix       int64                  `protobuf:"varint,3,opt,name=end_unix,json=endUnix,proto3" json:"end_unix,omitempty"`
+	FreshRead     bool                   `protobuf:"varint,4,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRangeManyRequest) Reset() {
+	*x = GetRangeManyRequest{}
+	mi := &file_murmur_v1_query_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRangeManyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRangeManyRequest) ProtoMessage() {}
+
+func (x *GetRangeManyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRangeManyRequest.ProtoReflect.Descriptor instead.
+func (*GetRangeManyRequest) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetRangeManyRequest) GetEntities() []string {
+	if x != nil {
+		return x.Entities
+	}
+	return nil
+}
+
+func (x *GetRangeManyRequest) GetStartUnix() int64 {
+	if x != nil {
+		return x.StartUnix
+	}
+	return 0
+}
+
+func (x *GetRangeManyRequest) GetEndUnix() int64 {
+	if x != nil {
+		return x.EndUnix
+	}
+	return 0
+}
+
+func (x *GetRangeManyRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
+type GetRangeManyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        []*Value               `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRangeManyResponse) Reset() {
+	*x = GetRangeManyResponse{}
+	mi := &file_murmur_v1_query_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRangeManyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRangeManyResponse) ProtoMessage() {}
+
+func (x *GetRangeManyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRangeManyResponse.ProtoReflect.Descriptor instead.
+func (*GetRangeManyResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetRangeManyResponse) GetValues() []*Value {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
 var File_murmur_v1_query_proto protoreflect.FileDescriptor
 
 const file_murmur_v1_query_proto_rawDesc = "" +
@@ -532,12 +757,30 @@ const file_murmur_v1_query_proto_rawDesc = "" +
 	"\x10GetRangeResponse\x12&\n" +
 	"\x05value\x18\x01 \x01(\v2\x10.murmur.v1.ValueR\x05value\";\n" +
 	"\x0fGetManyResponse\x12(\n" +
-	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values2\x93\x02\n" +
+	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values\"|\n" +
+	"\x14GetWindowManyRequest\x12\x1a\n" +
+	"\bentities\x18\x01 \x03(\tR\bentities\x12)\n" +
+	"\x10duration_seconds\x18\x02 \x01(\x03R\x0fdurationSeconds\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x03 \x01(\bR\tfreshRead\"A\n" +
+	"\x15GetWindowManyResponse\x12(\n" +
+	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values\"\x8a\x01\n" +
+	"\x13GetRangeManyRequest\x12\x1a\n" +
+	"\bentities\x18\x01 \x03(\tR\bentities\x12\x1d\n" +
+	"\n" +
+	"start_unix\x18\x02 \x01(\x03R\tstartUnix\x12\x19\n" +
+	"\bend_unix\x18\x03 \x01(\x03R\aendUnix\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x04 \x01(\bR\tfreshRead\"@\n" +
+	"\x14GetRangeManyResponse\x12(\n" +
+	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values2\xb8\x03\n" +
 	"\fQueryService\x124\n" +
 	"\x03Get\x12\x15.murmur.v1.GetRequest\x1a\x16.murmur.v1.GetResponse\x12F\n" +
 	"\tGetWindow\x12\x1b.murmur.v1.GetWindowRequest\x1a\x1c.murmur.v1.GetWindowResponse\x12C\n" +
 	"\bGetRange\x12\x1a.murmur.v1.GetRangeRequest\x1a\x1b.murmur.v1.GetRangeResponse\x12@\n" +
-	"\aGetMany\x12\x19.murmur.v1.GetManyRequest\x1a\x1a.murmur.v1.GetManyResponseB\xa1\x01\n" +
+	"\aGetMany\x12\x19.murmur.v1.GetManyRequest\x1a\x1a.murmur.v1.GetManyResponse\x12R\n" +
+	"\rGetWindowMany\x12\x1f.murmur.v1.GetWindowManyRequest\x1a .murmur.v1.GetWindowManyResponse\x12O\n" +
+	"\fGetRangeMany\x12\x1e.murmur.v1.GetRangeManyRequest\x1a\x1f.murmur.v1.GetRangeManyResponseB\xa1\x01\n" +
 	"\rcom.murmur.v1B\n" +
 	"QueryProtoP\x01Z?github.com/gallowaysoftware/murmur/proto/gen/murmur/v1;murmurv1\xa2\x02\x03MXX\xaa\x02\tMurmur.V1\xca\x02\tMurmur\\V1\xe2\x02\x15Murmur\\V1\\GPBMetadata\xea\x02\n" +
 	"Murmur::V1b\x06proto3"
@@ -554,36 +797,46 @@ func file_murmur_v1_query_proto_rawDescGZIP() []byte {
 	return file_murmur_v1_query_proto_rawDescData
 }
 
-var file_murmur_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_murmur_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_murmur_v1_query_proto_goTypes = []any{
-	(*GetRequest)(nil),        // 0: murmur.v1.GetRequest
-	(*GetManyRequest)(nil),    // 1: murmur.v1.GetManyRequest
-	(*GetWindowRequest)(nil),  // 2: murmur.v1.GetWindowRequest
-	(*GetRangeRequest)(nil),   // 3: murmur.v1.GetRangeRequest
-	(*Value)(nil),             // 4: murmur.v1.Value
-	(*GetResponse)(nil),       // 5: murmur.v1.GetResponse
-	(*GetWindowResponse)(nil), // 6: murmur.v1.GetWindowResponse
-	(*GetRangeResponse)(nil),  // 7: murmur.v1.GetRangeResponse
-	(*GetManyResponse)(nil),   // 8: murmur.v1.GetManyResponse
+	(*GetRequest)(nil),            // 0: murmur.v1.GetRequest
+	(*GetManyRequest)(nil),        // 1: murmur.v1.GetManyRequest
+	(*GetWindowRequest)(nil),      // 2: murmur.v1.GetWindowRequest
+	(*GetRangeRequest)(nil),       // 3: murmur.v1.GetRangeRequest
+	(*Value)(nil),                 // 4: murmur.v1.Value
+	(*GetResponse)(nil),           // 5: murmur.v1.GetResponse
+	(*GetWindowResponse)(nil),     // 6: murmur.v1.GetWindowResponse
+	(*GetRangeResponse)(nil),      // 7: murmur.v1.GetRangeResponse
+	(*GetManyResponse)(nil),       // 8: murmur.v1.GetManyResponse
+	(*GetWindowManyRequest)(nil),  // 9: murmur.v1.GetWindowManyRequest
+	(*GetWindowManyResponse)(nil), // 10: murmur.v1.GetWindowManyResponse
+	(*GetRangeManyRequest)(nil),   // 11: murmur.v1.GetRangeManyRequest
+	(*GetRangeManyResponse)(nil),  // 12: murmur.v1.GetRangeManyResponse
 }
 var file_murmur_v1_query_proto_depIdxs = []int32{
-	4, // 0: murmur.v1.GetResponse.value:type_name -> murmur.v1.Value
-	4, // 1: murmur.v1.GetWindowResponse.value:type_name -> murmur.v1.Value
-	4, // 2: murmur.v1.GetRangeResponse.value:type_name -> murmur.v1.Value
-	4, // 3: murmur.v1.GetManyResponse.values:type_name -> murmur.v1.Value
-	0, // 4: murmur.v1.QueryService.Get:input_type -> murmur.v1.GetRequest
-	2, // 5: murmur.v1.QueryService.GetWindow:input_type -> murmur.v1.GetWindowRequest
-	3, // 6: murmur.v1.QueryService.GetRange:input_type -> murmur.v1.GetRangeRequest
-	1, // 7: murmur.v1.QueryService.GetMany:input_type -> murmur.v1.GetManyRequest
-	5, // 8: murmur.v1.QueryService.Get:output_type -> murmur.v1.GetResponse
-	6, // 9: murmur.v1.QueryService.GetWindow:output_type -> murmur.v1.GetWindowResponse
-	7, // 10: murmur.v1.QueryService.GetRange:output_type -> murmur.v1.GetRangeResponse
-	8, // 11: murmur.v1.QueryService.GetMany:output_type -> murmur.v1.GetManyResponse
-	8, // [8:12] is the sub-list for method output_type
-	4, // [4:8] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	4,  // 0: murmur.v1.GetResponse.value:type_name -> murmur.v1.Value
+	4,  // 1: murmur.v1.GetWindowResponse.value:type_name -> murmur.v1.Value
+	4,  // 2: murmur.v1.GetRangeResponse.value:type_name -> murmur.v1.Value
+	4,  // 3: murmur.v1.GetManyResponse.values:type_name -> murmur.v1.Value
+	4,  // 4: murmur.v1.GetWindowManyResponse.values:type_name -> murmur.v1.Value
+	4,  // 5: murmur.v1.GetRangeManyResponse.values:type_name -> murmur.v1.Value
+	0,  // 6: murmur.v1.QueryService.Get:input_type -> murmur.v1.GetRequest
+	2,  // 7: murmur.v1.QueryService.GetWindow:input_type -> murmur.v1.GetWindowRequest
+	3,  // 8: murmur.v1.QueryService.GetRange:input_type -> murmur.v1.GetRangeRequest
+	1,  // 9: murmur.v1.QueryService.GetMany:input_type -> murmur.v1.GetManyRequest
+	9,  // 10: murmur.v1.QueryService.GetWindowMany:input_type -> murmur.v1.GetWindowManyRequest
+	11, // 11: murmur.v1.QueryService.GetRangeMany:input_type -> murmur.v1.GetRangeManyRequest
+	5,  // 12: murmur.v1.QueryService.Get:output_type -> murmur.v1.GetResponse
+	6,  // 13: murmur.v1.QueryService.GetWindow:output_type -> murmur.v1.GetWindowResponse
+	7,  // 14: murmur.v1.QueryService.GetRange:output_type -> murmur.v1.GetRangeResponse
+	8,  // 15: murmur.v1.QueryService.GetMany:output_type -> murmur.v1.GetManyResponse
+	10, // 16: murmur.v1.QueryService.GetWindowMany:output_type -> murmur.v1.GetWindowManyResponse
+	12, // 17: murmur.v1.QueryService.GetRangeMany:output_type -> murmur.v1.GetRangeManyResponse
+	12, // [12:18] is the sub-list for method output_type
+	6,  // [6:12] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_murmur_v1_query_proto_init() }
@@ -597,7 +850,7 @@ func file_murmur_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_murmur_v1_query_proto_rawDesc), len(file_murmur_v1_query_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

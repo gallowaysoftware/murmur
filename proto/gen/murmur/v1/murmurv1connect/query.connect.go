@@ -41,6 +41,12 @@ const (
 	QueryServiceGetRangeProcedure = "/murmur.v1.QueryService/GetRange"
 	// QueryServiceGetManyProcedure is the fully-qualified name of the QueryService's GetMany RPC.
 	QueryServiceGetManyProcedure = "/murmur.v1.QueryService/GetMany"
+	// QueryServiceGetWindowManyProcedure is the fully-qualified name of the QueryService's
+	// GetWindowMany RPC.
+	QueryServiceGetWindowManyProcedure = "/murmur.v1.QueryService/GetWindowMany"
+	// QueryServiceGetRangeManyProcedure is the fully-qualified name of the QueryService's GetRangeMany
+	// RPC.
+	QueryServiceGetRangeManyProcedure = "/murmur.v1.QueryService/GetRangeMany"
 )
 
 // QueryServiceClient is a client for the murmur.v1.QueryService service.
@@ -57,6 +63,14 @@ type QueryServiceClient interface {
 	// GetMany batches Get calls. Response order matches request order so
 	// callers can zip without an index map.
 	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error)
+	// GetWindowMany batches GetWindow calls across many entities in a single
+	// round-trip. ONE underlying store fetch over (N entities × M buckets)
+	// keys instead of N separate GetWindow calls; the win is at most N×
+	// for ML-rerank-style use cases that fetch windowed counter features
+	// for hundreds of candidates per query.
+	GetWindowMany(context.Context, *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error)
+	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
+	GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error)
 }
 
 // NewQueryServiceClient constructs a client for the murmur.v1.QueryService service. By default, it
@@ -94,15 +108,29 @@ func NewQueryServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(queryServiceMethods.ByName("GetMany")),
 			connect.WithClientOptions(opts...),
 		),
+		getWindowMany: connect.NewClient[v1.GetWindowManyRequest, v1.GetWindowManyResponse](
+			httpClient,
+			baseURL+QueryServiceGetWindowManyProcedure,
+			connect.WithSchema(queryServiceMethods.ByName("GetWindowMany")),
+			connect.WithClientOptions(opts...),
+		),
+		getRangeMany: connect.NewClient[v1.GetRangeManyRequest, v1.GetRangeManyResponse](
+			httpClient,
+			baseURL+QueryServiceGetRangeManyProcedure,
+			connect.WithSchema(queryServiceMethods.ByName("GetRangeMany")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // queryServiceClient implements QueryServiceClient.
 type queryServiceClient struct {
-	get       *connect.Client[v1.GetRequest, v1.GetResponse]
-	getWindow *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
-	getRange  *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
-	getMany   *connect.Client[v1.GetManyRequest, v1.GetManyResponse]
+	get           *connect.Client[v1.GetRequest, v1.GetResponse]
+	getWindow     *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
+	getRange      *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
+	getMany       *connect.Client[v1.GetManyRequest, v1.GetManyResponse]
+	getWindowMany *connect.Client[v1.GetWindowManyRequest, v1.GetWindowManyResponse]
+	getRangeMany  *connect.Client[v1.GetRangeManyRequest, v1.GetRangeManyResponse]
 }
 
 // Get calls murmur.v1.QueryService.Get.
@@ -125,6 +153,16 @@ func (c *queryServiceClient) GetMany(ctx context.Context, req *connect.Request[v
 	return c.getMany.CallUnary(ctx, req)
 }
 
+// GetWindowMany calls murmur.v1.QueryService.GetWindowMany.
+func (c *queryServiceClient) GetWindowMany(ctx context.Context, req *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error) {
+	return c.getWindowMany.CallUnary(ctx, req)
+}
+
+// GetRangeMany calls murmur.v1.QueryService.GetRangeMany.
+func (c *queryServiceClient) GetRangeMany(ctx context.Context, req *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error) {
+	return c.getRangeMany.CallUnary(ctx, req)
+}
+
 // QueryServiceHandler is an implementation of the murmur.v1.QueryService service.
 type QueryServiceHandler interface {
 	// Get returns the all-time aggregation value for entity (non-windowed
@@ -139,6 +177,14 @@ type QueryServiceHandler interface {
 	// GetMany batches Get calls. Response order matches request order so
 	// callers can zip without an index map.
 	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error)
+	// GetWindowMany batches GetWindow calls across many entities in a single
+	// round-trip. ONE underlying store fetch over (N entities × M buckets)
+	// keys instead of N separate GetWindow calls; the win is at most N×
+	// for ML-rerank-style use cases that fetch windowed counter features
+	// for hundreds of candidates per query.
+	GetWindowMany(context.Context, *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error)
+	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
+	GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error)
 }
 
 // NewQueryServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -172,6 +218,18 @@ func NewQueryServiceHandler(svc QueryServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(queryServiceMethods.ByName("GetMany")),
 		connect.WithHandlerOptions(opts...),
 	)
+	queryServiceGetWindowManyHandler := connect.NewUnaryHandler(
+		QueryServiceGetWindowManyProcedure,
+		svc.GetWindowMany,
+		connect.WithSchema(queryServiceMethods.ByName("GetWindowMany")),
+		connect.WithHandlerOptions(opts...),
+	)
+	queryServiceGetRangeManyHandler := connect.NewUnaryHandler(
+		QueryServiceGetRangeManyProcedure,
+		svc.GetRangeMany,
+		connect.WithSchema(queryServiceMethods.ByName("GetRangeMany")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/murmur.v1.QueryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case QueryServiceGetProcedure:
@@ -182,6 +240,10 @@ func NewQueryServiceHandler(svc QueryServiceHandler, opts ...connect.HandlerOpti
 			queryServiceGetRangeHandler.ServeHTTP(w, r)
 		case QueryServiceGetManyProcedure:
 			queryServiceGetManyHandler.ServeHTTP(w, r)
+		case QueryServiceGetWindowManyProcedure:
+			queryServiceGetWindowManyHandler.ServeHTTP(w, r)
+		case QueryServiceGetRangeManyProcedure:
+			queryServiceGetRangeManyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -205,4 +267,12 @@ func (UnimplementedQueryServiceHandler) GetRange(context.Context, *connect.Reque
 
 func (UnimplementedQueryServiceHandler) GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetMany is not implemented"))
+}
+
+func (UnimplementedQueryServiceHandler) GetWindowMany(context.Context, *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetWindowMany is not implemented"))
+}
+
+func (UnimplementedQueryServiceHandler) GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetRangeMany is not implemented"))
 }
