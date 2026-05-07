@@ -21,7 +21,7 @@ edges callers should plan around.
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
-| `pkg/exec/streaming` | experimental | single-goroutine; on processing error the runtime exits (no per-record retry/DLQ) |
+| `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; runtime no longer crashes on a transient store failure |
 | `pkg/exec/bootstrap` | experimental | metrics integration not yet wired |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
