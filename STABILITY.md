@@ -63,7 +63,9 @@ edges callers should plan around.
    convenience. Do not expose to the public internet without first wiring
    `WithAllowedOrigins([]string)` (tracked).
 
-7. **No CI.** GitHub Actions, `golangci-lint`, Dependabot are tracked and pending.
+7. ~~**No CI.**~~ Fixed: `.github/workflows/ci.yml` runs `gofmt`, `go vet`,
+   unit tests with `-race`, `golangci-lint`, and the web `tsc` / `lint` /
+   `build` pipeline. Dependabot wired for Go modules, npm, and Actions.
 
 ## Versioning
 

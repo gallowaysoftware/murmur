@@ -1,0 +1,43 @@
+# golangci-lint v1.62+ config for Murmur.
+# Run locally with `golangci-lint run ./...` or `make lint`.
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unused
+    - unparam
+    - misspell
+    - gocritic
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: package-comments
+          severity: warning
+        - name: unused-parameter
+          disabled: true
+    staticcheck:
+      checks: ["all", "-ST1003"]
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - revive
+          - errcheck
+          - unparam
+      - path: proto/gen/
+        linters:
+          - revive
+          - staticcheck
+          - unused

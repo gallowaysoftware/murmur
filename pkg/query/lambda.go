@@ -17,10 +17,10 @@ import (
 // Two-store contract:
 //
 //   - view  : the precomputed result of the batch job over historical events.
-//             Updated atomically by the batch worker (typically swap.SetActive after
-//             writing into a fresh shadow table).
+//     Updated atomically by the batch worker (typically swap.SetActive after
+//     writing into a fresh shadow table).
 //   - delta : the streaming accumulator over events since the batch checkpoint.
-//             Reset to identity when a new batch view is promoted.
+//     Reset to identity when a new batch view is promoted.
 //
 // Merge semantics: at query time the result is `view.Get ⊕ delta.Get` for each key
 // (or each bucket, in the windowed case). Both stores must use the same monoid; the

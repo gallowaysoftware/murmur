@@ -142,12 +142,12 @@ func TestE2E_WindowedCounterPipeline(t *testing.T) {
 		duration time.Duration
 		want     int64
 	}{
-		{"Last1Day", 1 * 24 * time.Hour, 10},                  // today only
-		{"Last2Days", 2 * 24 * time.Hour, 10 + 9},             // 19
-		{"Last3Days", 3 * 24 * time.Hour, 10 + 9 + 8},         // 27
+		{"Last1Day", 1 * 24 * time.Hour, 10},                          // today only
+		{"Last2Days", 2 * 24 * time.Hour, 10 + 9},                     // 19
+		{"Last3Days", 3 * 24 * time.Hour, 10 + 9 + 8},                 // 27
 		{"Last7Days", 7 * 24 * time.Hour, 10 + 9 + 8 + 7 + 6 + 5 + 4}, // 49
-		{"Last10Days", 10 * 24 * time.Hour, 55},               // all
-		{"Last30Days", 30 * 24 * time.Hour, 55},               // all (still 55, no older data)
+		{"Last10Days", 10 * 24 * time.Hour, 55},                       // all
+		{"Last30Days", 30 * 24 * time.Hour, 55},                       // all (still 55, no older data)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

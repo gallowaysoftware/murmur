@@ -34,9 +34,9 @@ func Count() monoid.Monoid[int64] { return count{} }
 
 type count struct{}
 
-func (count) Identity() int64       { return 0 }
+func (count) Identity() int64          { return 0 }
 func (count) Combine(a, b int64) int64 { return a + b }
-func (count) Kind() monoid.Kind     { return monoid.KindCount }
+func (count) Kind() monoid.Kind        { return monoid.KindCount }
 
 // Bounded wraps a value V with a Set flag, used by Min/Max so that Identity can be
 // represented as "no value yet" rather than the zero value of V (which would otherwise

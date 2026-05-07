@@ -44,7 +44,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
 - ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.
 - **CORS is permissive on the admin server.** `pkg/admin` ships with `Access-Control-Allow-Origin: *`. Do not expose the admin API to the public internet today; keep it on a private subnet behind your VPC.
-- **No CI yet.** GitHub Actions / Dependabot / `golangci-lint` are tracked tasks, not yet merged.
+- **CI runs on every PR.** `gofmt` / `go vet` / unit tests with `-race` / `golangci-lint` / web `tsc` + `eslint` + `vite build`. Dependabot is wired up for Go, npm, and Actions.
 
 ## Quick taste
 
@@ -119,29 +119,15 @@ Murmur fills the gap with: unified Go DSL, structural monoids that dispatch to m
 ## Run locally
 
 ```sh
-docker compose up -d kafka dynamodb-local valkey mongo minio spark-connect
-
-# Mongo Change Streams require a replica set — one-time init on first start:
-docker exec murmur-mongo mongosh --quiet --eval \
-  "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})"
-
-# Create the dynamodb-local table the page-view example reads (mirrors what the
-# Terraform module would do in production):
-aws --endpoint-url=http://localhost:8000 dynamodb create-table \
-    --table-name page_views \
-    --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=N \
-    --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
-    --billing-mode PAY_PER_REQUEST
-
-# All unit + integration tests:
-DDB_LOCAL_ENDPOINT=http://localhost:8000 \
-KAFKA_BROKERS=localhost:9092 \
-VALKEY_ADDRESS=localhost:6379 \
-S3_ENDPOINT=http://localhost:9000 \
-SPARK_CONNECT_REMOTE=sc://localhost:15002 \
-MONGO_URI="mongodb://localhost:27017/?replicaSet=rs0&directConnection=true" \
-go test ./...
+make compose-up   # bring up kafka, dynamodb-local, valkey, mongo, minio, spark-connect
+                  # plus rs.initiate for Mongo (idempotent)
+make seed-ddb     # create the page_views DDB table the example reads from
+make test-unit    # fast unit tests, no infra
+make test-integration  # full E2E suite against the docker-compose stack
+make ui           # build the web UI and run cmd/murmur-ui --demo on :8080
 ```
+
+`make help` lists every target.
 
 The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 

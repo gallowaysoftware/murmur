@@ -46,20 +46,21 @@ type registered struct {
 
 // PipelineInfo describes a pipeline for the admin UI.
 type PipelineInfo struct {
-	Name           string `json:"name"`
-	MonoidKind     string `json:"monoid_kind"`
-	Windowed       bool   `json:"windowed"`
-	WindowGranSec  int64  `json:"window_granularity_seconds,omitempty"`
-	WindowRetSec   int64  `json:"window_retention_seconds,omitempty"`
-	StoreType      string `json:"store_type"`
-	CacheType      string `json:"cache_type,omitempty"`
-	SourceType     string `json:"source_type,omitempty"`
+	Name          string `json:"name"`
+	MonoidKind    string `json:"monoid_kind"`
+	Windowed      bool   `json:"windowed"`
+	WindowGranSec int64  `json:"window_granularity_seconds,omitempty"`
+	WindowRetSec  int64  `json:"window_retention_seconds,omitempty"`
+	StoreType     string `json:"store_type"`
+	CacheType     string `json:"cache_type,omitempty"`
+	SourceType    string `json:"source_type,omitempty"`
 }
 
 // QueryFn is the read-side closure each registered pipeline supplies. Op is one of:
-//   "get"    — params: entity[, bucket]
-//   "window" — params: entity, duration_s
-//   "range"  — params: entity, start_unix, end_unix
+//
+//	"get"    — params: entity[, bucket]
+//	"window" — params: entity, duration_s
+//	"range"  — params: entity, start_unix, end_unix
 //
 // Returns the encoded value (e.g. int64 little-endian, HLL bytes) and a "present"
 // flag indicating whether data exists. Implementations should do any monoid merging
@@ -110,13 +111,13 @@ func (s *Server) Handler() http.Handler {
 
 // PipelineStatsJSON is the wire shape of a metrics snapshot.
 type PipelineStatsJSON struct {
-	Pipeline        string                  `json:"pipeline"`
-	EventsProcessed uint64                  `json:"events_processed"`
-	Errors          uint64                  `json:"errors"`
-	LastEventAt     string                  `json:"last_event_at,omitempty"`
-	LastErrorAt     string                  `json:"last_error_at,omitempty"`
-	LastError       string                  `json:"last_error,omitempty"`
-	Latencies       map[string]LatencyJSON  `json:"latencies"`
+	Pipeline        string                 `json:"pipeline"`
+	EventsProcessed uint64                 `json:"events_processed"`
+	Errors          uint64                 `json:"errors"`
+	LastEventAt     string                 `json:"last_event_at,omitempty"`
+	LastErrorAt     string                 `json:"last_error_at,omitempty"`
+	LastError       string                 `json:"last_error,omitempty"`
+	Latencies       map[string]LatencyJSON `json:"latencies"`
 }
 
 // LatencyJSON is the wire shape of a latency histogram.

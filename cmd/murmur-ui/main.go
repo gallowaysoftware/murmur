@@ -74,14 +74,14 @@ func main() {
 // screenshots.
 func registerDemoPipelines(srv *admin.Server) {
 	srv.Register(admin.PipelineInfo{
-		Name:                       "page_views",
-		MonoidKind:                 "sum",
-		Windowed:                   true,
-		WindowGranSec:   86400,
-		WindowRetSec:     90 * 86400,
-		StoreType:                  "dynamodb",
-		CacheType:                  "valkey",
-		SourceType:                 "kafka",
+		Name:          "page_views",
+		MonoidKind:    "sum",
+		Windowed:      true,
+		WindowGranSec: 86400,
+		WindowRetSec:  90 * 86400,
+		StoreType:     "dynamodb",
+		CacheType:     "valkey",
+		SourceType:    "kafka",
 	}, func(op string, params map[string]string) ([]byte, bool, error) {
 		// Demo "store" — always returns synthetic int64.
 		entity := params["entity"]
@@ -96,13 +96,13 @@ func registerDemoPipelines(srv *admin.Server) {
 	})
 
 	srv.Register(admin.PipelineInfo{
-		Name:       "unique_visitors",
-		MonoidKind: "hll",
-		Windowed:   true,
+		Name:          "unique_visitors",
+		MonoidKind:    "hll",
+		Windowed:      true,
 		WindowGranSec: 86400,
-		WindowRetSec:   30 * 86400,
-		StoreType:                "dynamodb",
-		SourceType:               "kafka",
+		WindowRetSec:  30 * 86400,
+		StoreType:     "dynamodb",
+		SourceType:    "kafka",
 	}, func(op string, params map[string]string) ([]byte, bool, error) {
 		entity := params["entity"]
 		if entity == "" {
@@ -117,11 +117,11 @@ func registerDemoPipelines(srv *admin.Server) {
 	})
 
 	srv.Register(admin.PipelineInfo{
-		Name:                     "top_products",
-		MonoidKind:               "topk",
-		Windowed:                 false,
-		StoreType:                "dynamodb",
-		SourceType:               "kinesis",
+		Name:       "top_products",
+		MonoidKind: "topk",
+		Windowed:   false,
+		StoreType:  "dynamodb",
+		SourceType: "kinesis",
 	}, func(op string, params map[string]string) ([]byte, bool, error) {
 		return []byte("\x00\x00\x00\x0a\x00\x00\x00\x00"), true, nil
 	})

@@ -42,10 +42,10 @@ type CounterBuilder[T any] struct {
 	window *windowed.Config
 }
 
-func (b *CounterBuilder[T]) From(s source.Source[T]) *CounterBuilder[T]        { b.src = s; return b }
-func (b *CounterBuilder[T]) KeyBy(fn func(T) string) *CounterBuilder[T]        { b.keyFn = fn; return b }
-func (b *CounterBuilder[T]) StoreIn(s state.Store[int64]) *CounterBuilder[T]   { b.store = s; return b }
-func (b *CounterBuilder[T]) Cache(c state.Cache[int64]) *CounterBuilder[T]     { b.cache = c; return b }
+func (b *CounterBuilder[T]) From(s source.Source[T]) *CounterBuilder[T]      { b.src = s; return b }
+func (b *CounterBuilder[T]) KeyBy(fn func(T) string) *CounterBuilder[T]      { b.keyFn = fn; return b }
+func (b *CounterBuilder[T]) StoreIn(s state.Store[int64]) *CounterBuilder[T] { b.store = s; return b }
+func (b *CounterBuilder[T]) Cache(c state.Cache[int64]) *CounterBuilder[T]   { b.cache = c; return b }
 
 // Daily configures daily tumbling buckets with the given retention.
 func (b *CounterBuilder[T]) Daily(retention time.Duration) *CounterBuilder[T] {
@@ -98,9 +98,15 @@ type UniqueCountBuilder[T any] struct {
 	window    *windowed.Config
 }
 
-func (b *UniqueCountBuilder[T]) From(s source.Source[T]) *UniqueCountBuilder[T]      { b.src = s; return b }
-func (b *UniqueCountBuilder[T]) KeyBy(fn func(T) string) *UniqueCountBuilder[T]      { b.keyFn = fn; return b }
-func (b *UniqueCountBuilder[T]) StoreIn(s state.Store[[]byte]) *UniqueCountBuilder[T] { b.store = s; return b }
+func (b *UniqueCountBuilder[T]) From(s source.Source[T]) *UniqueCountBuilder[T] { b.src = s; return b }
+func (b *UniqueCountBuilder[T]) KeyBy(fn func(T) string) *UniqueCountBuilder[T] {
+	b.keyFn = fn
+	return b
+}
+func (b *UniqueCountBuilder[T]) StoreIn(s state.Store[[]byte]) *UniqueCountBuilder[T] {
+	b.store = s
+	return b
+}
 
 func (b *UniqueCountBuilder[T]) Daily(retention time.Duration) *UniqueCountBuilder[T] {
 	w := windowed.Daily(retention)
@@ -146,8 +152,8 @@ type TopNBuilder[T any] struct {
 	window    *windowed.Config
 }
 
-func (b *TopNBuilder[T]) From(s source.Source[T]) *TopNBuilder[T]      { b.src = s; return b }
-func (b *TopNBuilder[T]) KeyBy(fn func(T) string) *TopNBuilder[T]      { b.keyFn = fn; return b }
+func (b *TopNBuilder[T]) From(s source.Source[T]) *TopNBuilder[T]       { b.src = s; return b }
+func (b *TopNBuilder[T]) KeyBy(fn func(T) string) *TopNBuilder[T]       { b.keyFn = fn; return b }
 func (b *TopNBuilder[T]) StoreIn(s state.Store[[]byte]) *TopNBuilder[T] { b.store = s; return b }
 
 func (b *TopNBuilder[T]) Daily(retention time.Duration) *TopNBuilder[T] {
