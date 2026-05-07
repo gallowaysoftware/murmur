@@ -65,7 +65,7 @@ func Defaults() Config {
 	}
 }
 
-// MergeOne is the canonical per-record processing entry point. It applies
+// MergeOne is the single-key per-record processing entry point. It applies
 // the keyFn / valueFn extractors, claims the EventID via Dedup (if
 // configured), runs the store and cache MergeUpdates, and retries on
 // transient failure with exponential backoff.
@@ -86,6 +86,11 @@ func Defaults() Config {
 //
 // MergeOne does NOT call Ack. Sources with an Ack callback should invoke
 // it themselves on a nil return.
+//
+// Implementation note: MergeOne is now a thin wrapper around MergeMany
+// — it extracts the single key + value and delegates. Use MergeMany
+// directly for hierarchical-rollup pipelines where one record contributes
+// to many keys.
 func MergeOne[T any, V any](
 	ctx context.Context,
 	cfg *Config,
@@ -99,23 +104,81 @@ func MergeOne[T any, V any](
 	cache state.Cache[V],
 	window *windowed.Config,
 ) error {
+	return MergeMany(ctx, cfg, pipelineName, eventID, eventTime,
+		[]string{keyFn(value)}, valueFn(value), store, cache, window)
+}
+
+// MergeMany is the multi-key entry point. It claims the EventID via Dedup
+// (once, regardless of how many keys), then for each key runs the store
+// and cache MergeUpdate with the supplied delta. Used by hierarchical-
+// rollup pipelines where one event contributes to many aggregation keys
+// (e.g. "likes for this post", "likes for this post per country", "global
+// likes" — three keys, one delta).
+//
+// Failure semantics:
+//
+//   - All-or-nothing per record (with respect to dead-lettering): if ANY
+//     key's merge fails after retries, MergeMany returns an error. Earlier
+//     keys that succeeded keep their writes — there is no rollback. The
+//     idempotent-merge contract (with Dedup) ensures a redelivery folds
+//     correctly: the dedup row prevents the keys-that-succeeded from
+//     double-counting on retry, while the keys-that-failed get another
+//     attempt.
+//
+// Pass a one-element keys slice for the single-key case; that's exactly
+// what MergeOne does internally. The retry/backoff loop is per-key —
+// each key gets its own MaxAttempts budget.
+func MergeMany[V any](
+	ctx context.Context,
+	cfg *Config,
+	pipelineName string,
+	eventID string,
+	eventTime time.Time,
+	keys []string,
+	delta V,
+	store state.Store[V],
+	cache state.Cache[V],
+	window *windowed.Config,
+) error {
+	if len(keys) == 0 {
+		// No-op: caller produced no keys, nothing to merge. Don't claim
+		// dedup either — there's nothing to dedupe against.
+		return nil
+	}
+
 	if cfg.Dedup != nil && eventID != "" {
 		first, err := cfg.Dedup.MarkSeen(ctx, eventID)
 		if err != nil {
-			// Dedup backend transient failure: surface as an error but fall
-			// through to normal processing. Silently dropping would
-			// double-count when the dedup table comes back; failing closed
-			// would stall the pipeline on dedup-table outage. Same policy
-			// as the streaming runtime.
 			cfg.Recorder.RecordError(pipelineName,
 				fmt.Errorf("dedup MarkSeen %q: %w", eventID, err))
 		} else if !first {
-			// Already processed on a prior delivery; nothing to do.
 			cfg.Recorder.RecordEvent(pipelineName + ":dedup_skip")
 			return nil
 		}
 	}
 
+	for _, entity := range keys {
+		if err := mergeKeyWithRetry(ctx, cfg, pipelineName, eventID, eventTime, entity, delta, store, cache, window); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mergeKeyWithRetry runs one (key, delta) merge with retries + backoff.
+// Internal — called by MergeMany once per emitted key.
+func mergeKeyWithRetry[V any](
+	ctx context.Context,
+	cfg *Config,
+	pipelineName string,
+	eventID string,
+	eventTime time.Time,
+	entity string,
+	delta V,
+	store state.Store[V],
+	cache state.Cache[V],
+	window *windowed.Config,
+) error {
 	var lastErr error
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -124,7 +187,7 @@ func MergeOne[T any, V any](
 			}
 			cfg.Recorder.RecordEvent(pipelineName + ":retry")
 		}
-		err := mergeOneAttempt(ctx, cfg.Recorder, pipelineName, eventTime, value, keyFn, valueFn, store, cache, window)
+		err := mergeOneAttempt(ctx, cfg.Recorder, pipelineName, eventTime, entity, delta, store, cache, window)
 		if err == nil {
 			return nil
 		}
@@ -134,32 +197,28 @@ func MergeOne[T any, V any](
 		lastErr = err
 	}
 
-	wrapped := fmt.Errorf("pipeline %q event %q failed after %d attempts: %w",
-		pipelineName, eventID, cfg.MaxAttempts, lastErr)
+	wrapped := fmt.Errorf("pipeline %q event %q key %q failed after %d attempts: %w",
+		pipelineName, eventID, entity, cfg.MaxAttempts, lastErr)
 	cfg.Recorder.RecordError(pipelineName, wrapped)
 	cfg.Recorder.RecordEvent(pipelineName + ":dead_letter")
 	return wrapped
 }
 
-// mergeOneAttempt runs one merge attempt without retries. Internal — used
-// by MergeOne. Cache failures are NOT propagated as errors (the cache is a
-// repopulatable accelerator); they're surfaced via RecordError and the
-// store-side outcome is what the caller sees.
-func mergeOneAttempt[T any, V any](
+// mergeOneAttempt runs one merge attempt for a single (entity, delta) pair
+// without retries. Cache failures are NOT propagated as errors (the cache
+// is a repopulatable accelerator); they're surfaced via RecordError and
+// the store-side outcome is what the caller sees.
+func mergeOneAttempt[V any](
 	ctx context.Context,
 	rec metrics.Recorder,
 	name string,
 	eventTime time.Time,
-	value T,
-	keyFn func(T) string,
-	valueFn func(T) V,
+	entity string,
+	delta V,
 	store state.Store[V],
 	cache state.Cache[V],
 	window *windowed.Config,
 ) error {
-	entity := keyFn(value)
-	delta := valueFn(value)
-
 	sk := state.Key{Entity: entity}
 	var ttl time.Duration
 	if window != nil {

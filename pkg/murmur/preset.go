@@ -32,11 +32,12 @@ func Counter[T any](name string) *CounterBuilder[T] {
 	return &CounterBuilder[T]{name: name}
 }
 
-// CounterBuilder builds a Counter pipeline. Required: From, KeyBy, StoreIn.
-// Optional: Daily/Hourly windowing, Cache.
+// CounterBuilder builds a Counter pipeline. Required: From, KeyBy or
+// KeyByMany, StoreIn. Optional: Daily/Hourly windowing, Cache.
 type CounterBuilder[T any] struct {
 	name   string
 	keyFn  func(T) string
+	keysFn func(T) []string
 	src    source.Source[T]
 	store  state.Store[int64]
 	cache  state.Cache[int64]
@@ -53,9 +54,30 @@ func (b *CounterBuilder[T]) From(s source.Source[T]) *CounterBuilder[T] {
 
 // KeyBy sets the function that derives the aggregation key from each event.
 // The returned string is the entity used in the state store and any queries.
-// Required.
+// Required (or use KeyByMany for hierarchical rollups).
 func (b *CounterBuilder[T]) KeyBy(fn func(T) string) *CounterBuilder[T] {
 	b.keyFn = fn
+	return b
+}
+
+// KeyByMany sets a multi-key extractor — each event contributes its count to
+// every key returned by fn. Use for hierarchical rollups where one event
+// counts against many aggregation keys at once:
+//
+//	murmur.Counter[Like]("likes").
+//	    KeyByMany(func(e Like) []string {
+//	        return []string{
+//	            "post:" + e.PostID,
+//	            "post:" + e.PostID + "|country:" + e.Country,
+//	            "country:" + e.Country,
+//	            "global",
+//	        }
+//	    })
+//
+// Mutually exclusive with KeyBy. Dedup applies once per event regardless of
+// how many keys are emitted.
+func (b *CounterBuilder[T]) KeyByMany(fn func(T) []string) *CounterBuilder[T] {
+	b.keysFn = fn
 	return b
 }
 
@@ -94,9 +116,13 @@ func (b *CounterBuilder[T]) Hourly(retention time.Duration) *CounterBuilder[T] {
 // streaming.Run / bootstrap.Run / replay.Run; Build itself does not execute it.
 func (b *CounterBuilder[T]) Build() *pipeline.Pipeline[T, int64] {
 	p := pipeline.NewPipeline[T, int64](b.name).
-		Key(b.keyFn).
 		Value(func(T) int64 { return 1 }).
 		StoreIn(b.store)
+	if b.keysFn != nil {
+		p = p.KeyByMany(b.keysFn)
+	} else if b.keyFn != nil {
+		p = p.Key(b.keyFn)
+	}
 	if b.window != nil {
 		p = p.Aggregate(core.Sum[int64](), *b.window)
 	} else {

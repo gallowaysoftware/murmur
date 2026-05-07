@@ -34,6 +34,7 @@ type Pipeline[T any, V any] struct {
 	name    string
 	src     source.Source[T]
 	keyFn   func(T) string
+	keysFn  func(T) []string // when set, takes precedence over keyFn (multi-key fanout)
 	valueFn func(T) V
 	mon     monoid.Monoid[V]
 	window  *windowed.Config
@@ -63,8 +64,36 @@ func (p *Pipeline[T, V]) From(s source.Source[T]) *Pipeline[T, V] {
 
 // Key sets the function that extracts the aggregation key from an event. Composite keys
 // should be encoded into a single string by the caller (e.g. "<page>|<region>").
+//
+// Mutually exclusive with KeyByMany. If both are set, KeyByMany takes precedence — Key
+// is ignored.
 func (p *Pipeline[T, V]) Key(fn func(T) string) *Pipeline[T, V] {
 	p.keyFn = fn
+	return p
+}
+
+// KeyByMany sets a multi-key extractor: each event contributes its value to every
+// key returned by fn. Used for hierarchical rollups — one "like" event might
+// contribute to:
+//
+//	[]string{
+//	    "post:" + e.PostID,                                        // per-post total
+//	    "post:" + e.PostID + "|country:" + e.Country,              // per-post-per-country
+//	    "country:" + e.Country,                                    // per-country total
+//	    "global",                                                  // global total
+//	}
+//
+// Each emitted key triggers an independent state.MergeUpdate against the same store,
+// so an N-level hierarchy costs N store writes per event. Cost-balance against your
+// query patterns: explicit rollups are cheap to query (one read per level) but
+// expensive to write; query-time rollups are the inverse.
+//
+// Dedup is applied ONCE per event (against the EventID); on a duplicate, all N
+// per-key merges are skipped together.
+//
+// Mutually exclusive with Key.
+func (p *Pipeline[T, V]) KeyByMany(fn func(T) []string) *Pipeline[T, V] {
+	p.keysFn = fn
 	return p
 }
 
@@ -118,12 +147,12 @@ var (
 )
 
 // Build validates the pipeline definition for fields required by every execution mode:
-// key extractor, value extractor, monoid, state store. The source is mode-specific
-// (Live needs source.Source; Bootstrap needs snapshot.Source) and is checked by
-// the runtime that consumes the pipeline.
+// key extractor (Key OR KeyByMany), value extractor, monoid, state store. The source
+// is mode-specific (Live needs source.Source; Bootstrap needs snapshot.Source) and is
+// checked by the runtime that consumes the pipeline.
 func (p *Pipeline[T, V]) Build() error {
 	switch {
-	case p.keyFn == nil:
+	case p.keyFn == nil && p.keysFn == nil:
 		return ErrMissingKeyFn
 	case p.valueFn == nil:
 		return ErrMissingValueFn
@@ -141,8 +170,26 @@ func (p *Pipeline[T, V]) Name() string { return p.name }
 // Source returns the configured source (nil before From).
 func (p *Pipeline[T, V]) Source() source.Source[T] { return p.src }
 
-// KeyFn returns the configured key extractor (nil before Key).
+// KeyFn returns the configured single-key extractor (nil if KeyByMany was used
+// instead, or if no extractor was set).
 func (p *Pipeline[T, V]) KeyFn() func(T) string { return p.keyFn }
+
+// KeysFn returns a function that produces all keys an event should contribute to.
+// If KeyByMany was set, returns it directly; otherwise wraps the single-key Key
+// extractor in a 1-element slice. Returns nil if neither was set.
+//
+// Runtimes (streaming.Run, lambda handlers) should call KeysFn rather than KeyFn
+// so multi-key fanout works transparently.
+func (p *Pipeline[T, V]) KeysFn() func(T) []string {
+	if p.keysFn != nil {
+		return p.keysFn
+	}
+	if p.keyFn != nil {
+		fn := p.keyFn
+		return func(t T) []string { return []string{fn(t)} }
+	}
+	return nil
+}
 
 // ValueFn returns the configured value extractor (nil before Value).
 func (p *Pipeline[T, V]) ValueFn() func(T) V { return p.valueFn }

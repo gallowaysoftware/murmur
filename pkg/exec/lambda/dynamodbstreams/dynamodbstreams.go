@@ -200,7 +200,7 @@ func NewHandler[T any, V any](
 	}
 
 	name := p.Name()
-	keyFn := p.KeyFn()
+	keysFn := p.KeysFn()
 	valueFn := p.ValueFn()
 	store := p.Store()
 	cacheStore := p.CacheStore()
@@ -228,8 +228,8 @@ func NewHandler[T any, V any](
 				eventTime = cfg.now()
 			}
 
-			if err := processor.MergeOne(ctx, &cfg.Config, name, rec.EventID, eventTime,
-				value, keyFn, valueFn, store, cacheStore, window); err != nil {
+			if err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
+				keysFn(value), valueFn(value), store, cacheStore, window); err != nil {
 				resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
 					ItemIdentifier: rec.EventID,
 				})

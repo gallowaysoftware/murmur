@@ -123,7 +123,7 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 
 	name := p.Name()
 	src := p.Source()
-	keyFn := p.KeyFn()
+	keysFn := p.KeysFn() // multi-key aware; falls back to wrapping KeyFn in a 1-element slice
 	valueFn := p.ValueFn()
 	store := p.Store()
 	cache := p.CacheStore()
@@ -145,13 +145,13 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 		case <-ctx.Done():
 			return nil
 		case err := <-srcDone:
-			drainAndProcess(ctx, name, records, keyFn, valueFn, store, cache, window, &cfg)
+			drainAndProcess(ctx, name, records, keysFn, valueFn, store, cache, window, &cfg)
 			return err
 		case rec, ok := <-records:
 			if !ok {
 				return <-srcDone
 			}
-			processWithRetry(ctx, name, rec, keyFn, valueFn, store, cache, window, &cfg)
+			processWithRetry(ctx, name, rec, keysFn, valueFn, store, cache, window, &cfg)
 		}
 	}
 }
@@ -160,7 +160,7 @@ func drainAndProcess[T any, V any](
 	ctx context.Context,
 	name string,
 	records <-chan source.Record[T],
-	keyFn func(T) string,
+	keysFn func(T) []string,
 	valueFn func(T) V,
 	store state.Store[V],
 	cache state.Cache[V],
@@ -177,20 +177,20 @@ func drainAndProcess[T any, V any](
 			if !ok {
 				return
 			}
-			processWithRetry(ctx, name, r, keyFn, valueFn, store, cache, window, cfg)
+			processWithRetry(ctx, name, r, keysFn, valueFn, store, cache, window, cfg)
 		}
 	}
 }
 
-// processWithRetry delegates per-record processing to processor.MergeOne
-// (retries, dedup, metrics) and adds the streaming-specific Ack-and-skip
-// poison-record handling on top. Returns no error so the caller's loop is
-// not coupled to this record's outcome.
+// processWithRetry delegates per-record processing to processor.MergeMany
+// (retries, dedup, metrics, multi-key fanout) and adds the streaming-specific
+// Ack-and-skip poison-record handling on top. Returns no error so the caller's
+// loop is not coupled to this record's outcome.
 func processWithRetry[T any, V any](
 	ctx context.Context,
 	name string,
 	rec source.Record[T],
-	keyFn func(T) string,
+	keysFn func(T) []string,
 	valueFn func(T) V,
 	store state.Store[V],
 	cache state.Cache[V],
@@ -201,8 +201,8 @@ func processWithRetry[T any, V any](
 	if eventTime.IsZero() {
 		eventTime = time.Now()
 	}
-	err := processor.MergeOne(ctx, &cfg.Config, name, rec.EventID, eventTime,
-		rec.Value, keyFn, valueFn, store, cache, window)
+	err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
+		keysFn(rec.Value), valueFn(rec.Value), store, cache, window)
 	if err != nil {
 		// Either context cancellation (just return; the runtime is exiting
 		// anyway) or retry exhaustion. processor.MergeOne already recorded

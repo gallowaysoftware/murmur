@@ -264,3 +264,90 @@ func TestRetry_RespectsContextCancel(t *testing.T) {
 		t.Errorf("ctx-cancel didn't preempt backoff; elapsed=%v", elapsed)
 	}
 }
+
+// likeEvent carries the data a hierarchical-rollup test needs: the post,
+// the country, and (implicitly) one "like" per event.
+type likeEvent struct {
+	postID  string
+	country string
+}
+
+// likeSource emits a fixed batch of likeEvents and closes.
+type likeSource struct {
+	events []likeEvent
+}
+
+func (s *likeSource) Read(_ context.Context, out chan<- source.Record[likeEvent]) error {
+	for i, e := range s.events {
+		out <- source.Record[likeEvent]{
+			EventID: fakeEventID(i),
+			Value:   e,
+			Ack:     func() error { return nil },
+		}
+	}
+	return nil
+}
+func (*likeSource) Name() string { return "likes" }
+func (*likeSource) Close() error { return nil }
+
+func TestKeyByMany_HierarchicalRollups_FanOutIntoEveryLevel(t *testing.T) {
+	// 5 likes on post-A: 3 from US, 1 from CA, 1 from UK.
+	// 2 likes on post-B: 1 from US, 1 from UK.
+	events := []likeEvent{
+		{postID: "post-A", country: "US"},
+		{postID: "post-A", country: "US"},
+		{postID: "post-A", country: "US"},
+		{postID: "post-A", country: "CA"},
+		{postID: "post-A", country: "UK"},
+		{postID: "post-B", country: "US"},
+		{postID: "post-B", country: "UK"},
+	}
+	src := &likeSource{events: events}
+	store := newFlakyStore(0) // fake store, no flakiness
+
+	// 4-level hierarchy per like: post / post×country / country / global.
+	pipe := pipeline.NewPipeline[likeEvent, int64]("likes").
+		From(src).
+		KeyByMany(func(e likeEvent) []string {
+			return []string{
+				"post:" + e.postID,
+				"post:" + e.postID + "|country:" + e.country,
+				"country:" + e.country,
+				"global",
+			}
+		}).
+		Value(func(likeEvent) int64 { return 1 }).
+		Aggregate(core.Sum[int64]()).
+		StoreIn(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, pipe); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := map[string]int64{
+		"post:post-A":            5, // 5 likes on post-A
+		"post:post-A|country:US": 3,
+		"post:post-A|country:CA": 1,
+		"post:post-A|country:UK": 1,
+		"post:post-B":            2,
+		"post:post-B|country:US": 1,
+		"post:post-B|country:UK": 1,
+		"country:US":             4,
+		"country:CA":             1,
+		"country:UK":             2,
+		"global":                 7, // total likes
+	}
+	for entity, expected := range want {
+		got, ok := store.mu[state.Key{Entity: entity}]
+		if !ok {
+			t.Errorf("entity %q: missing from store", entity)
+			continue
+		}
+		if got != expected {
+			t.Errorf("entity %q: got %d, want %d", entity, got, expected)
+		}
+	}
+}
