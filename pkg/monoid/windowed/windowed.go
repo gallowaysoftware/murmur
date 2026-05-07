@@ -53,8 +53,20 @@ func (c Config) BucketRange(start, end time.Time) (lo, hi int64) {
 }
 
 // LastN returns the bucket-ID range covering the most recent d duration ending at now.
+// The number of buckets returned is ceil(d / Granularity); the upper bound is the bucket
+// containing now and the range extends backward that many buckets. So for daily
+// granularity, "last 7 days" returns 7 buckets (today plus 6 prior), not 8.
 func (c Config) LastN(now time.Time, d time.Duration) (lo, hi int64) {
-	return c.BucketID(now.Add(-d)), c.BucketID(now)
+	if c.Granularity <= 0 {
+		return 0, 0
+	}
+	hi = c.BucketID(now)
+	n := int64((d + c.Granularity - 1) / c.Granularity) // ceil
+	if n < 1 {
+		n = 1
+	}
+	lo = hi - n + 1
+	return lo, hi
 }
 
 // Wrapped pairs a monoid with a windowing config. The Pipeline DSL uses this to drive
