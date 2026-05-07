@@ -1,0 +1,29 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local dev
+.env
+.envrc
+*.local.yml
+*.local.yaml
