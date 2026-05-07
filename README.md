@@ -2,56 +2,99 @@
 
 Lambda-architecture-aware streaming aggregation framework for Go.
 
-Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/twitter/summingbird), built for Go-shop AWS deployments in 2026. One pipeline definition, three execution modes (live stream, snapshot bootstrap, archive replay), monoid-typed state in DynamoDB with optional Valkey acceleration, and an auto-generated gRPC query layer that knows how to merge across windows.
+Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/twitter/summingbird), built for Go-shop AWS deployments in 2026. One pipeline definition, three execution modes (live stream, snapshot bootstrap, archive replay), monoid-typed state in DynamoDB with optional Valkey acceleration, and a generic gRPC query layer that merges across windows.
 
 ## Status
 
-Phase 1 in progress. The core architecture is built and exercised end-to-end against a docker-compose stack. Not yet hardened for production, but the shape is real.
+**Pre-1.0, experimental.** The architecture is built and exercised end-to-end against a docker-compose stack. Several rough edges are tracked openly in [`STABILITY.md`](STABILITY.md) — most notably error-handling gaps and the gRPC `Get`/`GetWindow`/etc. surface being a generic adapter today rather than per-pipeline codegen.
 
 | Feature | Status |
 |---|---|
 | Pipeline DSL with structural monoids | ✅ |
 | Live mode: Kafka source ([franz-go](https://github.com/twmb/franz-go)) | ✅ |
-| Live mode: Kinesis source (single-instance) | ✅ |
+| Live mode: Kinesis source | ⚠️ single-instance only, no checkpointing — KCL v3 multi-instance is on the roadmap |
 | Bootstrap mode: Mongo SnapshotSource + handoff token | ✅ |
 | Replay mode: S3 / MinIO JSON-Lines | ✅ |
 | State: DynamoDB Int64SumStore (atomic ADD) + BytesStore (CAS) | ✅ |
 | Cache: Valkey Int64Cache (write-through, INCRBY) | ✅ |
-| Monoids: Sum, Count, Min, Max, First, Last, Set | ✅ |
+| Monoids: Sum, Count, First, Last, Set | ✅ |
+| Monoids: Min, Max | ⚠️ identity = zero-value, only correct when 0 is not a legal input — fix tracked |
 | Sketches: HyperLogLog, TopK (Misra-Gries), Bloom | ✅ |
 | Windowed aggregations + sliding-window queries | ✅ |
-| gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetRange`) | ✅ |
+| Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetRange`) | ✅ — typed-per-pipeline codegen is on the roadmap |
 | Atomic state-table swap (alias version pointer) | ✅ |
-| Spark Connect batch executor (user-supplied SQL) | ✅ validated locally against apache/spark:4.0.1 |
-| Lambda mode (batch view ⊕ realtime delta merge) | ✅ pkg/query.LambdaQuery |
-| Decayed-value monoid (exponential decay) | ✅ pkg/monoid/compose.DecayedSum |
+| Spark Connect batch executor (user-supplied SQL) | ✅ validated locally against `apache/spark:4.0.1` |
+| Lambda mode (batch view ⊕ realtime delta merge) | ✅ via [`pkg/query.LambdaQuery`](pkg/query/lambda.go) |
+| Decayed-value monoid (exponential decay) | ✅ via [`pkg/monoid/compose.DecayedSum`](pkg/monoid/compose/decayed.go) |
 | Minute / hour / daily windowed buckets | ✅ |
-| Web UI (dark mode, pipeline DAG, live metrics, query console) | ✅ cmd/murmur-ui |
-| Admin REST API (/api/pipelines, /api/.../metrics, ...) | ✅ pkg/admin |
-| Metrics recorder hook in streaming runtime | ✅ pkg/metrics + streaming.WithMetrics |
-| DX facade (Counter / UniqueCount / TopN presets) | ✅ pkg/murmur |
+| Web UI (dark mode, pipeline DAG, live metrics, query console) | ✅ [`cmd/murmur-ui`](cmd/murmur-ui) |
+| Admin REST API (`/api/pipelines`, `/api/.../metrics`, …) | ✅ [`pkg/admin`](pkg/admin) |
+| Metrics recorder hook in streaming runtime | ✅ [`pkg/metrics`](pkg/metrics) + `streaming.WithMetrics` |
+| DX facade (`Counter` / `UniqueCount` / `TopN` presets) | ✅ [`pkg/murmur`](pkg/murmur) |
 | Terraform `pipeline-counter` module | ✅ |
 | Worked example: `page-view-counters` (worker + query binaries) | ✅ |
-| Kinesis source via KCL v3 (multi-instance, lease management) | Phase 2 |
-| Lambda mode (separate batch + realtime merge at query time) | Phase 2 |
-| gRPC codegen per pipeline (typed responses) | Phase 2 |
-| Valkey-native HLL/Bloom acceleration | Phase 2 |
+| Per-pipeline gRPC codegen (typed responses) | 🛣 roadmap |
+| Valkey-native HLL/Bloom acceleration | 🛣 roadmap |
+| KCL-v3 Kinesis source | 🛣 roadmap |
+
+## Limitations to read before adopting
+
+- **`replace` directive in `go.mod`.** Murmur depends on a personal fork of `apache/spark-connect-go` for the batch executor. Anyone importing `pkg/exec/batch/sparkconnect` must mirror the `replace` directive in their own `go.mod`. Tracked: upstream the patches or split that package out.
+- **At-least-once, with caveats.** The streaming runtime acks Kafka records after writing to DynamoDB, but there is no per-EventID dedup yet — a worker that dies between the DDB write and the ack will replay and double-count. Make pipelines idempotent at the monoid layer or pin to exactly-once-tolerant aggregations.
+- **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
+- **Min / Max monoids violate the identity law.** `Combine(Identity, -5) == 0`. Use only when zero is not a legal input, or wait for the `Set`-sentinel fix.
+- **CORS is permissive on the admin server.** `pkg/admin` ships with `Access-Control-Allow-Origin: *`. Do not expose the admin API to the public internet today; keep it on a private subnet behind your VPC.
+- **No CI yet.** GitHub Actions / Dependabot / `golangci-lint` are tracked tasks, not yet merged.
 
 ## Quick taste
 
 ```go
-pipeline := pipeline.NewPipeline[PageView, int64]("page_views").
-    From(kafka.NewSource(...)).
-    Key(func(e PageView) string { return e.PageID }).
-    Value(func(PageView) int64 { return 1 }).
-    Aggregate(core.Sum[int64](), windowed.Daily(90 * 24 * time.Hour)).
-    StoreIn(dynamodb.NewInt64SumStore(ddbClient, "page_views")).
-    Cache(valkey.NewInt64Cache(...))
+import (
+    "context"
+    "time"
 
-streaming.Run(ctx, pipeline)
+    "github.com/gallowaysoftware/murmur/pkg/murmur"
+    mkafka "github.com/gallowaysoftware/murmur/pkg/source/kafka"
+    mddb "github.com/gallowaysoftware/murmur/pkg/state/dynamodb"
+)
+
+type PageView struct {
+    PageID string `json:"page_id"`
+    UserID string `json:"user_id"`
+}
+
+func main() {
+    src, err := mkafka.NewSource(mkafka.Config[PageView]{
+        Brokers:       []string{"localhost:9092"},
+        Topic:         "page_views",
+        ConsumerGroup: "page_views_worker",
+        Decode:        mkafka.JSONDecoder[PageView](),
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer src.Close()
+
+    store := mddb.NewInt64SumStore(ddbClient, "page_views")
+    defer store.Close()
+
+    pipe := murmur.Counter[PageView]("page_views").
+        From(src).
+        KeyBy(func(e PageView) string { return e.PageID }).
+        Daily(90 * 24 * time.Hour).
+        StoreIn(store).
+        Build()
+
+    ctx := context.Background()
+    if rc := murmur.RunStreamingWorker(ctx, pipe); rc != 0 {
+        panic("worker exited with non-zero code")
+    }
+}
 ```
 
-The auto-generated gRPC service exposes `Get(entity)`, `GetWindow(entity, duration)`, `GetMany(entities)`, and `GetRange(entity, start, end)` — see [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto).
+For the runnable version, see [`examples/page-view-counters/`](examples/page-view-counters/).
+
+The generic gRPC service exposes `Get(entity)`, `GetWindow(entity, duration)`, `GetMany(entities)`, and `GetRange(entity, start, end)` — wire it up with [`pkg/query/grpc.NewServer`](pkg/query/grpc/server.go); proto definitions in [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto). Per-pipeline typed responses (today everything is `bytes`) are tracked on the roadmap.
 
 ## Architecture
 
@@ -71,22 +114,31 @@ The full design is documented in [`doc/architecture.md`](doc/architecture.md). T
 - **Apache Flink** (incl. Amazon Managed Service for Apache Flink) is mature but JVM-only. JVM tax for Go shops, and no auto-generated query layer.
 - **Goka** is Kafka-only, no batch story, no query layer, small community.
 
-Murmur fills the gap with: unified Go DSL, structural monoids that dispatch to multiple backends, three execution modes, time-windowed aggregations, and an auto-generated gRPC service that does the merge.
+Murmur fills the gap with: unified Go DSL, structural monoids that dispatch to multiple backends, three execution modes, time-windowed aggregations, and a generic gRPC service that does the merge.
 
 ## Run locally
 
 ```sh
-docker compose up -d kafka dynamodb-local valkey mongo minio
+docker compose up -d kafka dynamodb-local valkey mongo minio spark-connect
 
-# initiate the mongo replica set (needed for snapshot resume tokens)
+# Mongo Change Streams require a replica set — one-time init on first start:
 docker exec murmur-mongo mongosh --quiet --eval \
   "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})"
 
-# run all unit + integration tests
+# Create the dynamodb-local table the page-view example reads (mirrors what the
+# Terraform module would do in production):
+aws --endpoint-url=http://localhost:8000 dynamodb create-table \
+    --table-name page_views \
+    --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=N \
+    --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST
+
+# All unit + integration tests:
 DDB_LOCAL_ENDPOINT=http://localhost:8000 \
 KAFKA_BROKERS=localhost:9092 \
 VALKEY_ADDRESS=localhost:6379 \
 S3_ENDPOINT=http://localhost:9000 \
+SPARK_CONNECT_REMOTE=sc://localhost:15002 \
 MONGO_URI="mongodb://localhost:27017/?replicaSet=rs0&directConnection=true" \
 go test ./...
 ```
@@ -98,10 +150,20 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 - Windowed counters with `Last1/2/3/7/10/30Days` queries (`windowed_test.go`)
 - Mongo bootstrap with Change Stream resume token (`mongo_bootstrap_test.go`)
 - S3 replay into a shadow table (`s3_replay_test.go`)
+- Spark Connect batch SUM aggregation → DDB (`spark_connect_test.go`)
 
 ## Worked example
 
 See [`examples/page-view-counters/`](examples/page-view-counters/) for a runnable two-binary pipeline (`cmd/worker` + `cmd/query`), a Dockerfile producing a multi-binary distroless image, and the Terraform deployment via [`deploy/terraform/modules/pipeline-counter/`](deploy/terraform/modules/pipeline-counter/).
+
+## Web UI
+
+```sh
+go run ./cmd/murmur-ui --demo --addr :8080
+# open http://localhost:8080
+```
+
+`--demo` registers three synthetic pipelines and ticks fake metrics so the dashboard, DAG, and query console have data to show. Real workers register via [`pkg/admin.Server.Register`](pkg/admin/server.go) — see the package doc for the contract.
 
 ## License
 
