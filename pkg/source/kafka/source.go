@@ -42,6 +42,15 @@ type Config[T any] struct {
 	// or a metrics.Recorder.RecordError to surface poison pills.
 	OnDecodeError func(raw []byte, partition int32, offset int64, err error)
 
+	// EventID, if non-nil, is called on every decoded record to compute the
+	// at-least-once dedup key. The default is "<topic>:<partition>:<offset>"
+	// — globally unique within the cluster's history but only deduplicates
+	// Kafka-side redeliveries (rebalance after a crash before commit). For
+	// CDC pipelines where the same logical change can be produced twice
+	// (Debezium retransmits, dual-write fixers), set this to extract the
+	// upstream identifier (e.g. Mongo `_id`, Postgres LSN) from the record.
+	EventID func(T) string
+
 	// OnFetchError, if non-nil, is called for partition-level fetch errors that the
 	// client is going to retry internally (broker bounce, leader change, etc).
 	// Default: drop. Wire to logging / metrics to surface persistent failures.
@@ -70,6 +79,7 @@ type Source[T any] struct {
 	client        *kgo.Client
 	topic         string
 	decode        Decoder[T]
+	eventID       func(T) string
 	onDecodeError func(raw []byte, partition int32, offset int64, err error)
 	onFetchError  func(topic string, partition int32, err error)
 }
@@ -105,6 +115,7 @@ func NewSource[T any](cfg Config[T]) (*Source[T], error) {
 		client:        cl,
 		topic:         cfg.Topic,
 		decode:        cfg.Decode,
+		eventID:       cfg.EventID,
 		onDecodeError: cfg.OnDecodeError,
 		onFetchError:  cfg.OnFetchError,
 	}, nil
@@ -147,8 +158,14 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 				s.client.MarkCommitRecords(rec)
 				continue
 			}
+			eventID := fmt.Sprintf("%s:%d:%d", rec.Topic, rec.Partition, rec.Offset)
+			if s.eventID != nil {
+				if id := s.eventID(value); id != "" {
+					eventID = id
+				}
+			}
 			r := source.Record[T]{
-				EventID:      fmt.Sprintf("%s:%d:%d", rec.Topic, rec.Partition, rec.Offset),
+				EventID:      eventID,
 				EventTime:    rec.Timestamp,
 				PartitionKey: string(rec.Key),
 				Value:        value,

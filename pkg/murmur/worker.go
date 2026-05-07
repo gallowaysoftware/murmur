@@ -12,15 +12,16 @@ import (
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 )
 
-// RunStreamingWorker is the boilerplate-eating entry point for a streaming worker
-// binary. It wires SIGINT/SIGTERM to the runtime context, runs streaming.Run, and
-// returns the exit code (0 for clean shutdown, 1 for runtime error, 2 for invalid
-// pipeline). Suitable for `os.Exit(murmur.RunStreamingWorker(ctx, pipe))` in main.
+// RunStreamingWorker is the boilerplate-eating entry point for a streaming
+// worker binary. It wires SIGINT/SIGTERM to the runtime context, runs
+// streaming.Run with any RunOptions you pass, and returns the exit code
+// (0 for clean shutdown, 1 for runtime error, 2 for invalid pipeline).
+// Suitable for `os.Exit(murmur.RunStreamingWorker(ctx, pipe, opts...))`.
 //
-// Use this when you have a single pipeline per binary and want graceful-shutdown
-// semantics. For multi-pipeline workers or custom error handling, drive
-// streaming.Run yourself.
-func RunStreamingWorker[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) int {
+// Use this when you have a single pipeline per binary and want
+// graceful-shutdown semantics. For multi-pipeline workers or custom error
+// handling, drive streaming.Run yourself.
+func RunStreamingWorker[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...streaming.RunOption) int {
 	logger := slog.Default()
 
 	if p == nil {
@@ -36,7 +37,7 @@ func RunStreamingWorker[T any, V any](ctx context.Context, p *pipeline.Pipeline[
 	defer cancel()
 
 	logger.Info("streaming worker starting", "pipeline", p.Name())
-	if err := streaming.Run(runCtx, p); err != nil && !errors.Is(err, context.Canceled) {
+	if err := streaming.Run(runCtx, p, opts...); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("streaming runtime returned error", "pipeline", p.Name(), "err", err)
 		return 1
 	}
