@@ -34,6 +34,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/twmb/franz-go v1.21.1 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
+	github.com/valkey-io/valkey-go v1.0.74 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
