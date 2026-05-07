@@ -45,10 +45,13 @@ edges callers should plan around.
    associativity and identity for every built-in monoid in CI; users adding
    custom monoids can drop into the same harness.
 
-3. **At-least-once dedup is not implemented.** `Record.EventID` is computed but
-   never used. Workers that crash between DDB write and Kafka ack will replay
-   and double-count. Make pipelines idempotent at the monoid layer (Sum is not;
-   Set is) until per-EventID dedup lands.
+3. ~~**At-least-once dedup is not implemented.**~~ Fixed: `state.Deduper`
+   contract + `pkg/state/dynamodb.NewDeduper` (DDB-backed, atomic
+   PutItem-with-condition claim, native TTL for eviction). Wire it into the
+   streaming runtime via `streaming.WithDedup(d)`; duplicates are Ack'd and
+   counted under `<pipeline>:dedup_skip` rather than re-applied to the
+   monoid. A 16-way race test against dynamodb-local confirms exactly one
+   MarkSeen wins.
 
 4. **Min/Max under empty/missing buckets.** `windowed.MergeBuckets` seeds the
    fold with `m.Identity()`, so a windowed `Min` over a partially-empty range

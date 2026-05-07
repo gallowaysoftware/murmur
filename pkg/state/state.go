@@ -54,3 +54,26 @@ type Cache[V any] interface {
 	// node restart. Implementations may stream from Store and insert in batches.
 	Repopulate(ctx context.Context, src Store[V], keys []Key) error
 }
+
+// Deduper is the at-least-once dedup contract. The streaming runtime calls
+// MarkSeen with each Source.Record's EventID before applying the monoid
+// Combine; on a duplicate (worker crashed mid-write, source replays the
+// record) MarkSeen returns firstSeen=false and the runtime skips the merge.
+//
+// Implementations must be:
+//   - Atomic. Two concurrent calls with the same EventID must produce exactly
+//     one firstSeen=true and one firstSeen=false — never two of either.
+//   - Bounded. EventIDs older than a configured retention should fall out so
+//     the dedup table doesn't grow forever. Typical TTL is hours to days
+//     depending on how long messages can sit unacked in the source's
+//     retention window.
+type Deduper interface {
+	// MarkSeen atomically attempts to claim eventID. Returns firstSeen=true
+	// if the caller is the first to mark this ID; firstSeen=false if it was
+	// already claimed. Returns an error only on transient backend failures
+	// — duplicates are NOT errors.
+	MarkSeen(ctx context.Context, eventID string) (firstSeen bool, err error)
+
+	// Close releases any underlying resources.
+	Close() error
+}

@@ -40,7 +40,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 ## Limitations to read before adopting
 
 - **`replace` directive in `go.mod`.** Murmur depends on a personal fork of `apache/spark-connect-go` for the batch executor. Anyone importing `pkg/exec/batch/sparkconnect` must mirror the `replace` directive in their own `go.mod`. Tracked: upstream the patches or split that package out.
-- **At-least-once, with caveats.** The streaming runtime acks Kafka records after writing to DynamoDB, but there is no per-EventID dedup yet — a worker that dies between the DDB write and the ack will replay and double-count. Make pipelines idempotent at the monoid layer or pin to exactly-once-tolerant aggregations.
+- **At-least-once with optional dedup.** Pass `streaming.WithDedup(d)` (where `d` is a `pkg/state/dynamodb.Deduper`) to make replay-after-crash idempotent for any monoid. Without it, the streaming runtime is at-least-once with no per-EventID dedup — fine for idempotent monoids (Set, Min, Max, Bloom) but double-counts non-idempotent ones (Sum, HLL, TopK).
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
 - ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.
 - **CORS is permissive on the admin server.** `pkg/admin` ships with `Access-Control-Allow-Origin: *`. Do not expose the admin API to the public internet today; keep it on a private subnet behind your VPC.

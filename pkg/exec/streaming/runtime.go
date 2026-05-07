@@ -31,6 +31,7 @@ type runConfig struct {
 	backoffBase time.Duration
 	backoffMax  time.Duration
 	deadLetter  func(eventID string, err error)
+	dedup       state.Deduper
 }
 
 // WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
@@ -78,6 +79,26 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 	return func(c *runConfig) {
 		if fn != nil {
 			c.deadLetter = fn
+		}
+	}
+}
+
+// WithDedup installs a state.Deduper. Each record's EventID is claimed via
+// MarkSeen before processOne runs; if MarkSeen reports the EventID was
+// already claimed (a duplicate from a worker crash mid-write), the runtime
+// skips the merge and Acks the record so the source advances.
+//
+// This makes at-least-once delivery idempotent at the monoid layer for any
+// pipeline whose Combine is non-commutative or non-idempotent (e.g. Sum,
+// HLL.Add). Pipelines whose Combine is already idempotent (Set, Min, Max)
+// don't strictly need a Deduper but adding one is harmless.
+//
+// The Deduper itself is typically backed by a small DDB table with TTL —
+// see pkg/state/dynamodb.NewDeduper.
+func WithDedup(d state.Deduper) RunOption {
+	return func(c *runConfig) {
+		if d != nil {
+			c.dedup = d
 		}
 	}
 }
@@ -174,6 +195,10 @@ func drainAndProcess[T any, V any](
 // processWithRetry retries processOne on transient failure with exponential
 // backoff, then dead-letters and skips. Returns no error so the caller's loop
 // is not coupled to this record's outcome.
+//
+// If a Deduper is configured, the EventID is claimed before any processing;
+// duplicates are Ack'd and recorded under name+":dedup_skip" so the metrics
+// recorder surfaces dup rate alongside event rate.
 func processWithRetry[T any, V any](
 	ctx context.Context,
 	name string,
@@ -185,6 +210,23 @@ func processWithRetry[T any, V any](
 	window *windowed.Config,
 	cfg *runConfig,
 ) {
+	if cfg.dedup != nil && rec.EventID != "" {
+		first, err := cfg.dedup.MarkSeen(ctx, rec.EventID)
+		if err != nil {
+			// Dedup backend is sick — surface as an error but DO NOT skip the
+			// record (would silently double-count in steady state when the
+			// dedup table comes back). Fall through to normal processing.
+			cfg.recorder.RecordError(name, fmt.Errorf("dedup MarkSeen %q: %w", rec.EventID, err))
+		} else if !first {
+			// Duplicate. Ack so the source advances; record the skip and exit.
+			cfg.recorder.RecordEvent(name + ":dedup_skip")
+			if rec.Ack != nil {
+				_ = rec.Ack()
+			}
+			return
+		}
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < cfg.maxAttempts; attempt++ {
 		if attempt > 0 {

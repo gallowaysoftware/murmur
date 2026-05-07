@@ -3,6 +3,7 @@ package streaming_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -166,6 +167,79 @@ func TestRetry_DeadLettersOnPermaFail(t *testing.T) {
 		if got := store.mu[k]; got != 0 {
 			t.Errorf("entity %s: got %d, want 0 (everything dead-lettered)", k.Entity, got)
 		}
+	}
+}
+
+// memDeduper is an in-memory implementation of state.Deduper for unit tests.
+type memDeduper struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+func newMemDeduper() *memDeduper { return &memDeduper{seen: map[string]struct{}{}} }
+func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, dup := d.seen[id]; dup {
+		return false, nil
+	}
+	d.seen[id] = struct{}{}
+	return true, nil
+}
+func (*memDeduper) Close() error { return nil }
+
+// duplicatingSource emits each record twice — simulating a worker crash that
+// causes the source to redeliver. With dedup configured the runtime should
+// process each unique EventID exactly once.
+type duplicatingSource struct{ n int }
+
+func (s *duplicatingSource) Read(_ context.Context, out chan<- source.Record[int]) error {
+	for round := 0; round < 2; round++ {
+		for i := 0; i < s.n; i++ {
+			out <- source.Record[int]{
+				EventID: fakeEventID(i),
+				Value:   i,
+				Ack:     func() error { return nil },
+			}
+		}
+	}
+	return nil
+}
+func (*duplicatingSource) Name() string { return "dup" }
+func (*duplicatingSource) Close() error { return nil }
+
+func TestDedup_DuplicatesSkipped(t *testing.T) {
+	store := newFlakyStore(0) // never fails
+	src := &duplicatingSource{n: 3}
+	rec := metrics.NewInMemory()
+	dedup := newMemDeduper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, newPipe(src, store),
+		streaming.WithMetrics(rec),
+		streaming.WithDedup(dedup),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// 6 records emitted (3 unique × 2 rounds). With dedup, exactly the 3
+	// unique IDs should land in the store; each entity has count 1.
+	for i := 0; i < 3; i++ {
+		k := state.Key{Entity: fakeEventID(i)}
+		if got := store.mu[k]; got != 1 {
+			t.Errorf("entity %s after dedup: got %d, want 1", k.Entity, got)
+		}
+	}
+
+	procSnap := rec.SnapshotOne("test")
+	if procSnap.EventsProcessed != 3 {
+		t.Errorf("processed events: got %d, want 3", procSnap.EventsProcessed)
+	}
+	dupSnap := rec.SnapshotOne("test:dedup_skip")
+	if dupSnap.EventsProcessed != 3 {
+		t.Errorf("dedup_skip counter: got %d, want 3", dupSnap.EventsProcessed)
 	}
 }
 
