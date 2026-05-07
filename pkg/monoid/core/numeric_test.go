@@ -20,14 +20,41 @@ func TestSumAssociativity(t *testing.T) {
 	}
 }
 
-func TestMinMaxIdentity(t *testing.T) {
+func TestMinMax_Combine(t *testing.T) {
 	mn := Min[int]()
 	mx := Max[int]()
-	if mn.Combine(mn.Combine(5, 3), 8) != 3 {
-		t.Fatalf("min combine wrong")
+	b := func(v int) Bounded[int] { return NewBounded(v) }
+
+	got := mn.Combine(mn.Combine(b(5), b(3)), b(8))
+	if !got.Set || got.Value != 3 {
+		t.Fatalf("min combine: got %+v, want {3, true}", got)
 	}
-	if mx.Combine(mx.Combine(5, 3), 8) != 8 {
-		t.Fatalf("max combine wrong")
+	got = mx.Combine(mx.Combine(b(5), b(3)), b(8))
+	if !got.Set || got.Value != 8 {
+		t.Fatalf("max combine: got %+v, want {8, true}", got)
+	}
+}
+
+func TestMinMax_IdentityLawIncludingZero(t *testing.T) {
+	// Regression: previously Min/Max returned 0 for Identity, breaking
+	// `Combine(Identity, x) == x` whenever x was negative.
+	mn := Min[int]()
+	mx := Max[int]()
+	cases := []int{-5, 0, 5, -100, 100}
+	for _, v := range cases {
+		x := NewBounded(v)
+		if got := mn.Combine(mn.Identity(), x); got != x {
+			t.Errorf("min Identity left at %d: got %+v, want %+v", v, got, x)
+		}
+		if got := mn.Combine(x, mn.Identity()); got != x {
+			t.Errorf("min Identity right at %d: got %+v, want %+v", v, got, x)
+		}
+		if got := mx.Combine(mx.Identity(), x); got != x {
+			t.Errorf("max Identity left at %d: got %+v, want %+v", v, got, x)
+		}
+		if got := mx.Combine(x, mx.Identity()); got != x {
+			t.Errorf("max Identity right at %d: got %+v, want %+v", v, got, x)
+		}
 	}
 }
 

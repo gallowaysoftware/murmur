@@ -7,21 +7,28 @@ import (
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 )
 
-// Decayed is a (value, time) pair under exponential decay. Combine takes the most
-// recent timestamp's reference frame and decays the older value forward to it before
-// adding. With an appropriate half-life, this implements time-weighted moving sums
-// and averages without windowed bucketing.
+// Decayed is a (value, time) observation under exponential decay. Combine takes the
+// most recent timestamp's reference frame and decays the older value forward to it
+// before adding. With an appropriate half-life, this implements time-weighted moving
+// sums and averages without windowed bucketing.
 //
 // Mathematically: Combine((v_a, t_a), (v_b, t_b)) where t_b ≥ t_a is
 //
 //	(v_a * 2^(-(t_b - t_a)/halfLife) + v_b, t_b)
 //
-// Identity is (0, t_min). Associativity follows from the commutativity of decay-and-sum.
+// Identity is the unset Decayed; the Set flag distinguishes "no value yet" from a
+// legitimate (0, t=0) observation. This preserves the identity law:
+// Combine(Identity, x) == x for all x.
+//
+// Associativity is exact in real arithmetic; in IEEE-754 floats it holds within ULP
+// for typical inputs but is not bitwise.
 type Decayed struct {
 	// Value is the current decayed sum at time T.
 	Value float64
 	// T is the reference timestamp (Unix nanoseconds).
 	T int64
+	// Set is true when this observation carries a real value; false for Identity.
+	Set bool
 }
 
 // DecayedSum returns a monoid that decays older contributions toward the latest
@@ -42,11 +49,10 @@ type decayedMonoid struct {
 func (decayedMonoid) Identity() Decayed { return Decayed{} }
 
 func (m decayedMonoid) Combine(a, b Decayed) Decayed {
-	// Identity short-circuits.
-	if a.T == 0 && a.Value == 0 {
+	switch {
+	case !a.Set:
 		return b
-	}
-	if b.T == 0 && b.Value == 0 {
+	case !b.Set:
 		return a
 	}
 	// Forward-decay the older operand to the newer reference frame.
@@ -59,15 +65,17 @@ func (m decayedMonoid) Combine(a, b Decayed) Decayed {
 	return Decayed{
 		Value: older.Value*factor + newer.Value,
 		T:     newer.T,
+		Set:   true,
 	}
 }
 
 func (decayedMonoid) Kind() monoid.Kind { return monoid.KindCustom }
 
 // DecayedAt builds a Decayed observation for use as a per-event delta. amount is the
-// raw contribution at time t.
+// raw contribution at time t. The returned value has Set=true so it round-trips
+// through Combine(Identity, ...) correctly.
 func DecayedAt(amount float64, t time.Time) Decayed {
-	return Decayed{Value: amount, T: t.UnixNano()}
+	return Decayed{Value: amount, T: t.UnixNano(), Set: true}
 }
 
 // DecayedNow is equivalent to DecayedAt(amount, time.Now()).
@@ -79,9 +87,11 @@ func DecayedNow(amount float64) Decayed {
 // relative to d.T, the value is decayed forward; if t is in the past, the value is
 // "scaled up" (rarely useful, supplied for completeness). Use this from the query
 // layer when "the value as of now" matters more than the stored reference time.
+//
+// Returns 0 for an unset Decayed.
 func EvaluateAt(d Decayed, halfLife time.Duration, t time.Time) float64 {
-	if d.T == 0 {
-		return d.Value
+	if !d.Set {
+		return 0
 	}
 	dtSec := float64(t.UnixNano()-d.T) / 1e9
 	hl := halfLife.Seconds()

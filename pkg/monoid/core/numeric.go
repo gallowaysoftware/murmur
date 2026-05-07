@@ -17,6 +17,9 @@ type Numeric interface {
 }
 
 // Sum returns a monoid that adds values. Combine is +, Identity is the zero value.
+//
+// Note: this is a true monoid for V where the zero value is the additive identity
+// — that holds for all `Numeric` types in Go.
 func Sum[V Numeric]() monoid.Monoid[V] { return sum[V]{} }
 
 type sum[V Numeric] struct{}
@@ -35,33 +38,64 @@ func (count) Identity() int64       { return 0 }
 func (count) Combine(a, b int64) int64 { return a + b }
 func (count) Kind() monoid.Kind     { return monoid.KindCount }
 
-// Min returns a monoid for tracking the running minimum.
-// Identity is the zero value of V — meaning Min works correctly only when 0 is not a
-// valid input or when callers are aware of the convention. For unbounded-Min use
-// MinWithSentinel and supply an explicit "no value yet" sentinel.
-func Min[V cmp.Ordered]() monoid.Monoid[V] { return min_[V]{} }
+// Bounded wraps a value V with a Set flag, used by Min/Max so that Identity can be
+// represented as "no value yet" rather than the zero value of V (which would otherwise
+// break the monoid identity law for any V where the zero is a legitimate input).
+//
+// Use NewBounded to lift a single observation; the Set flag is then true. The zero
+// Bounded[V] is Identity for both Min and Max.
+type Bounded[V any] struct {
+	Value V
+	Set   bool
+}
+
+// NewBounded lifts a single observation into a Bounded wrapper.
+func NewBounded[V any](v V) Bounded[V] { return Bounded[V]{Value: v, Set: true} }
+
+// Min returns a monoid that tracks the running minimum of V. Identity is the
+// unset Bounded[V]; this satisfies the monoid identity law for all V.
+//
+// Lift per-event observations via NewBounded(v) (or core.Bounded[V]{Value: v, Set: true}).
+func Min[V cmp.Ordered]() monoid.Monoid[Bounded[V]] { return min_[V]{} }
 
 type min_[V cmp.Ordered] struct{}
 
-func (min_[V]) Identity() V { var z V; return z }
-func (min_[V]) Combine(a, b V) V {
-	if a < b {
+func (min_[V]) Identity() Bounded[V] { return Bounded[V]{} }
+
+func (min_[V]) Combine(a, b Bounded[V]) Bounded[V] {
+	switch {
+	case !a.Set:
+		return b
+	case !b.Set:
 		return a
+	case a.Value < b.Value:
+		return a
+	default:
+		return b
 	}
-	return b
 }
+
 func (min_[V]) Kind() monoid.Kind { return monoid.KindMin }
 
-// Max returns a monoid for tracking the running maximum. Same identity caveat as Min.
-func Max[V cmp.Ordered]() monoid.Monoid[V] { return max_[V]{} }
+// Max returns a monoid that tracks the running maximum of V. Identity is the
+// unset Bounded[V]; this satisfies the monoid identity law for all V.
+func Max[V cmp.Ordered]() monoid.Monoid[Bounded[V]] { return max_[V]{} }
 
 type max_[V cmp.Ordered] struct{}
 
-func (max_[V]) Identity() V { var z V; return z }
-func (max_[V]) Combine(a, b V) V {
-	if a > b {
+func (max_[V]) Identity() Bounded[V] { return Bounded[V]{} }
+
+func (max_[V]) Combine(a, b Bounded[V]) Bounded[V] {
+	switch {
+	case !a.Set:
+		return b
+	case !b.Set:
 		return a
+	case a.Value > b.Value:
+		return a
+	default:
+		return b
 	}
-	return b
 }
+
 func (max_[V]) Kind() monoid.Kind { return monoid.KindMax }

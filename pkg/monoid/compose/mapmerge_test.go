@@ -55,17 +55,19 @@ func TestMapMerge_Identity(t *testing.T) {
 }
 
 func TestTupleMonoid2_ComponentwiseCombine(t *testing.T) {
-	m := compose.TupleMonoid2[int64, int64](core.Sum[int64](), core.Max[int64]())
+	// Pair Sum (raw int64) with Max (Bounded[int64]) — proves the tuple combinator
+	// can hold heterogeneous monoid shapes.
+	m := compose.TupleMonoid2[int64, core.Bounded[int64]](core.Sum[int64](), core.Max[int64]())
 
-	a := compose.Tuple2[int64, int64]{A: 5, B: 3}
-	b := compose.Tuple2[int64, int64]{A: 7, B: 11}
+	a := compose.Tuple2[int64, core.Bounded[int64]]{A: 5, B: core.NewBounded[int64](3)}
+	b := compose.Tuple2[int64, core.Bounded[int64]]{A: 7, B: core.NewBounded[int64](11)}
 
 	got := m.Combine(a, b)
 	if got.A != 12 {
 		t.Errorf(".A: got %d, want 12 (Sum)", got.A)
 	}
-	if got.B != 11 {
-		t.Errorf(".B: got %d, want 11 (Max)", got.B)
+	if !got.B.Set || got.B.Value != 11 {
+		t.Errorf(".B: got %+v, want {11, true} (Max)", got.B)
 	}
 }
 

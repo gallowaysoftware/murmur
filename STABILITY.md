@@ -10,7 +10,7 @@ edges callers should plan around.
 |---|---|---|
 | `pkg/pipeline` | experimental | DSL surface is likely to gain `Validate()` (renamed from `Build()`) and per-stage type narrowing |
 | `pkg/murmur` | experimental | Builder presets are the recommended entry point; expect renames before v1 |
-| `pkg/monoid/core` | mostly stable | `Min` / `Max` need a `Set`-sentinel wrapper; current versions only correct when 0 is not legal |
+| `pkg/monoid/core` | mostly stable | `Min` / `Max` now use `Bounded[V]` for a proper Identity; lift inputs via `core.NewBounded(v)` |
 | `pkg/monoid/sketch/{hll,topk,bloom}` | experimental | `Combine` returning the wrong operand on decode error is tracked; cross-runtime encoding portability not yet proven |
 | `pkg/monoid/compose` | experimental | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
@@ -38,10 +38,12 @@ edges callers should plan around.
    `Combine` swallow real failures. Tracked: PR-2 wires `metrics.Recorder` into
    bootstrap / replay / source layers and exposes poison-pill callbacks.
 
-2. **Monoid laws.** `Min` / `Max` violate the identity law. `Decayed` uses a
-   value+time identity heuristic that misclassifies legitimate `(0, 0)`
-   observations. Tracked: PR-3 introduces a `Set`-sentinel pattern and a
-   `monoidlaws.Test` helper that fuzzes associativity and identity.
+2. ~~**Monoid laws.**~~ Fixed in PR-3: `Min` / `Max` now use `core.Bounded[V]`
+   so Identity is the unset wrapper rather than the zero value of `V`. `Decayed`
+   gained an explicit `Set` field so `(0, time.Unix(0, 0))` is no longer
+   misclassified as Identity. The new `pkg/monoid/monoidlaws` package fuzzes
+   associativity and identity for every built-in monoid in CI; users adding
+   custom monoids can drop into the same harness.
 
 3. **At-least-once dedup is not implemented.** `Record.EventID` is computed but
    never used. Workers that crash between DDB write and Kafka ack will replay

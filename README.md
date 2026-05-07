@@ -18,7 +18,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 | State: DynamoDB Int64SumStore (atomic ADD) + BytesStore (CAS) | ✅ |
 | Cache: Valkey Int64Cache (write-through, INCRBY) | ✅ |
 | Monoids: Sum, Count, First, Last, Set | ✅ |
-| Monoids: Min, Max | ⚠️ identity = zero-value, only correct when 0 is not a legal input — fix tracked |
+| Monoids: Min, Max (`Bounded[V]`) | ✅ |
 | Sketches: HyperLogLog, TopK (Misra-Gries), Bloom | ✅ |
 | Windowed aggregations + sliding-window queries | ✅ |
 | Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetRange`) | ✅ — typed-per-pipeline codegen is on the roadmap |
@@ -42,7 +42,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 - **`replace` directive in `go.mod`.** Murmur depends on a personal fork of `apache/spark-connect-go` for the batch executor. Anyone importing `pkg/exec/batch/sparkconnect` must mirror the `replace` directive in their own `go.mod`. Tracked: upstream the patches or split that package out.
 - **At-least-once, with caveats.** The streaming runtime acks Kafka records after writing to DynamoDB, but there is no per-EventID dedup yet — a worker that dies between the DDB write and the ack will replay and double-count. Make pipelines idempotent at the monoid layer or pin to exactly-once-tolerant aggregations.
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
-- **Min / Max monoids violate the identity law.** `Combine(Identity, -5) == 0`. Use only when zero is not a legal input, or wait for the `Set`-sentinel fix.
+- ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.
 - **CORS is permissive on the admin server.** `pkg/admin` ships with `Access-Control-Allow-Origin: *`. Do not expose the admin API to the public internet today; keep it on a private subnet behind your VPC.
 - **No CI yet.** GitHub Actions / Dependabot / `golangci-lint` are tracked tasks, not yet merged.
 
