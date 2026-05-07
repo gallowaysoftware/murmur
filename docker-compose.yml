@@ -51,3 +51,27 @@ services:
       MINIO_ROOT_USER: "minioadmin"
       MINIO_ROOT_PASSWORD: "minioadmin"
     command: ["server", "/data", "--console-address", ":9001"]
+
+  # Spark Connect server for local validation of pkg/exec/batch/sparkconnect.
+  # Runs Spark in local[*] mode (no separate worker nodes) — sufficient to validate
+  # the SQL → DataFrame → row-iteration → DDB write path. Production uses persistent
+  # EMR with Spark Connect enabled.
+  spark-connect:
+    image: apache/spark:4.0.1
+    container_name: murmur-spark-connect
+    user: "0:0"
+    ports:
+      - "15002:15002"
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      HOME: "/tmp"
+    command:
+      - /opt/spark/sbin/start-connect-server.sh
+      - --master
+      - "local[*]"
+      - --conf
+      - spark.connect.grpc.binding.port=15002
+      - --conf
+      - spark.connect.grpc.binding.address=0.0.0.0
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy
