@@ -98,7 +98,9 @@ The generic gRPC service exposes `Get(entity)`, `GetWindow(entity, duration)`, `
 
 ## Architecture
 
-The full design is documented in [`doc/architecture.md`](doc/architecture.md). The headline ideas:
+The full design is documented in [`doc/architecture.md`](doc/architecture.md). For the canonical "how do I integrate Murmur with text search" question, see [`doc/search-integration.md`](doc/search-integration.md) — three patterns (query-time rescore, bucketed indexing, snapshot+delta), their tradeoffs, and a reference DDB-Streams Lambda projector.
+
+The headline ideas:
 
 1. **Structural monoids.** Each well-known monoid (`Sum`, `HLL`, `TopK`, `Bloom`, …) carries a `Kind` that backend executors dispatch on — DDB picks atomic ADD vs CAS, Spark picks the right SQL aggregation, Valkey picks PFADD vs INCRBY. Custom monoids work as opaque Go closures on Go-only execution backends.
 2. **Three execution modes, one DSL.** A pipeline definition is execution-mode-agnostic. The same monoid Combine runs from a Kafka consumer (live), a Mongo collection scan (bootstrap), or an S3 JSON-Lines archive (replay).
