@@ -138,9 +138,11 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 - S3 replay into a shadow table (`s3_replay_test.go`)
 - Spark Connect batch SUM aggregation → DDB (`spark_connect_test.go`)
 
-## Worked example
+## Worked examples
 
-See [`examples/page-view-counters/`](examples/page-view-counters/) for a runnable two-binary pipeline (`cmd/worker` + `cmd/query`), a Dockerfile producing a multi-binary distroless image, and the Terraform deployment via [`deploy/terraform/modules/pipeline-counter/`](deploy/terraform/modules/pipeline-counter/).
+- [`examples/page-view-counters/`](examples/page-view-counters/) — runnable two-binary pipeline (`cmd/worker` + `cmd/query`), a Dockerfile producing a multi-binary distroless image, and the Terraform deployment via [`deploy/terraform/modules/pipeline-counter/`](deploy/terraform/modules/pipeline-counter/).
+- [`examples/mongo-cdc-orderstats/`](examples/mongo-cdc-orderstats/) — Mongo collection bootstrap → Kafka CDC live, with upstream-id dedup so re-deliveries fold idempotently.
+- [`examples/recently-interacted-topk/`](examples/recently-interacted-topk/) — single Top-N pipeline fed by **two sources at once**: Kinesis (consumed via an AWS Lambda trigger) plus Kafka (consumed by a long-running ECS worker). Both binaries write through the same DDB row; the Misra-Gries `Combine` produces a unified ranking across channels.
 
 ## Web UI and admin API
 

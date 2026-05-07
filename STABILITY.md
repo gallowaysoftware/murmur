@@ -25,6 +25,7 @@ edges callers should plan around.
 | `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
+| `pkg/exec/lambda/kinesis` | experimental | `NewHandler` returns the Lambda Kinesis handler signature; partial-batch failures via BatchItemFailures; pair with `WithDedup` so adjacent-redelivered records fold idempotently |
 | `pkg/query` | mostly stable | `Get` / `GetWindow` / `GetRange` / `LambdaQuery` are likely v1 surface |
 | `pkg/query/grpc` | experimental | generic byte-encoded responses; per-pipeline codegen is roadmap |
 | `pkg/admin` | experimental | CORS is closed by default; opt in via `WithAllowedOrigins`. No auth middleware yet |
