@@ -31,29 +31,21 @@ func TestBuild_RequiredFields(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "missing source",
+			name:    "missing key fn",
 			mutate:  func(p *pipeline.Pipeline[testEvent, int64]) {},
-			wantErr: pipeline.ErrMissingSource,
-		},
-		{
-			name: "missing key fn",
-			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
-				p.From(fakeSource{})
-			},
 			wantErr: pipeline.ErrMissingKeyFn,
 		},
 		{
 			name: "missing value fn",
 			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
-				p.From(fakeSource{}).Key(func(e testEvent) string { return e.PageID })
+				p.Key(func(e testEvent) string { return e.PageID })
 			},
 			wantErr: pipeline.ErrMissingValueFn,
 		},
 		{
 			name: "missing monoid",
 			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
-				p.From(fakeSource{}).
-					Key(func(e testEvent) string { return e.PageID }).
+				p.Key(func(e testEvent) string { return e.PageID }).
 					Value(func(testEvent) int64 { return 1 })
 			},
 			wantErr: pipeline.ErrMissingMonoid,
@@ -70,15 +62,13 @@ func TestBuild_RequiredFields(t *testing.T) {
 	}
 }
 
-func TestBuild_AllFieldsSet(t *testing.T) {
+func TestBuild_AllRequiredFieldsSet(t *testing.T) {
 	p := pipeline.NewPipeline[testEvent, int64]("page_views").
-		From(fakeSource{}).
 		Key(func(e testEvent) string { return e.PageID }).
 		Value(func(testEvent) int64 { return 1 }).
 		Aggregate(core.Sum[int64]())
-	// Note: state.Store/Cache require concrete implementations; we exercise the field
-	// validation here by exposing StoreIn via interface conformance in Phase 2 once
-	// we have a working stub store. For now ErrMissingStore is the expected outcome.
+	// State store still required even without a Source — Build covers everything but
+	// the mode-specific source.
 	if err := p.Build(); !errors.Is(err, pipeline.ErrMissingStore) {
 		t.Fatalf("got %v, want ErrMissingStore", err)
 	}

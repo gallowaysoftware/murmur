@@ -117,12 +117,12 @@ var (
 	ErrMissingStore   = errors.New("pipeline: state store not set (use StoreIn)")
 )
 
-// Build validates the pipeline definition. After Build returns nil, the pipeline can be
-// handed to a runtime executor (streaming, bootstrap, batch).
+// Build validates the pipeline definition for fields required by every execution mode:
+// key extractor, value extractor, monoid, state store. The source is mode-specific
+// (Live needs source.Source; Bootstrap needs snapshot.SnapshotSource) and is checked by
+// the runtime that consumes the pipeline.
 func (p *Pipeline[T, V]) Build() error {
 	switch {
-	case p.src == nil:
-		return ErrMissingSource
 	case p.keyFn == nil:
 		return ErrMissingKeyFn
 	case p.valueFn == nil:

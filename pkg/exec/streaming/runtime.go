@@ -29,6 +29,9 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) error {
 	if err := p.Build(); err != nil {
 		return fmt.Errorf("streaming.Run: %w", err)
 	}
+	if p.Source() == nil {
+		return fmt.Errorf("streaming.Run: %w", pipeline.ErrMissingSource)
+	}
 
 	src := p.Source()
 	keyFn := p.KeyFn()
