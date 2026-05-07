@@ -66,17 +66,28 @@ type Config[T any] struct {
 
 	// RecordsPerCall caps GetRecords output. Default 1000 (the Kinesis maximum).
 	RecordsPerCall int32
+
+	// OnDecodeError, if non-nil, is called for every record whose Decode returned
+	// an error. Default behavior is to drop silently. Wire to a DLQ / metrics
+	// recorder to surface poison pills.
+	OnDecodeError func(raw []byte, shardID, sequenceNumber string, err error)
+
+	// OnGetRecordsError, if non-nil, is called for every GetRecords error before
+	// the per-shard loop backs off and retries. Wire to logging / metrics.
+	OnGetRecordsError func(streamName, shardID string, err error)
 }
 
 // Source implements source.Source for a Kinesis Data Stream.
 type Source[T any] struct {
-	client         *kinesis.Client
-	streamName     string
-	decode         Decoder[T]
-	startingPos    types.ShardIteratorType
-	startTimestamp *time.Time
-	pollInterval   time.Duration
-	recordsPerCall int32
+	client            *kinesis.Client
+	streamName        string
+	decode            Decoder[T]
+	startingPos       types.ShardIteratorType
+	startTimestamp    *time.Time
+	pollInterval      time.Duration
+	recordsPerCall    int32
+	onDecodeError     func(raw []byte, shardID, seq string, err error)
+	onGetRecordsError func(streamName, shardID string, err error)
 }
 
 // NewSource constructs a Kinesis Source. The returned Source does not own the client;
@@ -107,13 +118,15 @@ func NewSource[T any](cfg Config[T]) (*Source[T], error) {
 		limit = 1000
 	}
 	return &Source[T]{
-		client:         cfg.Client,
-		streamName:     cfg.StreamName,
-		decode:         cfg.Decode,
-		startingPos:    pos,
-		startTimestamp: cfg.StartTimestamp,
-		pollInterval:   poll,
-		recordsPerCall: limit,
+		client:            cfg.Client,
+		streamName:        cfg.StreamName,
+		decode:            cfg.Decode,
+		startingPos:       pos,
+		startTimestamp:    cfg.StartTimestamp,
+		pollInterval:      poll,
+		recordsPerCall:    limit,
+		onDecodeError:     cfg.OnDecodeError,
+		onGetRecordsError: cfg.OnGetRecordsError,
 	}, nil
 }
 
@@ -176,8 +189,9 @@ func (s *Source[T]) consumeShard(ctx context.Context, shard types.Shard, out cha
 			Limit:         aws.Int32(s.recordsPerCall),
 		})
 		if err != nil {
-			// Backoff on throughput / transient errors. Don't propagate; the source-
-			// per-shard goroutine just sleeps and retries until ctx cancels.
+			if s.onGetRecordsError != nil {
+				s.onGetRecordsError(s.streamName, aws.ToString(shard.ShardId), err)
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -188,6 +202,9 @@ func (s *Source[T]) consumeShard(ctx context.Context, shard types.Shard, out cha
 		for _, rec := range resp.Records {
 			v, err := s.decode(rec.Data)
 			if err != nil {
+				if s.onDecodeError != nil {
+					s.onDecodeError(rec.Data, aws.ToString(shard.ShardId), aws.ToString(rec.SequenceNumber), err)
+				}
 				continue
 			}
 			r := source.Record[T]{

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/source"
@@ -28,12 +29,29 @@ import (
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
 
+// RunOption configures Run.
+type RunOption func(*runConfig)
+
+type runConfig struct {
+	recorder metrics.Recorder
+}
+
+// WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
+func WithMetrics(r metrics.Recorder) RunOption {
+	return func(c *runConfig) {
+		if r != nil {
+			c.recorder = r
+		}
+	}
+}
+
 // Run drives the bootstrap. Returns the captured HandoffToken on success; the deployment
 // system persists it and hands it to the live runtime on transition.
 func Run[T any, V any](
 	ctx context.Context,
 	p *pipeline.Pipeline[T, V],
 	src snapshot.SnapshotSource[T],
+	opts ...RunOption,
 ) (snapshot.HandoffToken, error) {
 	if err := p.Build(); err != nil {
 		return nil, fmt.Errorf("bootstrap.Run: %w", err)
@@ -41,12 +59,18 @@ func Run[T any, V any](
 	if src == nil {
 		return nil, fmt.Errorf("bootstrap.Run: snapshot source is nil")
 	}
+	cfg := runConfig{recorder: metrics.Noop{}}
+	for _, o := range opts {
+		o(&cfg)
+	}
 
 	token, err := src.CaptureHandoff(ctx)
 	if err != nil {
+		cfg.recorder.RecordError(p.Name(), fmt.Errorf("capture handoff: %w", err))
 		return nil, fmt.Errorf("capture handoff: %w", err)
 	}
 
+	name := p.Name()
 	keyFn := p.KeyFn()
 	valueFn := p.ValueFn()
 	store := p.Store()
@@ -61,11 +85,13 @@ func Run[T any, V any](
 	}()
 
 	for rec := range records {
-		if err := processOne(ctx, rec, keyFn, valueFn, store, cache, window); err != nil {
+		if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
+			cfg.recorder.RecordError(name, err)
 			return nil, err
 		}
 	}
 	if err := <-scanErr; err != nil {
+		cfg.recorder.RecordError(name, fmt.Errorf("snapshot scan: %w", err))
 		return nil, fmt.Errorf("snapshot scan: %w", err)
 	}
 
@@ -74,12 +100,14 @@ func Run[T any, V any](
 
 func processOne[T any, V any](
 	ctx context.Context,
+	name string,
 	rec source.Record[T],
 	keyFn func(T) string,
 	valueFn func(T) V,
 	store state.Store[V],
 	cache state.Cache[V],
 	window *windowed.Config,
+	rec_ metrics.Recorder,
 ) error {
 	entity := keyFn(rec.Value)
 	delta := valueFn(rec.Value)
@@ -95,14 +123,24 @@ func processOne[T any, V any](
 		ttl = window.Retention
 	}
 
+	storeStart := time.Now()
 	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-		return fmt.Errorf("store MergeUpdate: %w", err)
+		return fmt.Errorf("pipeline %q entity %q bucket %d: store MergeUpdate: %w", name, sk.Entity, sk.Bucket, err)
 	}
+	rec_.RecordLatency(name, "store_merge", time.Since(storeStart))
+
 	if cache != nil {
-		_ = cache.MergeUpdate(ctx, sk, delta, ttl)
+		cacheStart := time.Now()
+		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
+			rec_.RecordError(name, fmt.Errorf("cache MergeUpdate %q/%d: %w", sk.Entity, sk.Bucket, err))
+		}
+		rec_.RecordLatency(name, "cache_merge", time.Since(cacheStart))
 	}
 	if rec.Ack != nil {
-		_ = rec.Ack()
+		if err := rec.Ack(); err != nil {
+			rec_.RecordError(name, fmt.Errorf("snapshot ack: %w", err))
+		}
 	}
+	rec_.RecordEvent(name)
 	return nil
 }

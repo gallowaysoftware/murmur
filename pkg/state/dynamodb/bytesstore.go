@@ -74,34 +74,57 @@ func (s *BytesStore) Get(ctx context.Context, k state.Key) ([]byte, bool, error)
 	return val.Value, true, nil
 }
 
-// GetMany batches reads via BatchGetItem.
+// GetMany batches reads via BatchGetItem. Loops on UnprocessedKeys with bounded
+// exponential backoff so a throttled batch doesn't silently truncate results.
 func (s *BytesStore) GetMany(ctx context.Context, ks []state.Key) ([][]byte, []bool, error) {
 	if len(ks) == 0 {
 		return nil, nil, nil
 	}
-	keys := make([]map[string]types.AttributeValue, len(ks))
-	for i, k := range ks {
-		keys[i] = keyAttr(k)
+	type pair struct {
+		entity string
+		bucket int64
 	}
-	out, err := s.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
-		RequestItems: map[string]types.KeysAndAttributes{
-			s.table: {Keys: keys, ConsistentRead: aws.Bool(true)},
-		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("ddb BatchGetItem %s: %w", s.table, err)
-	}
-	type pair struct{ entity string; bucket int64 }
-	byPair := make(map[pair][]byte, len(out.Responses[s.table]))
-	for _, item := range out.Responses[s.table] {
-		pk, _ := item[attrPK].(*types.AttributeValueMemberS)
-		sk, _ := item[attrSK].(*types.AttributeValueMemberN)
-		v, _ := item[attrVal].(*types.AttributeValueMemberB)
-		if pk == nil || sk == nil || v == nil {
-			continue
+	byPair := make(map[pair][]byte, len(ks))
+
+	const maxPerCall = 100
+	for offset := 0; offset < len(ks); offset += maxPerCall {
+		end := offset + maxPerCall
+		if end > len(ks) {
+			end = len(ks)
 		}
-		bucket, _ := strconv.ParseInt(sk.Value, 10, 64)
-		byPair[pair{pk.Value, bucket}] = v.Value
+		chunk := ks[offset:end]
+		keys := make([]map[string]types.AttributeValue, len(chunk))
+		for i, k := range chunk {
+			keys[i] = keyAttr(k)
+		}
+		req := map[string]types.KeysAndAttributes{
+			s.table: {Keys: keys, ConsistentRead: aws.Bool(true)},
+		}
+		for attempt := 0; len(req) > 0; attempt++ {
+			if attempt > 0 {
+				if err := backoffWait(ctx, attempt); err != nil {
+					return nil, nil, err
+				}
+			}
+			if attempt >= maxBatchAttempts {
+				return nil, nil, fmt.Errorf("ddb BatchGetItem %s: unprocessed keys remain after %d attempts", s.table, maxBatchAttempts)
+			}
+			out, err := s.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: req})
+			if err != nil {
+				return nil, nil, fmt.Errorf("ddb BatchGetItem %s: %w", s.table, err)
+			}
+			for _, item := range out.Responses[s.table] {
+				pk, _ := item[attrPK].(*types.AttributeValueMemberS)
+				sk, _ := item[attrSK].(*types.AttributeValueMemberN)
+				v, _ := item[attrVal].(*types.AttributeValueMemberB)
+				if pk == nil || sk == nil || v == nil {
+					continue
+				}
+				bucket, _ := strconv.ParseInt(sk.Value, 10, 64)
+				byPair[pair{pk.Value, bucket}] = v.Value
+			}
+			req = out.UnprocessedKeys
+		}
 	}
 	vals := make([][]byte, len(ks))
 	oks := make([]bool, len(ks))

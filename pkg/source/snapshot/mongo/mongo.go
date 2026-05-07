@@ -18,6 +18,7 @@ package mongo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -40,6 +41,9 @@ type Config[T any] struct {
 	// Decode converts a raw BSON document to T. Use BSONDecoder[T]() for the default
 	// driver-based decoding (struct tags); supply your own for custom shapes.
 	Decode Decoder[T]
+	// OnDecodeError, if non-nil, is called for every document whose Decode returned
+	// an error. Default behavior is to drop silently.
+	OnDecodeError func(raw bson.Raw, err error)
 }
 
 // Decoder converts a raw BSON document to a typed Record value.
@@ -59,11 +63,12 @@ func BSONDecoder[T any]() Decoder[T] {
 
 // Source implements snapshot.SnapshotSource for a single Mongo collection.
 type Source[T any] struct {
-	client   *mongo.Client
-	database string
-	collName string
-	filter   bson.M
-	decode   Decoder[T]
+	client        *mongo.Client
+	database      string
+	collName      string
+	filter        bson.M
+	decode        Decoder[T]
+	onDecodeError func(raw bson.Raw, err error)
 }
 
 // NewSource connects to the Mongo cluster and returns a SnapshotSource for the given
@@ -81,11 +86,12 @@ func NewSource[T any](ctx context.Context, cfg Config[T]) (*Source[T], error) {
 		return nil, fmt.Errorf("mongo connect: %w", err)
 	}
 	return &Source[T]{
-		client:   cl,
-		database: cfg.Database,
-		collName: cfg.Collection,
-		filter:   cfg.Filter,
-		decode:   cfg.Decode,
+		client:        cl,
+		database:      cfg.Database,
+		collName:      cfg.Collection,
+		filter:        cfg.Filter,
+		decode:        cfg.Decode,
+		onDecodeError: cfg.OnDecodeError,
 	}, nil
 }
 
@@ -130,10 +136,23 @@ func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error
 		raw := cursor.Current
 		v, err := s.decode(raw)
 		if err != nil {
-			// Skip undecodable documents; in production we'd push to a DLQ.
+			if s.onDecodeError != nil {
+				// Copy because cursor.Current is reused on the next iteration.
+				rawCopy := make(bson.Raw, len(raw))
+				copy(rawCopy, raw)
+				s.onDecodeError(rawCopy, err)
+			}
 			continue
 		}
-		idStr := extractID(raw)
+		idStr, err := extractID(raw)
+		if err != nil {
+			if s.onDecodeError != nil {
+				rawCopy := make(bson.Raw, len(raw))
+				copy(rawCopy, raw)
+				s.onDecodeError(rawCopy, err)
+			}
+			continue
+		}
 		rec := source.Record[T]{
 			EventID:      fmt.Sprintf("%s/%s/%s", s.database, s.collName, idStr),
 			PartitionKey: idStr,
@@ -170,27 +189,37 @@ func (s *Source[T]) Close() error {
 	return s.client.Disconnect(context.Background())
 }
 
-// extractID pulls the _id field out of a raw BSON document and renders it as a string.
-// Used to derive EventID; falls back to the raw bytes if _id is missing.
-func extractID(raw bson.Raw) string {
+// extractID pulls the _id field out of a raw BSON document and renders it as a
+// stable, printable string suitable for use as an EventID. Errors when the _id
+// is missing or has an unsupported type — feeding non-UTF-8 bytes into
+// EventID would silently break the at-least-once dedup contract downstream,
+// so we'd rather refuse the document and let the caller DLQ it.
+func extractID(raw bson.Raw) (string, error) {
 	idElem, err := raw.LookupErr("_id")
 	if err != nil {
-		return string(raw)
+		return "", fmt.Errorf("mongo: document missing _id: %w", err)
 	}
 	if oid, ok := idElem.ObjectIDOK(); ok {
-		return oid.Hex()
+		return oid.Hex(), nil
 	}
 	if str, ok := idElem.StringValueOK(); ok {
-		return str
+		return str, nil
 	}
 	if i, ok := idElem.Int64OK(); ok {
-		return fmt.Sprintf("%d", i)
+		return fmt.Sprintf("%d", i), nil
 	}
 	if i, ok := idElem.Int32OK(); ok {
-		return fmt.Sprintf("%d", i)
+		return fmt.Sprintf("%d", i), nil
 	}
-	// Fallback: raw bytes.
-	return string(idElem.Value)
+	if _, data, ok := idElem.BinaryOK(); ok {
+		// UUID / binary _id rendered as hex (subtype dropped — _id collisions
+		// across subtypes are pathological and outside the at-least-once contract).
+		return hex.EncodeToString(data), nil
+	}
+	if d, ok := idElem.Decimal128OK(); ok {
+		return d.String(), nil
+	}
+	return "", fmt.Errorf("mongo: unsupported _id BSON type %v", idElem.Type)
 }
 
 // Compile-time check.

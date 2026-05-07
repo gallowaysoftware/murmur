@@ -36,6 +36,17 @@ type Config[T any] struct {
 	// records, or supply your own for Avro / Protobuf / etc.
 	Decode Decoder[T]
 
+	// OnDecodeError, if non-nil, is called for every message whose Decode returned
+	// an error. The default behavior is to drop the record silently and advance —
+	// fine for development but dangerous in production. Wire this to a DLQ producer
+	// or a metrics.Recorder.RecordError to surface poison pills.
+	OnDecodeError func(raw []byte, partition int32, offset int64, err error)
+
+	// OnFetchError, if non-nil, is called for partition-level fetch errors that the
+	// client is going to retry internally (broker bounce, leader change, etc).
+	// Default: drop. Wire to logging / metrics to surface persistent failures.
+	OnFetchError func(topic string, partition int32, err error)
+
 	// Extra lets callers append additional franz-go options (TLS, SASL, etc).
 	Extra []kgo.Opt
 }
@@ -56,9 +67,11 @@ func JSONDecoder[T any]() Decoder[T] {
 
 // Source reads from a Kafka topic and yields source.Records.
 type Source[T any] struct {
-	client *kgo.Client
-	topic  string
-	decode Decoder[T]
+	client        *kgo.Client
+	topic         string
+	decode        Decoder[T]
+	onDecodeError func(raw []byte, partition int32, offset int64, err error)
+	onFetchError  func(topic string, partition int32, err error)
 }
 
 // NewSource constructs a Kafka Source. The returned Source owns the underlying franz-go
@@ -88,7 +101,13 @@ func NewSource[T any](cfg Config[T]) (*Source[T], error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka new client: %w", err)
 	}
-	return &Source[T]{client: cl, topic: cfg.Topic, decode: cfg.Decode}, nil
+	return &Source[T]{
+		client:        cl,
+		topic:         cfg.Topic,
+		decode:        cfg.Decode,
+		onDecodeError: cfg.OnDecodeError,
+		onFetchError:  cfg.OnFetchError,
+	}, nil
 }
 
 // Read polls the consumer group and yields decoded records into out until ctx is canceled.
@@ -108,8 +127,9 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			// In production: emit a metric / log. Stub for now.
-			_ = err
+			if s.onFetchError != nil {
+				s.onFetchError(t, p, err)
+			}
 		})
 
 		iter := fetches.RecordIter()
@@ -117,7 +137,14 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 			rec := iter.Next()
 			value, err := s.decode(rec.Value)
 			if err != nil {
-				// Poison pill: skip. In production we'd push to a DLQ via a configurable hook.
+				// Poison pill: surface via callback so the worker can DLQ / log /
+				// metric. Without a callback the record is dropped silently —
+				// fine for dev, dangerous in production. STABILITY.md flags this.
+				if s.onDecodeError != nil {
+					s.onDecodeError(rec.Value, rec.Partition, rec.Offset, err)
+				}
+				// Mark for commit so we don't loop forever on the same poison pill.
+				s.client.MarkCommitRecords(rec)
 				continue
 			}
 			r := source.Record[T]{

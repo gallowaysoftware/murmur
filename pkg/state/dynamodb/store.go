@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"time"
 
@@ -31,6 +32,31 @@ import (
 
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
+
+// maxBatchAttempts caps BatchGetItem UnprocessedKeys retries before we give up
+// and surface the error to the caller. With exponential backoff this is roughly
+// 32 seconds of patience.
+const maxBatchAttempts = 8
+
+// backoffWait sleeps for an exponentially-growing duration with jitter, returning
+// early if ctx is canceled. Used by BatchGetItem UnprocessedKeys retries.
+func backoffWait(ctx context.Context, attempt int) error {
+	base := 50 * time.Millisecond
+	max := 5 * time.Second
+	d := base * (1 << attempt)
+	if d > max {
+		d = max
+	}
+	d += time.Duration(rand.Int64N(int64(d / 2)))
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 const (
 	attrPK  = "pk"
@@ -82,31 +108,55 @@ func (s *Int64SumStore) GetMany(ctx context.Context, ks []state.Key) ([]int64, [
 	if len(ks) == 0 {
 		return nil, nil, nil
 	}
-	keys := make([]map[string]types.AttributeValue, len(ks))
-	for i, k := range ks {
-		keys[i] = keyAttr(k)
+	type pair struct {
+		entity string
+		bucket int64
 	}
-	out, err := s.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
-		RequestItems: map[string]types.KeysAndAttributes{
-			s.table: {Keys: keys},
-		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("ddb BatchGetItem %s: %w", s.table, err)
-	}
-	// BatchGetItem returns rows in arbitrary order — index by (pk, sk).
-	type pair struct{ entity string; bucket int64 }
-	byPair := make(map[pair]int64, len(out.Responses[s.table]))
-	for _, item := range out.Responses[s.table] {
-		pk, _ := item[attrPK].(*types.AttributeValueMemberS)
-		sk, _ := item[attrSK].(*types.AttributeValueMemberN)
-		v, _ := item[attrVal].(*types.AttributeValueMemberN)
-		if pk == nil || sk == nil || v == nil {
-			continue
+	byPair := make(map[pair]int64, len(ks))
+
+	// Build the initial RequestItems; loop on UnprocessedKeys with bounded
+	// exponential backoff. DDB caps BatchGetItem at 100 keys per request — if the
+	// caller hands us more, chunk before issuing.
+	const maxPerCall = 100
+	for offset := 0; offset < len(ks); offset += maxPerCall {
+		end := offset + maxPerCall
+		if end > len(ks) {
+			end = len(ks)
 		}
-		bucket, _ := strconv.ParseInt(sk.Value, 10, 64)
-		val, _ := strconv.ParseInt(v.Value, 10, 64)
-		byPair[pair{pk.Value, bucket}] = val
+		chunk := ks[offset:end]
+		keys := make([]map[string]types.AttributeValue, len(chunk))
+		for i, k := range chunk {
+			keys[i] = keyAttr(k)
+		}
+		req := map[string]types.KeysAndAttributes{
+			s.table: {Keys: keys},
+		}
+		for attempt := 0; len(req) > 0; attempt++ {
+			if attempt > 0 {
+				if err := backoffWait(ctx, attempt); err != nil {
+					return nil, nil, err
+				}
+			}
+			if attempt >= maxBatchAttempts {
+				return nil, nil, fmt.Errorf("ddb BatchGetItem %s: unprocessed keys remain after %d attempts", s.table, maxBatchAttempts)
+			}
+			out, err := s.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: req})
+			if err != nil {
+				return nil, nil, fmt.Errorf("ddb BatchGetItem %s: %w", s.table, err)
+			}
+			for _, item := range out.Responses[s.table] {
+				pk, _ := item[attrPK].(*types.AttributeValueMemberS)
+				sk, _ := item[attrSK].(*types.AttributeValueMemberN)
+				v, _ := item[attrVal].(*types.AttributeValueMemberN)
+				if pk == nil || sk == nil || v == nil {
+					continue
+				}
+				bucket, _ := strconv.ParseInt(sk.Value, 10, 64)
+				val, _ := strconv.ParseInt(v.Value, 10, 64)
+				byPair[pair{pk.Value, bucket}] = val
+			}
+			req = out.UnprocessedKeys
+		}
 	}
 	vals := make([]int64, len(ks))
 	oks := make([]bool, len(ks))

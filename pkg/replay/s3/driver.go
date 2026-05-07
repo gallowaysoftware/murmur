@@ -33,6 +33,9 @@ type Config[T any] struct {
 	Prefix string
 	// Decode converts a single JSON-Lines line to T.
 	Decode Decoder[T]
+	// OnDecodeError, if non-nil, is called for every line whose Decode returned an
+	// error. Default behavior is to drop silently.
+	OnDecodeError func(key string, lineNum int, raw []byte, err error)
 }
 
 // Decoder converts a single JSON line to a typed Record value.
@@ -40,10 +43,11 @@ type Decoder[T any] func([]byte) (T, error)
 
 // Driver implements replay.Driver for S3-archived JSON-Lines events.
 type Driver[T any] struct {
-	client *s3.Client
-	bucket string
-	prefix string
-	decode Decoder[T]
+	client        *s3.Client
+	bucket        string
+	prefix        string
+	decode        Decoder[T]
+	onDecodeError func(key string, lineNum int, raw []byte, err error)
 }
 
 // NewDriver returns a Driver. The client is owned by the caller.
@@ -58,10 +62,11 @@ func NewDriver[T any](cfg Config[T]) (*Driver[T], error) {
 		return nil, errors.New("s3 replay: Decode is required")
 	}
 	return &Driver[T]{
-		client: cfg.Client,
-		bucket: cfg.Bucket,
-		prefix: cfg.Prefix,
-		decode: cfg.Decode,
+		client:        cfg.Client,
+		bucket:        cfg.Bucket,
+		prefix:        cfg.Prefix,
+		decode:        cfg.Decode,
+		onDecodeError: cfg.OnDecodeError,
 	}, nil
 }
 
@@ -133,7 +138,13 @@ func (d *Driver[T]) replayOne(ctx context.Context, key string, out chan<- source
 		}
 		v, err := d.decode(line)
 		if err != nil {
-			// Poison line: skip. Production: DLQ.
+			if d.onDecodeError != nil {
+				// Copy the line because scanner.Bytes() reuses its buffer on the
+				// next Scan().
+				lineCopy := make([]byte, len(line))
+				copy(lineCopy, line)
+				d.onDecodeError(key, lineNum, lineCopy, err)
+			}
 			continue
 		}
 		rec := source.Record[T]{
