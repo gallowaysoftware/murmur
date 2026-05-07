@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, formatError, type PipelineInfo, type StateValue } from '../api'
+import { savedQueries, type SavedQuery } from '../lib/savedQueries'
 
 type Mode = 'get' | 'window' | 'range'
 
@@ -22,6 +23,7 @@ export function QueryConsole() {
   const [resp, setResp] = useState<StateValue | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [saved, setSaved] = useState<SavedQuery[]>(() => savedQueries.list())
 
   useEffect(() => {
     let cancelled = false
@@ -65,6 +67,23 @@ export function QueryConsole() {
     const next = new URLSearchParams(search)
     next.set(k, String(v))
     setSearch(next, { replace: false })
+  }
+
+  const saveCurrent = () => {
+    if (!pipeline || !entity) return
+    const suggested = `${pipeline} · ${mode} · ${entity}`
+    const name = window.prompt('Save this query as:', suggested)
+    if (!name) return
+    setSaved(savedQueries.save(name, search.toString()))
+  }
+
+  const loadSaved = (q: SavedQuery) => {
+    setSearch(new URLSearchParams(q.params), { replace: false })
+  }
+
+  const deleteSaved = (name: string) => {
+    if (!window.confirm(`Delete saved query "${name}"?`)) return
+    setSaved(savedQueries.delete(name))
   }
 
   return (
@@ -154,7 +173,7 @@ export function QueryConsole() {
           </>
         )}
 
-        <div>
+        <div className="flex gap-2">
           <button
             type="button"
             onClick={run}
@@ -163,8 +182,21 @@ export function QueryConsole() {
           >
             {loading ? 'querying…' : 'Query'}
           </button>
+          <button
+            type="button"
+            onClick={saveCurrent}
+            disabled={!pipeline || !entity}
+            title="Persist this query under a name (kept in browser localStorage)"
+            className="px-4 py-2 rounded-md border border-border text-fg-muted font-medium hover:bg-surface-2 hover:text-fg-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Save…
+          </button>
         </div>
       </div>
+
+      {saved.length > 0 && (
+        <SavedQueriesPanel saved={saved} onLoad={loadSaved} onDelete={deleteSaved} />
+      )}
 
       {err && (
         <div role="alert" className="mt-4 rounded-lg border border-bad bg-bad-bg p-4 text-sm">
@@ -196,6 +228,56 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-xs uppercase tracking-wider text-fg-faint mb-1">{label}</div>
       {children}
     </label>
+  )
+}
+
+function SavedQueriesPanel({
+  saved,
+  onLoad,
+  onDelete,
+}: {
+  saved: SavedQuery[]
+  onLoad: (q: SavedQuery) => void
+  onDelete: (name: string) => void
+}) {
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-surface">
+      <div className="px-5 pt-4 pb-3 border-b border-border">
+        <div className="text-fg-strong font-medium">Saved queries</div>
+        <div className="text-xs text-fg-muted mt-1">
+          Stored in your browser via localStorage. Click a name to load; delete with ✕.
+        </div>
+      </div>
+      <ul className="divide-y divide-border">
+        {saved.map((q) => (
+          <li key={q.name} className="flex items-center gap-3 px-5 py-3">
+            <button
+              type="button"
+              onClick={() => onLoad(q)}
+              className="flex-1 text-left hover:text-accent-strong transition-colors"
+            >
+              <div className="font-mono text-fg-strong text-sm">{q.name}</div>
+              <div className="text-xs text-fg-faint truncate font-mono">?{q.params}</div>
+            </button>
+            <time
+              dateTime={q.savedAt}
+              className="text-xs text-fg-faint tabular-nums"
+              title={q.savedAt}
+            >
+              {new Date(q.savedAt).toLocaleDateString()}
+            </time>
+            <button
+              type="button"
+              onClick={() => onDelete(q.name)}
+              aria-label={`Delete saved query ${q.name}`}
+              className="text-fg-muted hover:text-bad transition-colors px-2"
+            >
+              ✕
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
