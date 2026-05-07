@@ -22,7 +22,14 @@ Phase 1 in progress. The core architecture is built and exercised end-to-end aga
 | Windowed aggregations + sliding-window queries | ✅ |
 | gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetRange`) | ✅ |
 | Atomic state-table swap (alias version pointer) | ✅ |
-| Spark Connect batch executor (user-supplied SQL) | 🚧 skeleton, needs EMR validation |
+| Spark Connect batch executor (user-supplied SQL) | ✅ validated locally against apache/spark:4.0.1 |
+| Lambda mode (batch view ⊕ realtime delta merge) | ✅ pkg/query.LambdaQuery |
+| Decayed-value monoid (exponential decay) | ✅ pkg/monoid/compose.DecayedSum |
+| Minute / hour / daily windowed buckets | ✅ |
+| Web UI (dark mode, pipeline DAG, live metrics, query console) | ✅ cmd/murmur-ui |
+| Admin REST API (/api/pipelines, /api/.../metrics, ...) | ✅ pkg/admin |
+| Metrics recorder hook in streaming runtime | ✅ pkg/metrics + streaming.WithMetrics |
+| DX facade (Counter / UniqueCount / TopN presets) | ✅ pkg/murmur |
 | Terraform `pipeline-counter` module | ✅ |
 | Worked example: `page-view-counters` (worker + query binaries) | ✅ |
 | Kinesis source via KCL v3 (multi-instance, lease management) | Phase 2 |

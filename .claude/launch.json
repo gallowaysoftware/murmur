@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "murmur-ui",
+      "runtimeExecutable": "/tmp/murmur-ui",
+      "runtimeArgs": ["--demo", "--addr", ":8765"],
+      "port": 8765
+    }
+  ]
+}

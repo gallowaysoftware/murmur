@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* Murmur dark-mode-first color palette. Inspired by Cloud Dataflow's calm dark UI
+   but tuned to be a bit warmer (purple-leaning rather than blue). Light mode is
+   supported via the `:root:not(.dark)` selectors below but is not the default. */
+
+:root,
+:root.dark {
+  /* Surfaces */
+  --bg: #0b0d12;            /* page */
+  --surface: #12141b;       /* cards / sidebar */
+  --surface-2: #1a1d27;     /* hover, raised */
+  --surface-3: #232735;     /* nodes, active */
+  --border: #232735;
+  --border-strong: #2f3445;
+
+  /* Foreground */
+  --fg: #d6d8df;
+  --fg-strong: #f1f2f5;
+  --fg-muted: #7d8290;
+  --fg-faint: #555a68;
+
+  /* Accent — purple, evokes "murmur" / starling murmuration */
+  --accent: #a78bfa;
+  --accent-strong: #c4b5fd;
+  --accent-bg: rgba(167, 139, 250, 0.12);
+  --accent-border: rgba(167, 139, 250, 0.35);
+
+  /* Status colors */
+  --good: #4ade80;
+  --good-bg: rgba(74, 222, 128, 0.12);
+  --warn: #fbbf24;
+  --warn-bg: rgba(251, 191, 36, 0.12);
+  --bad: #f87171;
+  --bad-bg: rgba(248, 113, 113, 0.12);
+
+  --mono: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, "Inter", "Segoe UI", Roboto, sans-serif;
+
+  color: var(--fg);
+  background: var(--bg);
+  color-scheme: dark;
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Optional light mode (for users who add class="" to <html> in dev). */
+:root:not(.dark) {
+  --bg: #f8f9fb;
+  --surface: #ffffff;
+  --surface-2: #f0f2f6;
+  --surface-3: #e2e6ec;
+  --border: #e5e7ec;
+  --border-strong: #d4d8df;
+  --fg: #1f2230;
+  --fg-strong: #0a0d14;
+  --fg-muted: #65697a;
+  --fg-faint: #94a0b3;
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
+  --accent-bg: rgba(124, 58, 237, 0.10);
+  --accent-border: rgba(124, 58, 237, 0.30);
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-strong: var(--fg-strong);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-border: var(--accent-border);
+  --color-good: var(--good);
+  --color-good-bg: var(--good-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-bad: var(--bad);
+  --color-bad-bg: var(--bad-bg);
+  --font-mono: var(--mono);
+  --font-sans: var(--sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+}
+
+#root {
+  min-height: 100svh;
+}
+
+/* Pleasant scrollbars in dark mode */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}

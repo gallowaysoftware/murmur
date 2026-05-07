@@ -13,19 +13,35 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gallowaysoftware/murmur/pkg/monoid"
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/source"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
 
+// RunOption configures Run.
+type RunOption func(*runConfig)
+
+type runConfig struct {
+	recorder metrics.Recorder
+}
+
+// WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
+func WithMetrics(r metrics.Recorder) RunOption {
+	return func(c *runConfig) {
+		if r != nil {
+			c.recorder = r
+		}
+	}
+}
+
 // Run executes the pipeline in Live mode until ctx is canceled or the source returns.
 // Returns nil on graceful shutdown.
 //
 // The pipeline must have been configured with From / Key / Value / Aggregate / StoreIn
 // before Run is called; Build is invoked internally to validate.
-func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) error {
+func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...RunOption) error {
 	if err := p.Build(); err != nil {
 		return fmt.Errorf("streaming.Run: %w", err)
 	}
@@ -33,10 +49,15 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) error {
 		return fmt.Errorf("streaming.Run: %w", pipeline.ErrMissingSource)
 	}
 
+	cfg := runConfig{recorder: metrics.Noop{}}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	name := p.Name()
 	src := p.Source()
 	keyFn := p.KeyFn()
 	valueFn := p.ValueFn()
-	mon := p.Monoid()
 	store := p.Store()
 	cache := p.CacheStore()
 	window := p.Window()
@@ -57,13 +78,14 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) error {
 		case <-ctx.Done():
 			return nil
 		case err := <-srcDone:
-			drainAndProcess(ctx, records, keyFn, valueFn, mon, store, cache, window)
+			drainAndProcess(ctx, name, records, keyFn, valueFn, store, cache, window, cfg.recorder)
 			return err
 		case rec, ok := <-records:
 			if !ok {
 				return <-srcDone
 			}
-			if err := processOne(ctx, rec, keyFn, valueFn, mon, store, cache, window); err != nil {
+			if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
+				cfg.recorder.RecordError(name, err)
 				return err
 			}
 		}
@@ -72,45 +94,41 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V]) error {
 
 func drainAndProcess[T any, V any](
 	ctx context.Context,
+	name string,
 	records <-chan source.Record[T],
 	keyFn func(T) string,
 	valueFn func(T) V,
-	mon monoid.Monoid[V],
 	store state.Store[V],
 	cache state.Cache[V],
 	window *windowed.Config,
+	rec metrics.Recorder,
 ) {
-	// Best-effort: process whatever's already in the buffer after the source has stopped,
-	// up to a short deadline. Anything not Ack'd will be redelivered on next start
-	// (at-least-once semantics).
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
 		case <-deadline.C:
 			return
-		case rec, ok := <-records:
+		case r, ok := <-records:
 			if !ok {
 				return
 			}
-			_ = processOne(ctx, rec, keyFn, valueFn, mon, store, cache, window)
+			_ = processOne(ctx, name, r, keyFn, valueFn, store, cache, window, rec)
 		}
 	}
 }
 
 func processOne[T any, V any](
 	ctx context.Context,
+	name string,
 	rec source.Record[T],
 	keyFn func(T) string,
 	valueFn func(T) V,
-	mon monoid.Monoid[V],
 	store state.Store[V],
 	cache state.Cache[V],
 	window *windowed.Config,
+	rec_ metrics.Recorder,
 ) error {
-	_ = mon // monoid identity/combine is consumed by the Store implementation per-Kind;
-	// the runtime hands V deltas to the Store and lets it apply Combine natively.
-
 	entity := keyFn(rec.Value)
 	delta := valueFn(rec.Value)
 
@@ -125,15 +143,18 @@ func processOne[T any, V any](
 		ttl = window.Retention
 	}
 
+	storeStart := time.Now()
 	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
 		return fmt.Errorf("store MergeUpdate: %w", err)
 	}
+	rec_.RecordLatency(name, "store_merge", time.Since(storeStart))
 
-	// Cache write-through is best-effort. Cache is never source of truth; if it errors
-	// we log (TODO: real logger) and continue. The pipeline's correctness invariant rests
-	// entirely on the primary store having succeeded above.
 	if cache != nil {
-		_ = cache.MergeUpdate(ctx, sk, delta, ttl)
+		cacheStart := time.Now()
+		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
+			rec_.RecordError(name, fmt.Errorf("cache MergeUpdate: %w", err))
+		}
+		rec_.RecordLatency(name, "cache_merge", time.Since(cacheStart))
 	}
 
 	if rec.Ack != nil {
@@ -141,5 +162,6 @@ func processOne[T any, V any](
 			return fmt.Errorf("source Ack: %w", err)
 		}
 	}
+	rec_.RecordEvent(name)
 	return nil
 }

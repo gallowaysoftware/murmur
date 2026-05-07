@@ -38,6 +38,14 @@ func Hourly(retention time.Duration) Config {
 	return Config{Granularity: time.Hour, Retention: retention}
 }
 
+// Minute returns a Config with 1-minute granularity and the given retention. Useful
+// for high-resolution short-window aggregations (last 5 minutes, last hour at
+// per-minute resolution). At this granularity, "last 7 days" reads 10080 buckets per
+// query — consider hierarchical roll-ups for queries spanning more than ~24h.
+func Minute(retention time.Duration) Config {
+	return Config{Granularity: time.Minute, Retention: retention}
+}
+
 // BucketID assigns the given time to a bucket according to Granularity. Buckets are
 // tumbling and aligned to the Unix epoch.
 func (c Config) BucketID(t time.Time) int64 {
