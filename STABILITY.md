@@ -21,7 +21,7 @@ edges callers should plan around.
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
-| `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; runtime no longer crashes on a transient store failure |
+| `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window |
 | `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |
 | `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |

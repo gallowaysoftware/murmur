@@ -3,6 +3,7 @@ package streaming_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -289,6 +290,154 @@ func (s *likeSource) Read(_ context.Context, out chan<- source.Record[likeEvent]
 }
 func (*likeSource) Name() string { return "likes" }
 func (*likeSource) Close() error { return nil }
+
+// countingStore wraps flakyStore but counts how many MergeUpdate calls
+// landed per key. Used to verify write aggregation collapses N records
+// into one store call.
+type countingStore struct {
+	mu         sync.Mutex
+	values     map[state.Key]int64
+	calls      map[state.Key]int
+	totalCalls atomic.Int64
+}
+
+func newCountingStore() *countingStore {
+	return &countingStore{values: map[state.Key]int64{}, calls: map[state.Key]int{}}
+}
+func (s *countingStore) Get(_ context.Context, k state.Key) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.values[k]
+	return v, ok, nil
+}
+func (s *countingStore) GetMany(context.Context, []state.Key) ([]int64, []bool, error) {
+	return nil, nil, nil
+}
+func (s *countingStore) MergeUpdate(_ context.Context, k state.Key, d int64, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.values[k] += d
+	s.calls[k]++
+	s.totalCalls.Add(1)
+	return nil
+}
+func (*countingStore) Close() error { return nil }
+
+// hotKeySource emits N records all targeting the same key — simulates a
+// celebrity post receiving a flood of likes.
+type hotKeySource struct {
+	n      int
+	postID string
+}
+
+func (s *hotKeySource) Read(_ context.Context, out chan<- source.Record[likeEvent]) error {
+	for i := 0; i < s.n; i++ {
+		out <- source.Record[likeEvent]{
+			EventID: fmt.Sprintf("ev-%d", i),
+			Value:   likeEvent{postID: s.postID, country: "US"},
+			Ack:     func() error { return nil },
+		}
+	}
+	return nil
+}
+func (*hotKeySource) Name() string { return "hot" }
+func (*hotKeySource) Close() error { return nil }
+
+func TestBatchWindow_CollapsesHotKeyWrites(t *testing.T) {
+	const N = 1000
+	store := newCountingStore()
+	src := &hotKeySource{n: N, postID: "celeb-post"}
+
+	pipe := pipeline.NewPipeline[likeEvent, int64]("likes").
+		From(src).
+		Key(func(e likeEvent) string { return e.postID }).
+		Value(func(likeEvent) int64 { return 1 }).
+		Aggregate(core.Sum[int64]()).
+		StoreIn(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, pipe,
+		streaming.WithBatchWindow(50*time.Millisecond, 10000), // ample max-batch so timer drives flush
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Final value: all 1000 likes should sum to 1000.
+	if got := store.values[state.Key{Entity: "celeb-post"}]; got != int64(N) {
+		t.Errorf("final count: got %d, want %d", got, N)
+	}
+	// 1000 records → at most a handful of store calls (one per flush
+	// window + final drain). Without batching this would be 1000 calls.
+	if got := store.totalCalls.Load(); got > 20 {
+		t.Errorf("store calls with batching: got %d, want ≤20 (got %d-fold reduction over %d records)",
+			got, N/int(got), N)
+	} else {
+		t.Logf("hot-key collapsed: %d store calls for %d records (%dx reduction)", got, N, N/int(got))
+	}
+}
+
+func TestBatchWindow_PreservesPerKeyTotalsAcrossDistinctKeys(t *testing.T) {
+	store := newCountingStore()
+	// 3 distinct keys, 100 events each.
+	events := make([]likeEvent, 0, 300)
+	for _, post := range []string{"post-A", "post-B", "post-C"} {
+		for i := 0; i < 100; i++ {
+			events = append(events, likeEvent{postID: post, country: "US"})
+		}
+	}
+	src := &likeSource{events: events}
+
+	pipe := pipeline.NewPipeline[likeEvent, int64]("likes").
+		From(src).
+		Key(func(e likeEvent) string { return e.postID }).
+		Value(func(likeEvent) int64 { return 1 }).
+		Aggregate(core.Sum[int64]()).
+		StoreIn(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, pipe,
+		streaming.WithBatchWindow(50*time.Millisecond, 10000),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, post := range []string{"post-A", "post-B", "post-C"} {
+		if got := store.values[state.Key{Entity: post}]; got != 100 {
+			t.Errorf("%s: got %d, want 100", post, got)
+		}
+	}
+}
+
+func TestBatchWindow_DedupAppliesPerRecord(t *testing.T) {
+	store := newCountingStore()
+	src := &duplicatingSource{n: 5} // emits each ID twice
+	dedup := newMemDeduper()
+
+	pipe := newPipe(src, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, pipe,
+		streaming.WithDedup(dedup),
+		streaming.WithBatchWindow(50*time.Millisecond, 10000),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// 10 records emitted (5 unique × 2). With per-record dedup, each unique
+	// EventID should land exactly once → each entity has count 1.
+	for i := 0; i < 5; i++ {
+		k := state.Key{Entity: fakeEventID(i)}
+		if got := store.values[k]; got != 1 {
+			t.Errorf("entity %s after dedup+batching: got %d, want 1", k.Entity, got)
+		}
+	}
+}
 
 func TestKeyByMany_HierarchicalRollups_FanOutIntoEveryLevel(t *testing.T) {
 	// 5 likes on post-A: 3 from US, 1 from CA, 1 from UK.

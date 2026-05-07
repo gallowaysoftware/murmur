@@ -26,7 +26,9 @@ type RunOption func(*runConfig)
 
 type runConfig struct {
 	processor.Config
-	deadLetter func(eventID string, err error)
+	deadLetter   func(eventID string, err error)
+	batchWindow  time.Duration
+	maxBatchSize int
 }
 
 // WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
@@ -74,6 +76,42 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 	return func(c *runConfig) {
 		if fn != nil {
 			c.deadLetter = fn
+		}
+	}
+}
+
+// WithBatchWindow enables write aggregation: per-(entity, bucket) deltas
+// are accumulated in memory for `window` time, then flushed as a SINGLE
+// store.MergeUpdate per key. This is the only way to keep up with hot
+// keys at scale — a celebrity post taking 50k like-events/sec lands as
+// ONE atomic-ADD per flush window per worker instead of 50k.
+//
+// Tradeoffs:
+//
+//   - Latency: a record's contribution is invisible to readers for up to
+//     `window` time after acceptance. Default unset (no batching) gives
+//     immediate-merge semantics; common production values are 500ms–5s
+//     depending on read-staleness tolerance.
+//   - Durability under crash: records are Ack'd to the source AFTER the
+//     batch flushes, so a worker crash loses at most `window`-worth of
+//     in-flight records (the source replays them on restart, dedup
+//     catches the redelivery).
+//   - Memory: at most `maxBatch` records per (entity, bucket) before
+//     forced flush. Default 1024 if unset. The number of concurrent keys
+//     in flight is unbounded — for high-cardinality pipelines (per-user
+//     keys), keep `window` short so each batch stays small.
+//
+// Pass window = 0 (or omit the option) to disable batching entirely;
+// records flow through processor.MergeMany one at a time.
+//
+// Strongly recommended for any pipeline with a known hot-key distribution.
+func WithBatchWindow(window time.Duration, maxBatch int) RunOption {
+	return func(c *runConfig) {
+		if window > 0 {
+			c.batchWindow = window
+		}
+		if maxBatch > 0 {
+			c.maxBatchSize = maxBatch
 		}
 	}
 }
@@ -140,18 +178,46 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 		close(records)
 	}()
 
+	// If write aggregation is enabled, spin up the aggregator + flush loop.
+	// Records still pass through processWithRetry's retry-and-deadletter
+	// shape, but the actual store write is batched per (entity, bucket).
+	var agg *aggregator[T, V]
+	var flushDone chan struct{}
+	if cfg.batchWindow > 0 {
+		agg = newAggregator(&cfg, p.Monoid(), keysFn, valueFn, store, cache, window, name, cfg.maxBatchSize)
+		flushDone = make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			agg.runFlushLoop(ctx, cfg.batchWindow)
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			if agg != nil {
+				<-flushDone // wait for final drain
+			}
 			return nil
 		case err := <-srcDone:
-			drainAndProcess(ctx, name, records, keysFn, valueFn, store, cache, window, &cfg)
+			drainAndProcess(ctx, name, records, keysFn, valueFn, store, cache, window, agg, &cfg)
+			if agg != nil {
+				// Source closed naturally; force a final flush in addition
+				// to whatever the flush loop was doing.
+				agg.flushAll(ctx)
+			}
 			return err
 		case rec, ok := <-records:
 			if !ok {
 				return <-srcDone
 			}
-			processWithRetry(ctx, name, rec, keysFn, valueFn, store, cache, window, &cfg)
+			if agg != nil {
+				if dup := agg.accept(ctx, rec); dup && rec.Ack != nil {
+					_ = rec.Ack()
+				}
+			} else {
+				processWithRetry(ctx, name, rec, keysFn, valueFn, store, cache, window, &cfg)
+			}
 		}
 	}
 }
@@ -165,6 +231,7 @@ func drainAndProcess[T any, V any](
 	store state.Store[V],
 	cache state.Cache[V],
 	window *windowed.Config,
+	agg *aggregator[T, V],
 	cfg *runConfig,
 ) {
 	deadline := time.NewTimer(2 * time.Second)
@@ -177,7 +244,13 @@ func drainAndProcess[T any, V any](
 			if !ok {
 				return
 			}
-			processWithRetry(ctx, name, r, keysFn, valueFn, store, cache, window, cfg)
+			if agg != nil {
+				if dup := agg.accept(ctx, r); dup && r.Ack != nil {
+					_ = r.Ack()
+				}
+			} else {
+				processWithRetry(ctx, name, r, keysFn, valueFn, store, cache, window, cfg)
+			}
 		}
 	}
 }
