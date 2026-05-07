@@ -16,7 +16,7 @@ edges callers should plan around.
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1 |
 | `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy |
-| `pkg/state/valkey` | experimental | only `Int64Cache` ships; sketch-bytes cache is roadmap; no native PFADD path |
+| `pkg/state/valkey` | experimental | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes). No native PFADD path — Valkey-native HLL is incompatible with axiomhq's encoding; bridging is roadmap |
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
