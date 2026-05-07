@@ -10,11 +10,10 @@ package streaming
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"math/rand/v2"
 	"time"
 
+	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
@@ -26,19 +25,15 @@ import (
 type RunOption func(*runConfig)
 
 type runConfig struct {
-	recorder    metrics.Recorder
-	maxAttempts int
-	backoffBase time.Duration
-	backoffMax  time.Duration
-	deadLetter  func(eventID string, err error)
-	dedup       state.Deduper
+	processor.Config
+	deadLetter func(eventID string, err error)
 }
 
 // WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
 func WithMetrics(r metrics.Recorder) RunOption {
 	return func(c *runConfig) {
 		if r != nil {
-			c.recorder = r
+			c.Recorder = r
 		}
 	}
 }
@@ -51,7 +46,7 @@ func WithMetrics(r metrics.Recorder) RunOption {
 func WithMaxAttempts(n int) RunOption {
 	return func(c *runConfig) {
 		if n >= 1 {
-			c.maxAttempts = n
+			c.MaxAttempts = n
 		}
 	}
 }
@@ -62,10 +57,10 @@ func WithMaxAttempts(n int) RunOption {
 func WithRetryBackoff(base, max time.Duration) RunOption {
 	return func(c *runConfig) {
 		if base > 0 {
-			c.backoffBase = base
+			c.BackoffBase = base
 		}
 		if max > 0 {
-			c.backoffMax = max
+			c.BackoffMax = max
 		}
 	}
 }
@@ -84,7 +79,7 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 }
 
 // WithDedup installs a state.Deduper. Each record's EventID is claimed via
-// MarkSeen before processOne runs; if MarkSeen reports the EventID was
+// MarkSeen before the merge runs; if MarkSeen reports the EventID was
 // already claimed (a duplicate from a worker crash mid-write), the runtime
 // skips the merge and Acks the record so the source advances.
 //
@@ -98,7 +93,7 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 func WithDedup(d state.Deduper) RunOption {
 	return func(c *runConfig) {
 		if d != nil {
-			c.dedup = d
+			c.Dedup = d
 		}
 	}
 }
@@ -121,12 +116,7 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 		return fmt.Errorf("streaming.Run: %w", pipeline.ErrMissingSource)
 	}
 
-	cfg := runConfig{
-		recorder:    metrics.Noop{},
-		maxAttempts: 3,
-		backoffBase: 50 * time.Millisecond,
-		backoffMax:  5 * time.Second,
-	}
+	cfg := runConfig{Config: processor.Defaults()}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -192,13 +182,10 @@ func drainAndProcess[T any, V any](
 	}
 }
 
-// processWithRetry retries processOne on transient failure with exponential
-// backoff, then dead-letters and skips. Returns no error so the caller's loop
-// is not coupled to this record's outcome.
-//
-// If a Deduper is configured, the EventID is claimed before any processing;
-// duplicates are Ack'd and recorded under name+":dedup_skip" so the metrics
-// recorder surfaces dup rate alongside event rate.
+// processWithRetry delegates per-record processing to processor.MergeOne
+// (retries, dedup, metrics) and adds the streaming-specific Ack-and-skip
+// poison-record handling on top. Returns no error so the caller's loop is
+// not coupled to this record's outcome.
 func processWithRetry[T any, V any](
 	ctx context.Context,
 	name string,
@@ -210,119 +197,31 @@ func processWithRetry[T any, V any](
 	window *windowed.Config,
 	cfg *runConfig,
 ) {
-	if cfg.dedup != nil && rec.EventID != "" {
-		first, err := cfg.dedup.MarkSeen(ctx, rec.EventID)
-		if err != nil {
-			// Dedup backend is sick — surface as an error but DO NOT skip the
-			// record (would silently double-count in steady state when the
-			// dedup table comes back). Fall through to normal processing.
-			cfg.recorder.RecordError(name, fmt.Errorf("dedup MarkSeen %q: %w", rec.EventID, err))
-		} else if !first {
-			// Duplicate. Ack so the source advances; record the skip and exit.
-			cfg.recorder.RecordEvent(name + ":dedup_skip")
-			if rec.Ack != nil {
-				_ = rec.Ack()
-			}
-			return
+	eventTime := rec.EventTime
+	if eventTime.IsZero() {
+		eventTime = time.Now()
+	}
+	err := processor.MergeOne(ctx, &cfg.Config, name, rec.EventID, eventTime,
+		rec.Value, keyFn, valueFn, store, cache, window)
+	if err != nil {
+		// Either context cancellation (just return; the runtime is exiting
+		// anyway) or retry exhaustion. processor.MergeOne already recorded
+		// the dead_letter metric — we just need to invoke the user's
+		// dead-letter callback and Ack past the poison record.
+		if cfg.deadLetter != nil {
+			cfg.deadLetter(rec.EventID, err)
 		}
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < cfg.maxAttempts; attempt++ {
-		if attempt > 0 {
-			if err := backoffWait(ctx, cfg, attempt); err != nil {
-				return // ctx canceled mid-backoff
-			}
-			cfg.recorder.RecordEvent(name + ":retry")
+		if rec.Ack != nil {
+			_ = rec.Ack()
 		}
-		if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
-			// Cancellation propagates immediately — don't burn retries on a dying ctx.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return
-			}
-			lastErr = err
-			continue
-		}
-		return // success
+		return
 	}
 
-	// Exhausted retries — dead-letter and continue.
-	wrapped := fmt.Errorf("pipeline %q event %q dead-lettered after %d attempts: %w",
-		name, rec.EventID, cfg.maxAttempts, lastErr)
-	cfg.recorder.RecordError(name, wrapped)
-	cfg.recorder.RecordEvent(name + ":dead_letter")
-	if cfg.deadLetter != nil {
-		cfg.deadLetter(rec.EventID, lastErr)
-	}
-	// Ack so the source advances past this poison record. Without Ack the
-	// next consumer-group rebalance would redeliver the same record forever.
-	if rec.Ack != nil {
-		_ = rec.Ack()
-	}
-}
-
-func backoffWait(ctx context.Context, cfg *runConfig, attempt int) error {
-	d := cfg.backoffBase << (attempt - 1)
-	if d > cfg.backoffMax {
-		d = cfg.backoffMax
-	}
-	if d > 0 {
-		d += time.Duration(rand.Int64N(int64(d / 2))) // full jitter
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func processOne[T any, V any](
-	ctx context.Context,
-	name string,
-	rec source.Record[T],
-	keyFn func(T) string,
-	valueFn func(T) V,
-	store state.Store[V],
-	cache state.Cache[V],
-	window *windowed.Config,
-	rec_ metrics.Recorder,
-) error {
-	entity := keyFn(rec.Value)
-	delta := valueFn(rec.Value)
-
-	sk := state.Key{Entity: entity}
-	var ttl time.Duration
-	if window != nil {
-		t := rec.EventTime
-		if t.IsZero() {
-			t = time.Now()
-		}
-		sk.Bucket = window.BucketID(t)
-		ttl = window.Retention
-	}
-
-	storeStart := time.Now()
-	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-		return fmt.Errorf("store MergeUpdate: %w", err)
-	}
-	rec_.RecordLatency(name, "store_merge", time.Since(storeStart))
-
-	if cache != nil {
-		cacheStart := time.Now()
-		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-			rec_.RecordError(name, fmt.Errorf("cache MergeUpdate: %w", err))
-		}
-		rec_.RecordLatency(name, "cache_merge", time.Since(cacheStart))
-	}
-
+	// Successful merge (or dedup-skip). Ack so the source advances; surface
+	// Ack errors to the recorder rather than as a runtime error.
 	if rec.Ack != nil {
 		if err := rec.Ack(); err != nil {
-			return fmt.Errorf("source Ack: %w", err)
+			cfg.Recorder.RecordError(name, fmt.Errorf("source Ack: %w", err))
 		}
 	}
-	rec_.RecordEvent(name)
-	return nil
 }

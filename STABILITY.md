@@ -22,6 +22,7 @@ edges callers should plan around.
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
 | `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; runtime no longer crashes on a transient store failure |
+| `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |
 | `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |

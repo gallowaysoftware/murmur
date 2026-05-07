@@ -50,13 +50,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
+	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
-	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
@@ -84,11 +83,7 @@ func JSONDecoder[T any]() Decoder[T] {
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
-	recorder      metrics.Recorder
-	maxAttempts   int
-	backoffBase   time.Duration
-	backoffMax    time.Duration
-	dedup         state.Deduper
+	processor.Config
 	onDecodeError func(raw []byte, sequenceNumber, partitionKey string, err error)
 	now           func() time.Time
 }
@@ -100,7 +95,7 @@ type handlerConfig struct {
 func WithMetrics(r metrics.Recorder) HandlerOption {
 	return func(c *handlerConfig) {
 		if r != nil {
-			c.recorder = r
+			c.Recorder = r
 		}
 	}
 }
@@ -114,7 +109,7 @@ func WithMetrics(r metrics.Recorder) HandlerOption {
 func WithMaxAttempts(n int) HandlerOption {
 	return func(c *handlerConfig) {
 		if n >= 1 {
-			c.maxAttempts = n
+			c.MaxAttempts = n
 		}
 	}
 }
@@ -129,10 +124,10 @@ func WithMaxAttempts(n int) HandlerOption {
 func WithRetryBackoff(base, max time.Duration) HandlerOption {
 	return func(c *handlerConfig) {
 		if base > 0 {
-			c.backoffBase = base
+			c.BackoffBase = base
 		}
 		if max > 0 {
-			c.backoffMax = max
+			c.BackoffMax = max
 		}
 	}
 }
@@ -148,7 +143,7 @@ func WithRetryBackoff(base, max time.Duration) HandlerOption {
 func WithDedup(d state.Deduper) HandlerOption {
 	return func(c *handlerConfig) {
 		if d != nil {
-			c.dedup = d
+			c.Dedup = d
 		}
 	}
 }
@@ -201,13 +196,7 @@ func NewHandler[T any, V any](
 		return nil, errors.New("kinesis lambda handler: decode is required")
 	}
 
-	cfg := handlerConfig{
-		recorder:    metrics.Noop{},
-		maxAttempts: 3,
-		backoffBase: 50 * time.Millisecond,
-		backoffMax:  5 * time.Second,
-		now:         time.Now,
-	}
+	cfg := handlerConfig{Config: processor.Defaults(), now: time.Now}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -228,7 +217,7 @@ func NewHandler[T any, V any](
 				if cfg.onDecodeError != nil {
 					cfg.onDecodeError(rec.Kinesis.Data, rec.Kinesis.SequenceNumber, rec.Kinesis.PartitionKey, err)
 				}
-				cfg.recorder.RecordError(name, fmt.Errorf("decode %q: %w", rec.Kinesis.SequenceNumber, err))
+				cfg.Recorder.RecordError(name, fmt.Errorf("decode %q: %w", rec.Kinesis.SequenceNumber, err))
 				// Don't add to BatchItemFailures: a redelivery would just fail
 				// again with the same decode error. Poison pills are routed
 				// off the pipeline via the callback, not via redelivery.
@@ -241,8 +230,8 @@ func NewHandler[T any, V any](
 				eventTime = cfg.now()
 			}
 
-			ok := processWithRetry(ctx, name, eventID, eventTime, value, keyFn, valueFn, store, cacheStore, window, &cfg)
-			if !ok {
+			if err := processor.MergeOne(ctx, &cfg.Config, name, eventID, eventTime,
+				value, keyFn, valueFn, store, cacheStore, window); err != nil {
 				resp.BatchItemFailures = append(resp.BatchItemFailures, events.KinesisBatchItemFailure{
 					ItemIdentifier: rec.Kinesis.SequenceNumber,
 				})
@@ -260,119 +249,4 @@ func buildEventID(rec *events.KinesisEventRecord) string {
 		return rec.Kinesis.SequenceNumber
 	}
 	return rec.EventSourceArn + "/" + rec.Kinesis.SequenceNumber
-}
-
-// processWithRetry returns true on success, false on exhausted retries or a
-// canceled context. Retries are inline with backoff so the Lambda invocation
-// stays linear; the caller adds the record to BatchItemFailures on false.
-func processWithRetry[T any, V any](
-	ctx context.Context,
-	name string,
-	eventID string,
-	eventTime time.Time,
-	value T,
-	keyFn func(T) string,
-	valueFn func(T) V,
-	store state.Store[V],
-	cache state.Cache[V],
-	window *windowed.Config,
-	cfg *handlerConfig,
-) bool {
-	if cfg.dedup != nil && eventID != "" {
-		first, err := cfg.dedup.MarkSeen(ctx, eventID)
-		if err != nil {
-			// Dedup backend transient failure: surface as an error but fall
-			// through to normal processing — silently dropping would
-			// double-count once the dedup table comes back. Same policy as
-			// the streaming runtime.
-			cfg.recorder.RecordError(name, fmt.Errorf("dedup MarkSeen %q: %w", eventID, err))
-		} else if !first {
-			// Already merged on a prior invocation; nothing to do. Counts as
-			// "processed" so we don't add it to BatchItemFailures.
-			cfg.recorder.RecordEvent(name + ":dedup_skip")
-			return true
-		}
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < cfg.maxAttempts; attempt++ {
-		if attempt > 0 {
-			if err := backoffWait(ctx, cfg, attempt); err != nil {
-				return false
-			}
-			cfg.recorder.RecordEvent(name + ":retry")
-		}
-		if err := processOne(ctx, name, eventTime, value, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return false
-			}
-			lastErr = err
-			continue
-		}
-		return true
-	}
-
-	wrapped := fmt.Errorf("pipeline %q event %q failed after %d attempts: %w",
-		name, eventID, cfg.maxAttempts, lastErr)
-	cfg.recorder.RecordError(name, wrapped)
-	cfg.recorder.RecordEvent(name + ":dead_letter")
-	return false
-}
-
-func backoffWait(ctx context.Context, cfg *handlerConfig, attempt int) error {
-	d := cfg.backoffBase << (attempt - 1)
-	if d > cfg.backoffMax {
-		d = cfg.backoffMax
-	}
-	if d > 0 {
-		d += time.Duration(rand.Int64N(int64(d / 2)))
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func processOne[T any, V any](
-	ctx context.Context,
-	name string,
-	eventTime time.Time,
-	value T,
-	keyFn func(T) string,
-	valueFn func(T) V,
-	store state.Store[V],
-	cache state.Cache[V],
-	window *windowed.Config,
-	rec metrics.Recorder,
-) error {
-	entity := keyFn(value)
-	delta := valueFn(value)
-
-	sk := state.Key{Entity: entity}
-	var ttl time.Duration
-	if window != nil {
-		sk.Bucket = window.BucketID(eventTime)
-		ttl = window.Retention
-	}
-
-	storeStart := time.Now()
-	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-		return fmt.Errorf("store MergeUpdate: %w", err)
-	}
-	rec.RecordLatency(name, "store_merge", time.Since(storeStart))
-
-	if cache != nil {
-		cacheStart := time.Now()
-		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-			rec.RecordError(name, fmt.Errorf("cache MergeUpdate: %w", err))
-		}
-		rec.RecordLatency(name, "cache_merge", time.Since(cacheStart))
-	}
-
-	rec.RecordEvent(name)
-	return nil
 }
