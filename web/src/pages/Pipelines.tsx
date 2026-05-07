@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useEffect, useMemo } from 'react'
 import {
   api,
@@ -17,6 +17,18 @@ export function Pipelines() {
     document.title = 'Murmur · Pipelines'
   }, [])
 
+  const [search, setSearch] = useSearchParams()
+  const q = search.get('q') ?? ''
+  const kindFilter = search.get('kind') ?? ''
+  const onlyErrors = search.get('errors') === '1'
+
+  const setParam = (k: string, v: string) => {
+    const next = new URLSearchParams(search)
+    if (v) next.set(k, v)
+    else next.delete(k)
+    setSearch(next, { replace: false })
+  }
+
   const { data: rows, error } = useLivePolling<Row[]>(async (signal) => {
     const infos = await api.listPipelines(signal)
     const enriched = await Promise.all(
@@ -32,6 +44,37 @@ export function Pipelines() {
     return enriched
   }, 2000)
 
+  // Distinct monoid kinds present in the current pipeline set, sorted. Used to
+  // populate the kind quick-filter chips.
+  const kinds = useMemo(() => {
+    const set = new Set<string>()
+    for (const r of rows ?? []) set.add(r.info.monoid_kind)
+    return [...set].sort()
+  }, [rows])
+
+  // Filter rows client-side. Server-side filtering is a future move once we
+  // get past ~hundreds of pipelines; today the entire list fits in one
+  // ListPipelines RPC and filtering in the browser is cheaper than round-trips.
+  const filtered = useMemo(() => {
+    if (!rows) return null
+    const needle = q.trim().toLowerCase()
+    return rows.filter(({ info, stats }) => {
+      if (kindFilter && info.monoid_kind !== kindFilter) return false
+      if (onlyErrors && (!stats || stats.errors === 0)) return false
+      if (!needle) return true
+      const haystack = [
+        info.name,
+        info.monoid_kind,
+        info.store_type,
+        info.cache_type ?? '',
+        info.source_type ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(needle)
+    })
+  }, [rows, q, kindFilter, onlyErrors])
+
   return (
     <div className="px-6 sm:px-10 py-8 max-w-6xl">
       <header className="mb-6">
@@ -41,6 +84,51 @@ export function Pipelines() {
           tab is hidden.
         </p>
       </header>
+
+      {rows && rows.length > 0 && (
+        <div className="mb-4 grid gap-3">
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setParam('q', e.target.value)}
+            placeholder="Filter by name, monoid kind, store, source, cache…"
+            aria-label="Filter pipelines"
+            className="w-full bg-surface border border-border rounded-md px-3 py-2 text-fg-strong placeholder:text-fg-faint"
+          />
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <button
+              type="button"
+              onClick={() => setParam('kind', '')}
+              className={chipClass(!kindFilter)}
+            >
+              all kinds
+            </button>
+            {kinds.map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setParam('kind', k === kindFilter ? '' : k)}
+                className={chipClass(kindFilter === k)}
+              >
+                {k}
+              </button>
+            ))}
+            <span className="mx-1 text-fg-faint">·</span>
+            <button
+              type="button"
+              onClick={() => setParam('errors', onlyErrors ? '' : '1')}
+              className={chipClass(onlyErrors)}
+            >
+              with errors
+            </button>
+            {(q || kindFilter || onlyErrors) && filtered && rows && (
+              <span className="ml-auto text-fg-muted tabular-nums">
+                {filtered.length} of {rows.length}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div
@@ -55,13 +143,37 @@ export function Pipelines() {
 
       {rows && rows.length === 0 && <EmptyState />}
 
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && filtered && filtered.length === 0 && (
+        <FilteredOutState />
+      )}
+
+      {filtered && filtered.length > 0 && (
         <div className="grid gap-3" aria-live="polite">
-          {rows.map((r) => (
+          {filtered.map((r) => (
             <PipelineCard key={r.info.name} row={r} />
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function chipClass(active: boolean): string {
+  return (
+    'px-2 py-0.5 rounded-md border font-mono transition-colors ' +
+    (active
+      ? 'bg-accent-bg border-accent-border text-accent-strong'
+      : 'bg-surface border-border text-fg-muted hover:text-fg-strong hover:bg-surface-2')
+  )
+}
+
+function FilteredOutState() {
+  return (
+    <div className="rounded-lg border border-dashed border-border-strong bg-surface p-8 text-center">
+      <div className="text-fg-strong font-medium">No pipelines match the current filter.</div>
+      <p className="text-fg-muted text-sm mt-2">
+        Clear the search box or pick a different kind chip to widen the view.
+      </p>
     </div>
   )
 }
