@@ -7,8 +7,11 @@
 // Type parameters:
 //
 //	T — the record type emitted by the Source
-//	K — the aggregation key type (e.g. string for PageID)
 //	V — the aggregation value type (e.g. int64 for counters; []byte for sketch state)
+//
+// Aggregation keys are always strings (matching the DDB partition-key shape). Composite
+// keys are the user's responsibility to encode — return e.PageID + "|" + e.Region from
+// the key extractor.
 //
 // Generics are explicit at NewPipeline. This trades some ergonomics for a single
 // builder type rather than a tower of stage-typed builders. Refining the DSL surface is
@@ -27,10 +30,10 @@ import (
 // Pipeline is the assembled aggregation definition. Use the builder methods (From, Key,
 // Value, Aggregate, StoreIn, Cache, ServeOn) to populate it, then Build to validate and
 // freeze.
-type Pipeline[T any, K comparable, V any] struct {
+type Pipeline[T any, V any] struct {
 	name    string
 	src     source.Source[T]
-	keyFn   func(T) K
+	keyFn   func(T) string
 	valueFn func(T) V
 	mon     monoid.Monoid[V]
 	window  *windowed.Config
@@ -48,18 +51,19 @@ type QueryConfig struct {
 
 // NewPipeline begins constructing a pipeline with the given name. The name is used as
 // the basis for state-table names, metrics labels, and the generated gRPC service name.
-func NewPipeline[T any, K comparable, V any](name string) *Pipeline[T, K, V] {
-	return &Pipeline[T, K, V]{name: name}
+func NewPipeline[T any, V any](name string) *Pipeline[T, V] {
+	return &Pipeline[T, V]{name: name}
 }
 
 // From sets the live event source.
-func (p *Pipeline[T, K, V]) From(s source.Source[T]) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) From(s source.Source[T]) *Pipeline[T, V] {
 	p.src = s
 	return p
 }
 
-// Key sets the function that extracts the aggregation key from an event.
-func (p *Pipeline[T, K, V]) Key(fn func(T) K) *Pipeline[T, K, V] {
+// Key sets the function that extracts the aggregation key from an event. Composite keys
+// should be encoded into a single string by the caller (e.g. "<page>|<region>").
+func (p *Pipeline[T, V]) Key(fn func(T) string) *Pipeline[T, V] {
 	p.keyFn = fn
 	return p
 }
@@ -67,14 +71,14 @@ func (p *Pipeline[T, K, V]) Key(fn func(T) K) *Pipeline[T, K, V] {
 // Value sets the function that extracts the aggregation value from an event. For
 // counters, this is typically `func(_ T) int64 { return 1 }`. For sketches that ingest
 // arbitrary keys, the value function would derive the keying byte slice.
-func (p *Pipeline[T, K, V]) Value(fn func(T) V) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) Value(fn func(T) V) *Pipeline[T, V] {
 	p.valueFn = fn
 	return p
 }
 
 // Aggregate sets the structural monoid and any optional windowing config. Pass at most
 // one *windowed.Config — additional configs are ignored.
-func (p *Pipeline[T, K, V]) Aggregate(m monoid.Monoid[V], opts ...windowed.Config) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) Aggregate(m monoid.Monoid[V], opts ...windowed.Config) *Pipeline[T, V] {
 	p.mon = m
 	if len(opts) > 0 {
 		w := opts[0]
@@ -85,7 +89,7 @@ func (p *Pipeline[T, K, V]) Aggregate(m monoid.Monoid[V], opts ...windowed.Confi
 
 // StoreIn sets the primary state store. DynamoDB is the recommended default; this is
 // the source of truth for aggregations.
-func (p *Pipeline[T, K, V]) StoreIn(s state.Store[V]) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) StoreIn(s state.Store[V]) *Pipeline[T, V] {
 	p.store = s
 	return p
 }
@@ -93,13 +97,13 @@ func (p *Pipeline[T, K, V]) StoreIn(s state.Store[V]) *Pipeline[T, K, V] {
 // Cache sets an optional read cache + sketch-accelerator. Valkey is the typical choice.
 // The cache is never source of truth; its contents are repopulatable from the primary
 // Store at any time.
-func (p *Pipeline[T, K, V]) Cache(c state.Cache[V]) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) Cache(c state.Cache[V]) *Pipeline[T, V] {
 	p.cache = c
 	return p
 }
 
 // ServeOn configures the auto-generated gRPC query service.
-func (p *Pipeline[T, K, V]) ServeOn(q QueryConfig) *Pipeline[T, K, V] {
+func (p *Pipeline[T, V]) ServeOn(q QueryConfig) *Pipeline[T, V] {
 	p.query = q
 	return p
 }
@@ -115,7 +119,7 @@ var (
 
 // Build validates the pipeline definition. After Build returns nil, the pipeline can be
 // handed to a runtime executor (streaming, bootstrap, batch).
-func (p *Pipeline[T, K, V]) Build() error {
+func (p *Pipeline[T, V]) Build() error {
 	switch {
 	case p.src == nil:
 		return ErrMissingSource
@@ -132,28 +136,28 @@ func (p *Pipeline[T, K, V]) Build() error {
 }
 
 // Name returns the pipeline name supplied to NewPipeline.
-func (p *Pipeline[T, K, V]) Name() string { return p.name }
+func (p *Pipeline[T, V]) Name() string { return p.name }
 
 // Source returns the configured source (nil before From).
-func (p *Pipeline[T, K, V]) Source() source.Source[T] { return p.src }
+func (p *Pipeline[T, V]) Source() source.Source[T] { return p.src }
 
 // KeyFn returns the configured key extractor (nil before Key).
-func (p *Pipeline[T, K, V]) KeyFn() func(T) K { return p.keyFn }
+func (p *Pipeline[T, V]) KeyFn() func(T) string { return p.keyFn }
 
 // ValueFn returns the configured value extractor (nil before Value).
-func (p *Pipeline[T, K, V]) ValueFn() func(T) V { return p.valueFn }
+func (p *Pipeline[T, V]) ValueFn() func(T) V { return p.valueFn }
 
 // Monoid returns the configured monoid (nil before Aggregate).
-func (p *Pipeline[T, K, V]) Monoid() monoid.Monoid[V] { return p.mon }
+func (p *Pipeline[T, V]) Monoid() monoid.Monoid[V] { return p.mon }
 
 // Window returns the optional windowing config (nil if not windowed).
-func (p *Pipeline[T, K, V]) Window() *windowed.Config { return p.window }
+func (p *Pipeline[T, V]) Window() *windowed.Config { return p.window }
 
 // Store returns the configured state store (nil before StoreIn).
-func (p *Pipeline[T, K, V]) Store() state.Store[V] { return p.store }
+func (p *Pipeline[T, V]) Store() state.Store[V] { return p.store }
 
 // CacheStore returns the optional cache (nil if none).
-func (p *Pipeline[T, K, V]) CacheStore() state.Cache[V] { return p.cache }
+func (p *Pipeline[T, V]) CacheStore() state.Cache[V] { return p.cache }
 
 // Query returns the gRPC query configuration.
-func (p *Pipeline[T, K, V]) Query() QueryConfig { return p.query }
+func (p *Pipeline[T, V]) Query() QueryConfig { return p.query }

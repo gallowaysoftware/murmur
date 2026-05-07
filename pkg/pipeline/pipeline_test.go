@@ -27,31 +27,31 @@ func TestBuild_RequiredFields(t *testing.T) {
 	// Each missing field should be flagged in turn.
 	tests := []struct {
 		name    string
-		mutate  func(*pipeline.Pipeline[testEvent, string, int64])
+		mutate  func(*pipeline.Pipeline[testEvent, int64])
 		wantErr error
 	}{
 		{
 			name:    "missing source",
-			mutate:  func(p *pipeline.Pipeline[testEvent, string, int64]) {},
+			mutate:  func(p *pipeline.Pipeline[testEvent, int64]) {},
 			wantErr: pipeline.ErrMissingSource,
 		},
 		{
 			name: "missing key fn",
-			mutate: func(p *pipeline.Pipeline[testEvent, string, int64]) {
+			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
 				p.From(fakeSource{})
 			},
 			wantErr: pipeline.ErrMissingKeyFn,
 		},
 		{
 			name: "missing value fn",
-			mutate: func(p *pipeline.Pipeline[testEvent, string, int64]) {
+			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
 				p.From(fakeSource{}).Key(func(e testEvent) string { return e.PageID })
 			},
 			wantErr: pipeline.ErrMissingValueFn,
 		},
 		{
 			name: "missing monoid",
-			mutate: func(p *pipeline.Pipeline[testEvent, string, int64]) {
+			mutate: func(p *pipeline.Pipeline[testEvent, int64]) {
 				p.From(fakeSource{}).
 					Key(func(e testEvent) string { return e.PageID }).
 					Value(func(testEvent) int64 { return 1 })
@@ -61,7 +61,7 @@ func TestBuild_RequiredFields(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := pipeline.NewPipeline[testEvent, string, int64]("test")
+			p := pipeline.NewPipeline[testEvent, int64]("test")
 			tc.mutate(p)
 			if err := p.Build(); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("got %v, want %v", err, tc.wantErr)
@@ -71,7 +71,7 @@ func TestBuild_RequiredFields(t *testing.T) {
 }
 
 func TestBuild_AllFieldsSet(t *testing.T) {
-	p := pipeline.NewPipeline[testEvent, string, int64]("page_views").
+	p := pipeline.NewPipeline[testEvent, int64]("page_views").
 		From(fakeSource{}).
 		Key(func(e testEvent) string { return e.PageID }).
 		Value(func(testEvent) int64 { return 1 }).
