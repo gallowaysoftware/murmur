@@ -1,0 +1,22 @@
+version: v2
+
+# Generates TypeScript message types and Connect-Web clients from the same
+# proto contract the Go server reads. Run via `npm run gen` from web/.
+# Output lands in web/src/gen, untracked.
+#
+# The Go bindings are generated separately by the top-level buf.gen.yaml; see
+# `make proto` for that path. Keeping the two configs separate so node-side
+# plugins don't need to be visible to the Go-side build (and vice versa).
+
+plugins:
+  # Connect-ES v2 + protobuf v2: protoc-gen-es alone emits both the message
+  # types AND the GenService descriptor that createClient consumes. The
+  # separate protoc-gen-connect-es plugin is deprecated and incompatible.
+  - local: ["npx", "protoc-gen-es"]
+    out: src/gen
+    opt:
+      - target=ts
+      - import_extension=js
+
+inputs:
+  - directory: ../proto

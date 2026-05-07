@@ -1,0 +1,153 @@
+// Murmur admin / control plane.
+//
+// This service is the single source of truth for what the dashboard UI consumes.
+// Anyone is welcome to point a different UI at the same endpoints (or generate
+// a completely different client from this proto in any language buf supports).
+//
+// The Murmur server uses Connect-RPC, which means a single endpoint speaks
+// THREE protocols on one port:
+//
+//   * gRPC                   — for Go / Java / Rust / Python clients
+//   * gRPC-Web               — for older browsers via a transcoding client
+//   * Connect (HTTP+JSON)    — for browsers and curl, no proxy required
+//
+// The default web UI uses the Connect protocol; the data-plane QueryService
+// historically lived on plain gRPC, and that path keeps working through the
+// same handler.
+syntax = "proto3";
+
+package murmur.admin.v1;
+
+// AdminService is the control surface. Every endpoint is read-only today; any
+// future write endpoints (e.g. trigger replay, swap state-table version) will
+// be added as new RPCs rather than overloading existing ones.
+service AdminService {
+  // Health is a simple liveness probe. Returns "ok" when the server is up.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ListPipelines returns metadata for every registered pipeline.
+  rpc ListPipelines(ListPipelinesRequest) returns (ListPipelinesResponse);
+
+  // GetPipelineMetrics returns the in-memory metrics snapshot for one
+  // pipeline. Suitable for ~2 s polling; for sub-second updates consider
+  // streaming (a planned addition).
+  rpc GetPipelineMetrics(GetPipelineMetricsRequest) returns (PipelineStats);
+
+  // GetState reads the all-time aggregation value for an entity (or one bucket
+  // of a windowed pipeline if `bucket` is set).
+  rpc GetState(GetStateRequest) returns (StateValue);
+
+  // GetWindow returns the aggregation merged across the bucket range covering
+  // the most recent `duration_seconds`, ending at the server's "now".
+  rpc GetWindow(GetWindowRequest) returns (StateValue);
+
+  // GetRange returns the aggregation merged across the bucket range covering
+  // [start_unix, end_unix].
+  rpc GetRange(GetRangeRequest) returns (StateValue);
+}
+
+// HealthRequest is intentionally empty.
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1; // "ok"
+}
+
+// PipelineInfo is the metadata a registered pipeline publishes about itself.
+// Tags / search attributes (Temporal-style) are planned but not yet wired.
+message PipelineInfo {
+  string name = 1;
+  string monoid_kind = 2;
+  bool windowed = 3;
+  // Granularity of windowed buckets (e.g. 86400 for daily). Zero when not windowed.
+  int64 window_granularity_seconds = 4;
+  // Retention horizon for windowed buckets. Zero when not windowed.
+  int64 window_retention_seconds = 5;
+  string store_type = 6;
+  string cache_type = 7;  // empty when no cache configured
+  string source_type = 8; // empty when registered from a non-streaming context
+}
+
+message ListPipelinesRequest {}
+
+message ListPipelinesResponse {
+  repeated PipelineInfo pipelines = 1;
+}
+
+// LatencyStats summarizes a histogram of operation latencies in milliseconds.
+message LatencyStats {
+  int64 n = 1;
+  double p50_ms = 2;
+  double p95_ms = 3;
+  double p99_ms = 4;
+  double max_ms = 5;
+}
+
+// PipelineStats is a point-in-time metrics snapshot.
+message PipelineStats {
+  string pipeline = 1;
+  uint64 events_processed = 2;
+  uint64 errors = 3;
+  // RFC3339Nano-formatted timestamps. Empty when no event has been seen yet.
+  string last_event_at = 4;
+  string last_error_at = 5;
+  string last_error = 6;
+  // Per-op latency histograms keyed by op name (e.g. "store_merge",
+  // "cache_merge"). Implementations may add or omit ops.
+  map<string, LatencyStats> latencies = 7;
+}
+
+message GetPipelineMetricsRequest {
+  string name = 1;
+}
+
+message GetStateRequest {
+  string name = 1;
+  string entity = 2;
+  // Bucket is honored only by windowed pipelines; ignored otherwise.
+  int64 bucket = 3;
+  // When true, server includes a monoid-aware decoded view in the response.
+  bool decode = 4;
+}
+
+message GetWindowRequest {
+  string name = 1;
+  string entity = 2;
+  int64 duration_seconds = 3;
+  bool decode = 4;
+}
+
+message GetRangeRequest {
+  string name = 1;
+  string entity = 2;
+  int64 start_unix = 3;
+  int64 end_unix = 4;
+  bool decode = 5;
+}
+
+// DecodedValue is the monoid-aware rendering of stored state, populated when
+// the request includes decode=true. Exactly one field is set based on the
+// pipeline's monoid kind.
+message DecodedValue {
+  oneof value {
+    // Sum / Count / Min / Max all encode as int64 little-endian.
+    int64 int64_value = 1;
+    // For sketches that aren't yet natively decodable, the byte length of the
+    // stored bytes. Native HLL / TopK / Bloom decoding is a planned follow-up.
+    OpaqueValue opaque = 2;
+  }
+}
+
+message OpaqueValue {
+  int64 byte_len = 1;
+  string kind = 2;
+}
+
+// StateValue is the result of a Get / GetWindow / GetRange. `present` is false
+// when the entity / bucket does not exist; `data` is always the raw stored
+// bytes; `decoded` is populated when the request set decode=true.
+message StateValue {
+  bool present = 1;
+  bytes data = 2;
+  DecodedValue decoded = 3;
+}

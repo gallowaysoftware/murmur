@@ -32,3 +32,8 @@ go.work.sum
 # then copied into pkg/admin/dist for embed.FS. Don't track them.
 /web/dist/
 /pkg/admin/dist/
+
+# Generated TypeScript bindings — produced by `make web-proto` (or
+# `npx buf generate` in web/). The Go bindings under proto/gen/ are checked
+# in (Go is more sensitive to module-path drift), but TS is regenerated.
+/web/src/gen/

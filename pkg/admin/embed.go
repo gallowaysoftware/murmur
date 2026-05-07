@@ -59,11 +59,19 @@ func (notBuiltHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	))
 }
 
-// FullHandler combines the admin REST API and the embedded UI on a single mux. API
-// routes (anything under /api/) go to the JSON server; everything else is served by
-// the SPA handler.
+// FullHandler combines the admin Connect-RPC service and the embedded UI on a
+// single mux. Requests under "/api/" are stripped of the prefix and forwarded
+// to the AdminService handler (which expects paths of the form
+// "/murmur.admin.v1.AdminService/<RPC>"); everything else is served by the
+// SPA handler.
+//
+// The "/api" prefix is a UI-side convention so the same dist works under
+// `npm run dev` (Vite proxy: /api → :8080) and in production (embedded). Other
+// non-browser clients can speak directly to the Connect service at "/" by
+// pointing at <host>:<port>/murmur.admin.v1.AdminService/<RPC> if the API is
+// the only thing on the port.
 func (s *Server) FullHandler() http.Handler {
-	api := s.Handler()
+	api := http.StripPrefix("/api", s.Handler())
 	ui := UIHandler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {

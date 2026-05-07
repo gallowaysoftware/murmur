@@ -28,7 +28,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 | Decayed-value monoid (exponential decay) | ✅ via [`pkg/monoid/compose.DecayedSum`](pkg/monoid/compose/decayed.go) |
 | Minute / hour / daily windowed buckets | ✅ |
 | Web UI (dark mode, pipeline DAG, live metrics, query console) | ✅ [`cmd/murmur-ui`](cmd/murmur-ui) |
-| Admin REST API (`/api/pipelines`, `/api/.../metrics`, …) | ✅ [`pkg/admin`](pkg/admin) |
+| Admin control plane — Connect-RPC, single port speaks gRPC + gRPC-Web + Connect/HTTP-JSON; proto-defined contract for any-language clients | ✅ [`pkg/admin`](pkg/admin), [`proto/murmur/admin/v1/admin.proto`](proto/murmur/admin/v1/admin.proto) |
 | Metrics recorder hook in streaming runtime | ✅ [`pkg/metrics`](pkg/metrics) + `streaming.WithMetrics` |
 | DX facade (`Counter` / `UniqueCount` / `TopN` presets) | ✅ [`pkg/murmur`](pkg/murmur) |
 | Terraform `pipeline-counter` module | ✅ |
@@ -142,14 +142,22 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 
 See [`examples/page-view-counters/`](examples/page-view-counters/) for a runnable two-binary pipeline (`cmd/worker` + `cmd/query`), a Dockerfile producing a multi-binary distroless image, and the Terraform deployment via [`deploy/terraform/modules/pipeline-counter/`](deploy/terraform/modules/pipeline-counter/).
 
-## Web UI
+## Web UI and admin API
 
 ```sh
-go run ./cmd/murmur-ui --demo --addr :8080
+make ui   # builds the UI, builds the binary, runs --demo on :8080
 # open http://localhost:8080
 ```
 
-`--demo` registers three synthetic pipelines and ticks fake metrics so the dashboard, DAG, and query console have data to show. Real workers register via [`pkg/admin.Server.Register`](pkg/admin/server.go) — see the package doc for the contract.
+`--demo` registers three synthetic pipelines and ticks fake metrics so the dashboard, DAG, and query console have data to show. Real workers register via [`pkg/admin.Server.Register`](pkg/admin/server.go).
+
+The bundled UI is one client of the admin API; **anyone can sub in their own**. The contract lives in [`proto/murmur/admin/v1/admin.proto`](proto/murmur/admin/v1/admin.proto) and the server uses [Connect-RPC](https://connectrpc.com), so a single port speaks gRPC, gRPC-Web, and Connect (HTTP+JSON) — pick whichever your client supports. Generate bindings in your language of choice with `buf generate`. Hit it from `curl` if you want:
+
+```sh
+curl -X POST http://localhost:8080/api/murmur.admin.v1.AdminService/ListPipelines \
+    -H 'Content-Type: application/json' -d '{}'
+# → {"pipelines":[{"name":"page_views","monoidKind":"sum",...}, ...]}
+```
 
 ## License
 

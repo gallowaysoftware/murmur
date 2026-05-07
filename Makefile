@@ -106,13 +106,20 @@ ui: web-build build ## Build everything and run cmd/murmur-ui in --demo mode
 # Proto
 # ----------------------------------------------------------------------------
 
+.PHONY: proto-tools
+proto-tools: ## Install Go protobuf / gRPC / Connect plugins required by `make proto`
+	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	$(GO) install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
+
 .PHONY: proto
-proto: ## Regenerate proto/gen/* from proto/murmur/v1/*.proto
-	$(PROTOC) \
-		--go_out=. --go_opt=module=github.com/gallowaysoftware/murmur \
-		--go-grpc_out=. --go-grpc_opt=module=github.com/gallowaysoftware/murmur \
-		--proto_path=proto \
-		proto/murmur/v1/*.proto
+proto: ## Regenerate Go bindings (proto/gen/*) via `buf generate`
+	@which buf >/dev/null 2>&1 || { echo "install buf: brew install bufbuild/buf/buf"; exit 1; }
+	PATH="$$PATH:$$($(GO) env GOPATH)/bin" buf generate
+
+.PHONY: web-proto
+web-proto: web-deps ## Regenerate TypeScript bindings (web/src/gen/*) via npx buf
+	cd web && npx buf generate
 
 # ----------------------------------------------------------------------------
 # Docker compose

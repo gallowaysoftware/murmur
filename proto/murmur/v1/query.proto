@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package murmur.v1;
 
-option go_package = "github.com/gallowaysoftware/murmur/proto/gen/murmur/v1;murmurv1";
+// go_package is set by buf's managed-mode override (see buf.gen.yaml).
 
 // QueryService exposes Murmur's read-side merge for a single pipeline. Phase 1 ships a
 // generic Value (bytes) shape; Phase 2 will codegen pipeline-typed responses

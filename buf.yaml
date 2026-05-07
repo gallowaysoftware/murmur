@@ -1,0 +1,12 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Generated subdirectory; lint applies to source protos only.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

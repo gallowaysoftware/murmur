@@ -1,38 +1,35 @@
-// Package admin is Murmur's read-only HTTP control surface, designed to back the
-// web UI. Endpoints return JSON; CORS is permissive for local-dev cross-origin
-// access from the Vite dev server.
+// Package admin is Murmur's read-only control plane. It implements the
+// AdminService defined in proto/murmur/admin/v1/admin.proto via Connect-RPC,
+// which means the same endpoint speaks gRPC (for Go/JVM/Rust clients),
+// gRPC-Web (for browsers without a proxy), and the Connect protocol (the
+// browser UI's default — plain HTTP+JSON, no special transport).
 //
-// Routes (all GET):
+// The .proto is the contract. Anyone is welcome to point a different UI at
+// the same endpoint, or generate a client in another language with `buf
+// generate`. The Go server below is one implementation among many.
 //
-//	/api/pipelines                                      → []PipelineInfo
-//	/api/pipelines/{name}/metrics                       → PipelineStatsJSON
-//	/api/pipelines/{name}/state?entity=X[&bucket=N]     → StateValueJSON
-//	/api/pipelines/{name}/window?entity=X&duration_s=N  → StateValueJSON (windowed merge)
-//	/api/pipelines/{name}/range?entity=X&start=…&end=…  → StateValueJSON
-//	/api/health                                          → "ok"
-//
-// PipelineInfo / StateValueJSON / etc. are the small DTOs documented inline.
-//
-// Pipelines are registered via Server.Register(name, info, queryFn). The queryFn is a
-// pipeline-typed closure that knows how to read its store and produce []byte for
-// the wire — same encoding pattern as the gRPC Server.Encode hook. This keeps the
-// admin server agnostic to V.
+// Pipelines register themselves with Server.Register; Server.Handler returns
+// an http.Handler that serves the AdminService routes. Pair it with
+// FullHandler if you also want the embedded UI on the same port.
 package admin
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
+	"encoding/binary"
+	"errors"
 	"net/http"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
-	"github.com/gallowaysoftware/murmur/pkg/monoid"
+	adminv1 "github.com/gallowaysoftware/murmur/proto/gen/murmur/admin/v1"
+	"github.com/gallowaysoftware/murmur/proto/gen/murmur/admin/v1/adminv1connect"
 )
 
-// Server is the admin HTTP server. Concurrent-safe.
+// Server is the admin control surface. Concurrent-safe.
 type Server struct {
 	mu        sync.RWMutex
 	pipelines map[string]registered
@@ -44,31 +41,28 @@ type registered struct {
 	Query QueryFn
 }
 
-// PipelineInfo describes a pipeline for the admin UI.
+// PipelineInfo is the Go-friendly form of murmur.admin.v1.PipelineInfo. We keep
+// a separate struct so package consumers don't have to import generated code,
+// and so JSON tags work for any caller that wants to log it.
 type PipelineInfo struct {
-	Name          string `json:"name"`
-	MonoidKind    string `json:"monoid_kind"`
-	Windowed      bool   `json:"windowed"`
-	WindowGranSec int64  `json:"window_granularity_seconds,omitempty"`
-	WindowRetSec  int64  `json:"window_retention_seconds,omitempty"`
-	StoreType     string `json:"store_type"`
-	CacheType     string `json:"cache_type,omitempty"`
-	SourceType    string `json:"source_type,omitempty"`
+	Name          string
+	MonoidKind    string
+	Windowed      bool
+	WindowGranSec int64
+	WindowRetSec  int64
+	StoreType     string
+	CacheType     string
+	SourceType    string
 }
 
-// QueryFn is the read-side closure each registered pipeline supplies. Op is one of:
-//
-//	"get"    — params: entity[, bucket]
-//	"window" — params: entity, duration_s
-//	"range"  — params: entity, start_unix, end_unix
-//
-// Returns the encoded value (e.g. int64 little-endian, HLL bytes) and a "present"
-// flag indicating whether data exists. Implementations should do any monoid merging
-// internally — the admin server doesn't know V.
+// QueryFn is the read-side closure each registered pipeline supplies. The op
+// argument is one of "get" / "window" / "range"; params carries the per-op
+// arguments (entity, bucket, duration_s, start, end, decode). Returns the raw
+// stored bytes plus a `present` flag.
 type QueryFn func(op string, params map[string]string) (data []byte, present bool, err error)
 
-// NewServer constructs an admin Server. The recorder is shared with whatever runtime
-// you've installed it on (typically streaming.Run).
+// NewServer constructs an admin Server. The recorder is shared with whatever
+// runtime you've installed it on (typically streaming.Run via WithMetrics).
 func NewServer(recorder *metrics.InMemory) *Server {
 	return &Server{
 		pipelines: make(map[string]registered),
@@ -76,102 +70,54 @@ func NewServer(recorder *metrics.InMemory) *Server {
 	}
 }
 
-// Register installs a pipeline's metadata and query closure. Idempotent: re-registering
-// the same name overwrites.
+// Register installs a pipeline's metadata and query closure. Idempotent —
+// re-registering the same name overwrites.
 func (s *Server) Register(info PipelineInfo, query QueryFn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pipelines[info.Name] = registered{Info: info, Query: query}
 }
 
-// RegisterFromMonoid is a convenience that derives MonoidKind from a monoid.Monoid[V]
-// instance. Equivalent to filling out PipelineInfo by hand.
-func (s *Server) RegisterFromMonoid(name string, m monoid.Monoid[any], info PipelineInfo, query QueryFn) {
-	if info.Name == "" {
-		info.Name = name
-	}
-	if m != nil {
-		info.MonoidKind = string(m.Kind())
-	}
-	s.Register(info, query)
-}
-
-// Handler returns the http.Handler with all routes registered. Mount at "/" or under
-// a subpath via http.StripPrefix.
+// Handler returns an http.Handler implementing the AdminService routes. Mount
+// at "/" or under a subpath via http.StripPrefix.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/health", s.handleHealth)
-	mux.HandleFunc("GET /api/pipelines", s.handleListPipelines)
-	mux.HandleFunc("GET /api/pipelines/{name}/metrics", s.handlePipelineMetrics)
-	mux.HandleFunc("GET /api/pipelines/{name}/state", s.handleQuery("get"))
-	mux.HandleFunc("GET /api/pipelines/{name}/window", s.handleQuery("window"))
-	mux.HandleFunc("GET /api/pipelines/{name}/range", s.handleQuery("range"))
+	path, h := adminv1connect.NewAdminServiceHandler(s)
+	mux.Handle(path, h)
 	return cors(mux)
 }
 
-// PipelineStatsJSON is the wire shape of a metrics snapshot.
-type PipelineStatsJSON struct {
-	Pipeline        string                 `json:"pipeline"`
-	EventsProcessed uint64                 `json:"events_processed"`
-	Errors          uint64                 `json:"errors"`
-	LastEventAt     string                 `json:"last_event_at,omitempty"`
-	LastErrorAt     string                 `json:"last_error_at,omitempty"`
-	LastError       string                 `json:"last_error,omitempty"`
-	Latencies       map[string]LatencyJSON `json:"latencies"`
+// --- AdminServiceHandler implementation ---
+
+func (s *Server) Health(_ context.Context, _ *connect.Request[adminv1.HealthRequest]) (*connect.Response[adminv1.HealthResponse], error) {
+	return connect.NewResponse(&adminv1.HealthResponse{Status: "ok"}), nil
 }
 
-// LatencyJSON is the wire shape of a latency histogram.
-type LatencyJSON struct {
-	N   int     `json:"n"`
-	P50 float64 `json:"p50_ms"`
-	P95 float64 `json:"p95_ms"`
-	P99 float64 `json:"p99_ms"`
-	Max float64 `json:"max_ms"`
-}
-
-// StateValueJSON is the wire shape of a state read.
-type StateValueJSON struct {
-	Present bool `json:"present"`
-	// DataB64 is the value bytes encoded as base64 (Go's encoding/json does this for []byte).
-	DataB64 []byte `json:"data,omitempty"`
-	// Decoded is a monoid-aware rendering of the bytes for UI consumption: int64 for
-	// Sum/Count/Min/Max, an opaque "byteLen" object for sketches today (HLL/TopK/
-	// Bloom decode to cardinality/items/size — wire-up planned in a follow-up).
-	// nil unless the request includes ?decode=true.
-	Decoded any `json:"decoded,omitempty"`
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	_, _ = w.Write([]byte("ok"))
-}
-
-func (s *Server) handleListPipelines(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) ListPipelines(_ context.Context, _ *connect.Request[adminv1.ListPipelinesRequest]) (*connect.Response[adminv1.ListPipelinesResponse], error) {
 	s.mu.RLock()
-	infos := make([]PipelineInfo, 0, len(s.pipelines))
+	infos := make([]*adminv1.PipelineInfo, 0, len(s.pipelines))
 	for _, r := range s.pipelines {
-		infos = append(infos, r.Info)
+		infos = append(infos, toProtoInfo(r.Info))
 	}
 	s.mu.RUnlock()
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-	writeJSON(w, infos)
+	return connect.NewResponse(&adminv1.ListPipelinesResponse{Pipelines: infos}), nil
 }
 
-func (s *Server) handlePipelineMetrics(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+func (s *Server) GetPipelineMetrics(_ context.Context, req *connect.Request[adminv1.GetPipelineMetricsRequest]) (*connect.Response[adminv1.PipelineStats], error) {
+	name := req.Msg.GetName()
 	if !s.exists(name) {
-		http.NotFound(w, r)
-		return
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
 	}
 	if s.recorder == nil {
-		writeJSON(w, PipelineStatsJSON{Pipeline: name, Latencies: map[string]LatencyJSON{}})
-		return
+		return connect.NewResponse(&adminv1.PipelineStats{Pipeline: name, Latencies: map[string]*adminv1.LatencyStats{}}), nil
 	}
 	snap := s.recorder.SnapshotOne(name)
-	out := PipelineStatsJSON{
+	out := &adminv1.PipelineStats{
 		Pipeline:        snap.Pipeline,
 		EventsProcessed: snap.EventsProcessed,
 		Errors:          snap.Errors,
-		Latencies:       map[string]LatencyJSON{},
+		Latencies:       map[string]*adminv1.LatencyStats{},
 	}
 	if !snap.LastEventAt.IsZero() {
 		out.LastEventAt = snap.LastEventAt.UTC().Format(time.RFC3339Nano)
@@ -181,107 +127,163 @@ func (s *Server) handlePipelineMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	out.LastError = snap.LastError
 	for op, lat := range snap.Latencies {
-		out.Latencies[op] = LatencyJSON{N: lat.N, P50: lat.P50, P95: lat.P95, P99: lat.P99, Max: lat.Max}
+		out.Latencies[op] = &adminv1.LatencyStats{
+			N:     int64(lat.N),
+			P50Ms: lat.P50,
+			P95Ms: lat.P95,
+			P99Ms: lat.P99,
+			MaxMs: lat.Max,
+		}
 	}
-	writeJSON(w, out)
+	return connect.NewResponse(out), nil
 }
 
-func (s *Server) handleQuery(op string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		s.mu.RLock()
-		reg, ok := s.pipelines[name]
-		s.mu.RUnlock()
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		params := map[string]string{}
-		for k, v := range r.URL.Query() {
-			if len(v) > 0 {
-				params[k] = v[0]
-			}
-		}
-		// Light validation per op.
-		if _, hasEntity := params["entity"]; !hasEntity {
-			http.Error(w, "missing entity param", http.StatusBadRequest)
-			return
-		}
-		if op == "window" {
-			if _, ok := params["duration_s"]; !ok {
-				http.Error(w, "missing duration_s param", http.StatusBadRequest)
-				return
-			}
-			if _, err := strconv.ParseInt(params["duration_s"], 10, 64); err != nil {
-				http.Error(w, "duration_s must be an integer (seconds)", http.StatusBadRequest)
-				return
-			}
-		}
-		if op == "range" {
-			for _, k := range []string{"start", "end"} {
-				v, ok := params[k]
-				if !ok {
-					http.Error(w, fmt.Sprintf("missing %s param (unix seconds)", k), http.StatusBadRequest)
-					return
-				}
-				if _, err := strconv.ParseInt(v, 10, 64); err != nil {
-					http.Error(w, fmt.Sprintf("%s must be an integer (unix seconds)", k), http.StatusBadRequest)
-					return
-				}
-			}
-		}
-		data, present, err := reg.Query(op, params)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		out := StateValueJSON{Present: present, DataB64: data}
-		if present && r.URL.Query().Get("decode") == "true" {
-			out.Decoded = decodeForKind(reg.Info.MonoidKind, data)
-		}
-		writeJSON(w, out)
+func (s *Server) GetState(_ context.Context, req *connect.Request[adminv1.GetStateRequest]) (*connect.Response[adminv1.StateValue], error) {
+	reg, ok := s.lookup(req.Msg.GetName())
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
 	}
+	if req.Msg.GetEntity() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("entity is required"))
+	}
+	params := map[string]string{"entity": req.Msg.GetEntity()}
+	if req.Msg.GetBucket() != 0 {
+		params["bucket"] = formatInt(req.Msg.GetBucket())
+	}
+	return s.dispatch(reg, "get", params, req.Msg.GetDecode())
 }
 
-// decodeForKind returns a JSON-friendly rendering of a stored value based on the
-// pipeline's monoid Kind. Unknown / sketch kinds return an opaque {byte_len: N}
-// object today; native Spark / Valkey-backed sketch decoding is roadmap.
-func decodeForKind(kind string, data []byte) any {
-	switch kind {
-	case "sum", "count", "min", "max":
-		if len(data) < 8 {
-			return map[string]any{"int64": 0}
-		}
-		var v int64
-		for i := 0; i < 8; i++ {
-			v |= int64(data[i]) << (i * 8)
-		}
-		return map[string]any{"int64": v}
-	default:
-		return map[string]any{"byte_len": len(data), "kind": kind}
+func (s *Server) GetWindow(_ context.Context, req *connect.Request[adminv1.GetWindowRequest]) (*connect.Response[adminv1.StateValue], error) {
+	reg, ok := s.lookup(req.Msg.GetName())
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
 	}
+	if req.Msg.GetEntity() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("entity is required"))
+	}
+	if req.Msg.GetDurationSeconds() <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("duration_seconds must be positive"))
+	}
+	params := map[string]string{
+		"entity":     req.Msg.GetEntity(),
+		"duration_s": formatInt(req.Msg.GetDurationSeconds()),
+	}
+	return s.dispatch(reg, "window", params, req.Msg.GetDecode())
+}
+
+func (s *Server) GetRange(_ context.Context, req *connect.Request[adminv1.GetRangeRequest]) (*connect.Response[adminv1.StateValue], error) {
+	reg, ok := s.lookup(req.Msg.GetName())
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
+	}
+	if req.Msg.GetEntity() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("entity is required"))
+	}
+	if req.Msg.GetEndUnix() < req.Msg.GetStartUnix() {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("end_unix must be ≥ start_unix"))
+	}
+	params := map[string]string{
+		"entity": req.Msg.GetEntity(),
+		"start":  formatInt(req.Msg.GetStartUnix()),
+		"end":    formatInt(req.Msg.GetEndUnix()),
+	}
+	return s.dispatch(reg, "range", params, req.Msg.GetDecode())
+}
+
+// --- helpers ---
+
+func (s *Server) lookup(name string) (registered, bool) {
+	s.mu.RLock()
+	r, ok := s.pipelines[name]
+	s.mu.RUnlock()
+	return r, ok
 }
 
 func (s *Server) exists(name string) bool {
-	s.mu.RLock()
-	_, ok := s.pipelines[name]
-	s.mu.RUnlock()
+	_, ok := s.lookup(name)
 	return ok
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func (s *Server) dispatch(reg registered, op string, params map[string]string, decode bool) (*connect.Response[adminv1.StateValue], error) {
+	data, present, err := reg.Query(op, params)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	out := &adminv1.StateValue{Present: present, Data: data}
+	if present && decode {
+		out.Decoded = decodeForKind(reg.Info.MonoidKind, data)
+	}
+	return connect.NewResponse(out), nil
+}
+
+// decodeForKind renders stored bytes as a monoid-typed DecodedValue. Unknown
+// kinds and sketches today produce an Opaque payload; native sketch decoding
+// (HLL → cardinality, TopK → items, Bloom → size+FPR) is a planned addition.
+func decodeForKind(kind string, data []byte) *adminv1.DecodedValue {
+	switch kind {
+	case "sum", "count", "min", "max":
+		var v int64
+		if len(data) >= 8 {
+			v = int64(binary.LittleEndian.Uint64(data))
+		}
+		return &adminv1.DecodedValue{
+			Value: &adminv1.DecodedValue_Int64Value{Int64Value: v},
+		}
+	default:
+		return &adminv1.DecodedValue{
+			Value: &adminv1.DecodedValue_Opaque{
+				Opaque: &adminv1.OpaqueValue{ByteLen: int64(len(data)), Kind: kind},
+			},
+		}
 	}
 }
 
-// cors permits all origins for local dev. Tighten for production.
+func toProtoInfo(p PipelineInfo) *adminv1.PipelineInfo {
+	return &adminv1.PipelineInfo{
+		Name:                     p.Name,
+		MonoidKind:               p.MonoidKind,
+		Windowed:                 p.Windowed,
+		WindowGranularitySeconds: p.WindowGranSec,
+		WindowRetentionSeconds:   p.WindowRetSec,
+		StoreType:                p.StoreType,
+		CacheType:                p.CacheType,
+		SourceType:               p.SourceType,
+	}
+}
+
+func formatInt(n int64) string {
+	// Avoid strconv import-cycle paranoia in hot paths; this is fine for params.
+	const digits = "0123456789"
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	buf := [20]byte{}
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = digits[n%10]
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// cors permits all origins for local dev. Tighten for production via a future
+// WithAllowedOrigins option (tracked in STABILITY.md).
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, Grpc-Timeout")
+		w.Header().Set("Access-Control-Expose-Headers", "Grpc-Status, Grpc-Message")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

@@ -1,0 +1,39 @@
+version: v2
+
+# Module path to strip from go_package; the server lives at
+# github.com/gallowaysoftware/murmur and the generated code at
+# proto/gen/...
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/gallowaysoftware/murmur/proto/gen
+
+plugins:
+  # Local plugins keep the build self-contained (no buf.build auth required).
+  # Install via `make proto-tools`:
+  #   protoc-gen-go         — google.golang.org/protobuf/cmd/protoc-gen-go
+  #   protoc-gen-go-grpc    — google.golang.org/grpc/cmd/protoc-gen-go-grpc
+  #   protoc-gen-connect-go — connectrpc.com/connect/cmd/protoc-gen-connect-go
+  - local: protoc-gen-go
+    out: proto/gen
+    opt:
+      - paths=source_relative
+
+  # gRPC server bindings (kept so non-Connect clients can talk to the same
+  # endpoint over plain gRPC).
+  - local: protoc-gen-go-grpc
+    out: proto/gen
+    opt:
+      - paths=source_relative
+
+  # Connect-RPC server + client bindings — handles gRPC, gRPC-Web, and Connect
+  # protocol on one port. The web UI uses Connect over HTTP+JSON; Go clients
+  # can use either Connect or the grpc-go bindings.
+  - local: protoc-gen-connect-go
+    out: proto/gen
+    opt:
+      - paths=source_relative
+
+inputs:
+  - directory: proto
