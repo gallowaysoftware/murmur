@@ -3,22 +3,22 @@ package grpc_test
 import (
 	"context"
 	"encoding/binary"
-	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
+	"connectrpc.com/connect"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	mgrpc "github.com/gallowaysoftware/murmur/pkg/query/grpc"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 	pb "github.com/gallowaysoftware/murmur/proto/gen/murmur/v1"
+	"github.com/gallowaysoftware/murmur/proto/gen/murmur/v1/murmurv1connect"
 )
 
-// fakeStore is an in-memory state.Store[int64] for the gRPC server tests.
+// fakeStore is an in-memory state.Store[int64] for the query server tests.
 type fakeStore map[state.Key]int64
 
 func (s fakeStore) Get(_ context.Context, k state.Key) (int64, bool, error) {
@@ -39,28 +39,17 @@ func (s fakeStore) MergeUpdate(_ context.Context, k state.Key, d int64, _ time.D
 }
 func (s fakeStore) Close() error { return nil }
 
-// startServer spins up a gRPC Server backed by Server[V] over an in-memory bufconn.
-// Returns a connected client and a cleanup func.
-func startServer[V any](t *testing.T, cfg mgrpc.Config[V]) (pb.QueryServiceClient, func()) {
+// startServer spins up an httptest.Server hosting the Connect QueryService and
+// returns a client speaking the Connect protocol. The same server would also
+// serve grpc / grpc-web traffic — Connect handles all three on one mux.
+func startServer[V any](t *testing.T, cfg mgrpc.Config[V]) (murmurv1connect.QueryServiceClient, func()) {
 	t.Helper()
-	lis := bufconn.Listen(1024 * 1024)
-	srv := grpc.NewServer()
-	pb.RegisterQueryServiceServer(srv, mgrpc.NewServer(cfg))
-	go func() { _ = srv.Serve(lis) }()
-
-	dialer := func(context.Context, string) (net.Conn, error) { return lis.Dial() }
-	conn, err := grpc.NewClient("passthrough://bufnet",
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		t.Fatalf("grpc dial: %v", err)
-	}
-	cleanup := func() {
-		_ = conn.Close()
-		srv.Stop()
-	}
-	return pb.NewQueryServiceClient(conn), cleanup
+	srv := mgrpc.NewServer(cfg)
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	httpSrv := httptest.NewServer(mux)
+	client := murmurv1connect.NewQueryServiceClient(httpSrv.Client(), httpSrv.URL)
+	return client, httpSrv.Close
 }
 
 func decodeInt64(b []byte) int64 {
@@ -70,7 +59,7 @@ func decodeInt64(b []byte) int64 {
 	return int64(binary.LittleEndian.Uint64(b))
 }
 
-func TestGRPC_Get_NonWindowed(t *testing.T) {
+func TestQuery_Get_NonWindowed(t *testing.T) {
 	store := fakeStore{
 		state.Key{Entity: "page-A"}: 42,
 		state.Key{Entity: "page-B"}: 7,
@@ -93,10 +82,11 @@ func TestGRPC_Get_NonWindowed(t *testing.T) {
 		{"missing", false, 0},
 	}
 	for _, tc := range cases {
-		v, err := client.Get(ctx, &pb.GetRequest{Entity: tc.entity})
+		resp, err := client.Get(ctx, connect.NewRequest(&pb.GetRequest{Entity: tc.entity}))
 		if err != nil {
 			t.Fatalf("Get %s: %v", tc.entity, err)
 		}
+		v := resp.Msg
 		if v.GetPresent() != tc.wantPresent {
 			t.Errorf("%s present: got %v, want %v", tc.entity, v.GetPresent(), tc.wantPresent)
 		}
@@ -106,7 +96,7 @@ func TestGRPC_Get_NonWindowed(t *testing.T) {
 	}
 }
 
-func TestGRPC_GetMany(t *testing.T) {
+func TestQuery_GetMany(t *testing.T) {
 	store := fakeStore{
 		state.Key{Entity: "a"}: 1,
 		state.Key{Entity: "c"}: 3,
@@ -118,27 +108,28 @@ func TestGRPC_GetMany(t *testing.T) {
 	})
 	defer cleanup()
 
-	resp, err := client.GetMany(context.Background(), &pb.GetManyRequest{
+	resp, err := client.GetMany(context.Background(), connect.NewRequest(&pb.GetManyRequest{
 		Entities: []string{"a", "missing", "c"},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("GetMany: %v", err)
 	}
-	if len(resp.GetValues()) != 3 {
-		t.Fatalf("len(values) = %d, want 3", len(resp.GetValues()))
+	values := resp.Msg.GetValues()
+	if len(values) != 3 {
+		t.Fatalf("len(values) = %d, want 3", len(values))
 	}
-	if !resp.Values[0].Present || decodeInt64(resp.Values[0].Data) != 1 {
-		t.Errorf("[0] a: got present=%v val=%d, want true 1", resp.Values[0].Present, decodeInt64(resp.Values[0].Data))
+	if !values[0].Present || decodeInt64(values[0].Data) != 1 {
+		t.Errorf("[0] a: got present=%v val=%d, want true 1", values[0].Present, decodeInt64(values[0].Data))
 	}
-	if resp.Values[1].Present {
+	if values[1].Present {
 		t.Errorf("[1] missing: present=true, want false")
 	}
-	if !resp.Values[2].Present || decodeInt64(resp.Values[2].Data) != 3 {
-		t.Errorf("[2] c: got present=%v val=%d, want true 3", resp.Values[2].Present, decodeInt64(resp.Values[2].Data))
+	if !values[2].Present || decodeInt64(values[2].Data) != 3 {
+		t.Errorf("[2] c: got present=%v val=%d, want true 3", values[2].Present, decodeInt64(values[2].Data))
 	}
 }
 
-func TestGRPC_GetWindow_Daily(t *testing.T) {
+func TestQuery_GetWindow_Daily(t *testing.T) {
 	w := windowed.Daily(30 * 24 * time.Hour)
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 
@@ -170,21 +161,21 @@ func TestGRPC_GetWindow_Daily(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := client.GetWindow(context.Background(), &pb.GetWindowRequest{
+			resp, err := client.GetWindow(context.Background(), connect.NewRequest(&pb.GetWindowRequest{
 				Entity:          "page-A",
 				DurationSeconds: int64(tc.duration / time.Second),
-			})
+			}))
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
-			if got := decodeInt64(resp.GetData()); got != tc.want {
+			if got := decodeInt64(resp.Msg.GetData()); got != tc.want {
 				t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestGRPC_GetWindow_NotWindowed(t *testing.T) {
+func TestQuery_GetWindow_NotWindowed(t *testing.T) {
 	store := fakeStore{}
 	client, cleanup := startServer(t, mgrpc.Config[int64]{
 		Store:  store,
@@ -194,10 +185,15 @@ func TestGRPC_GetWindow_NotWindowed(t *testing.T) {
 	})
 	defer cleanup()
 
-	_, err := client.GetWindow(context.Background(), &pb.GetWindowRequest{
+	_, err := client.GetWindow(context.Background(), connect.NewRequest(&pb.GetWindowRequest{
 		Entity: "x", DurationSeconds: 60,
-	})
+	}))
 	if err == nil {
 		t.Fatal("expected error for GetWindow on non-windowed pipeline; got nil")
+	}
+	// Sanity-check that the error code surfaced via Connect carries the expected
+	// FailedPrecondition signal — clients should be able to branch on this.
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("error code: got %s, want failed_precondition", connect.CodeOf(err))
 	}
 }

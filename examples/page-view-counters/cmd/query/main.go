@@ -1,36 +1,39 @@
-// gRPC query server for the page-view-counters example.
+// Connect-RPC query server for the page-view-counters example.
 //
-// Serves Get / GetMany / GetWindow / GetRange against the same DynamoDB table the
-// streaming worker writes to.
+// Serves Get / GetMany / GetWindow / GetRange against the same DynamoDB table
+// the streaming worker writes to. The endpoint speaks gRPC, gRPC-Web, and
+// Connect (HTTP+JSON) on the same port — pick whichever your client supports.
 //
-// In production this binary runs as a separate ECS Fargate service behind an ALB.
-// Locally:
+// In production this binary runs as a separate ECS Fargate service behind an
+// ALB (the Terraform pipeline-counter module's `query` service). Locally:
 //
 //	export DDB_LOCAL_ENDPOINT=http://localhost:8000
 //	go run ./examples/page-view-counters/cmd/query
 //
-// Then call it with grpcurl:
+// Then call it with grpcurl, buf curl, or plain curl:
 //
 //	grpcurl -plaintext -d '{"entity": "page-A"}' \
 //	    localhost:50051 murmur.v1.QueryService/Get
-//	grpcurl -plaintext -d '{"entity": "page-A", "duration_seconds": 86400}' \
-//	    localhost:50051 murmur.v1.QueryService/GetWindow
+//	curl -X POST http://localhost:50051/murmur.v1.QueryService/Get \
+//	    -H 'Content-Type: application/json' -d '{"entity": "page-A"}'
 package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"google.golang.org/grpc"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	pageviews "github.com/gallowaysoftware/murmur/examples/page-view-counters"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	mgrpc "github.com/gallowaysoftware/murmur/pkg/query/grpc"
-	pb "github.com/gallowaysoftware/murmur/proto/gen/murmur/v1"
 )
 
 func main() {
@@ -49,12 +52,11 @@ func main() {
 	defer cancel()
 
 	// withSource=false: query process doesn't need a Kafka consumer.
-	pipe, store, cache, err := pageviews.Build(ctx, cfg, false)
+	_, store, cache, err := pageviews.Build(ctx, cfg, false)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
 		os.Exit(2)
 	}
-	_ = pipe // pipeline definition documents the wiring; the gRPC server reads through `store`.
 	defer func() {
 		if cache != nil {
 			_ = cache.Close()
@@ -70,27 +72,33 @@ func main() {
 		Encode: mgrpc.Int64LE(),
 	})
 
-	lis, err := net.Listen("tcp", cfg.GRPCAddr)
-	if err != nil {
-		logger.Error("listen", "addr", cfg.GRPCAddr, "err", err)
-		os.Exit(2)
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+
+	// h2c gives us HTTP/2 over plaintext on the same port — required for native
+	// gRPC clients. Connect (HTTP+JSON) and gRPC-Web work over plain HTTP/1.1
+	// on the same listener.
+	httpSrv := &http.Server{
+		Addr:              cfg.GRPCAddr,
+		Handler:           h2c.NewHandler(mux, &http2.Server{}),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
-	gs := grpc.NewServer()
-	pb.RegisterQueryServiceServer(gs, srv)
 
-	logger.Info("query server listening", "addr", cfg.GRPCAddr, "ddb_table", cfg.DDBTable)
+	logger.Info("query server listening (gRPC + gRPC-Web + Connect)",
+		"addr", cfg.GRPCAddr, "ddb_table", cfg.DDBTable)
 
-	// Serve until context cancellation.
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- gs.Serve(lis) }()
+	go func() { serveErr <- httpSrv.ListenAndServe() }()
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
-		gs.GracefulStop()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
 	case err := <-serveErr:
-		if err != nil {
-			logger.Error("grpc Serve returned", "err", err)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("http Serve returned", "err", err)
 			os.Exit(1)
 		}
 	}
