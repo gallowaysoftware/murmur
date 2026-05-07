@@ -132,15 +132,49 @@ message DecodedValue {
   oneof value {
     // Sum / Count / Min / Max all encode as int64 little-endian.
     int64 int64_value = 1;
-    // For sketches that aren't yet natively decodable, the byte length of the
-    // stored bytes. Native HLL / TopK / Bloom decoding is a planned follow-up.
+    // Generic fallback for monoids the server doesn't have a typed decoder for.
     OpaqueValue opaque = 2;
+    // HLL → estimated cardinality.
+    HLLDecoded hll = 3;
+    // TopK → ordered list of (key, count) heavy hitters.
+    TopKDecoded topk = 4;
+    // Bloom → bit-array shape and approximate insertion count.
+    BloomDecoded bloom = 5;
   }
 }
 
 message OpaqueValue {
   int64 byte_len = 1;
   string kind = 2;
+}
+
+message HLLDecoded {
+  // Approximate number of distinct elements observed. Standard error ~1.6%
+  // at HLL++ default precision (14).
+  uint64 cardinality_estimate = 1;
+  int64 byte_len = 2;
+}
+
+message TopKItem {
+  string key = 1;
+  uint64 count = 2;
+}
+
+message TopKDecoded {
+  // K — the configured top-K capacity. Items are returned sorted by descending
+  // count, ties broken by lexicographic key.
+  int64 k = 1;
+  repeated TopKItem items = 2;
+}
+
+message BloomDecoded {
+  // m — the bit-array length (capacity).
+  uint64 capacity_bits = 1;
+  // k — the number of hash functions per element.
+  uint32 hash_functions = 2;
+  // Estimated number of distinct elements inserted, derived from the bit-fill
+  // ratio. Less reliable as the filter saturates.
+  uint64 approx_size = 3;
 }
 
 // StateValue is the result of a Get / GetWindow / GetRange. `present` is false

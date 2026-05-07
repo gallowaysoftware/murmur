@@ -743,6 +743,9 @@ type DecodedValue struct {
 	//
 	//	*DecodedValue_Int64Value
 	//	*DecodedValue_Opaque
+	//	*DecodedValue_Hll
+	//	*DecodedValue_Topk
+	//	*DecodedValue_Bloom
 	Value         isDecodedValue_Value `protobuf_oneof:"value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -803,6 +806,33 @@ func (x *DecodedValue) GetOpaque() *OpaqueValue {
 	return nil
 }
 
+func (x *DecodedValue) GetHll() *HLLDecoded {
+	if x != nil {
+		if x, ok := x.Value.(*DecodedValue_Hll); ok {
+			return x.Hll
+		}
+	}
+	return nil
+}
+
+func (x *DecodedValue) GetTopk() *TopKDecoded {
+	if x != nil {
+		if x, ok := x.Value.(*DecodedValue_Topk); ok {
+			return x.Topk
+		}
+	}
+	return nil
+}
+
+func (x *DecodedValue) GetBloom() *BloomDecoded {
+	if x != nil {
+		if x, ok := x.Value.(*DecodedValue_Bloom); ok {
+			return x.Bloom
+		}
+	}
+	return nil
+}
+
 type isDecodedValue_Value interface {
 	isDecodedValue_Value()
 }
@@ -813,14 +843,34 @@ type DecodedValue_Int64Value struct {
 }
 
 type DecodedValue_Opaque struct {
-	// For sketches that aren't yet natively decodable, the byte length of the
-	// stored bytes. Native HLL / TopK / Bloom decoding is a planned follow-up.
+	// Generic fallback for monoids the server doesn't have a typed decoder for.
 	Opaque *OpaqueValue `protobuf:"bytes,2,opt,name=opaque,proto3,oneof"`
+}
+
+type DecodedValue_Hll struct {
+	// HLL → estimated cardinality.
+	Hll *HLLDecoded `protobuf:"bytes,3,opt,name=hll,proto3,oneof"`
+}
+
+type DecodedValue_Topk struct {
+	// TopK → ordered list of (key, count) heavy hitters.
+	Topk *TopKDecoded `protobuf:"bytes,4,opt,name=topk,proto3,oneof"`
+}
+
+type DecodedValue_Bloom struct {
+	// Bloom → bit-array shape and approximate insertion count.
+	Bloom *BloomDecoded `protobuf:"bytes,5,opt,name=bloom,proto3,oneof"`
 }
 
 func (*DecodedValue_Int64Value) isDecodedValue_Value() {}
 
 func (*DecodedValue_Opaque) isDecodedValue_Value() {}
+
+func (*DecodedValue_Hll) isDecodedValue_Value() {}
+
+func (*DecodedValue_Topk) isDecodedValue_Value() {}
+
+func (*DecodedValue_Bloom) isDecodedValue_Value() {}
 
 type OpaqueValue struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -874,6 +924,230 @@ func (x *OpaqueValue) GetKind() string {
 	return ""
 }
 
+type HLLDecoded struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Approximate number of distinct elements observed. Standard error ~1.6%
+	// at HLL++ default precision (14).
+	CardinalityEstimate uint64 `protobuf:"varint,1,opt,name=cardinality_estimate,json=cardinalityEstimate,proto3" json:"cardinality_estimate,omitempty"`
+	ByteLen             int64  `protobuf:"varint,2,opt,name=byte_len,json=byteLen,proto3" json:"byte_len,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *HLLDecoded) Reset() {
+	*x = HLLDecoded{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HLLDecoded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HLLDecoded) ProtoMessage() {}
+
+func (x *HLLDecoded) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HLLDecoded.ProtoReflect.Descriptor instead.
+func (*HLLDecoded) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *HLLDecoded) GetCardinalityEstimate() uint64 {
+	if x != nil {
+		return x.CardinalityEstimate
+	}
+	return 0
+}
+
+func (x *HLLDecoded) GetByteLen() int64 {
+	if x != nil {
+		return x.ByteLen
+	}
+	return 0
+}
+
+type TopKItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Count         uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopKItem) Reset() {
+	*x = TopKItem{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopKItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopKItem) ProtoMessage() {}
+
+func (x *TopKItem) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopKItem.ProtoReflect.Descriptor instead.
+func (*TopKItem) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *TopKItem) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *TopKItem) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+type TopKDecoded struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// K — the configured top-K capacity. Items are returned sorted by descending
+	// count, ties broken by lexicographic key.
+	K             int64       `protobuf:"varint,1,opt,name=k,proto3" json:"k,omitempty"`
+	Items         []*TopKItem `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopKDecoded) Reset() {
+	*x = TopKDecoded{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopKDecoded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopKDecoded) ProtoMessage() {}
+
+func (x *TopKDecoded) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopKDecoded.ProtoReflect.Descriptor instead.
+func (*TopKDecoded) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *TopKDecoded) GetK() int64 {
+	if x != nil {
+		return x.K
+	}
+	return 0
+}
+
+func (x *TopKDecoded) GetItems() []*TopKItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+type BloomDecoded struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// m — the bit-array length (capacity).
+	CapacityBits uint64 `protobuf:"varint,1,opt,name=capacity_bits,json=capacityBits,proto3" json:"capacity_bits,omitempty"`
+	// k — the number of hash functions per element.
+	HashFunctions uint32 `protobuf:"varint,2,opt,name=hash_functions,json=hashFunctions,proto3" json:"hash_functions,omitempty"`
+	// Estimated number of distinct elements inserted, derived from the bit-fill
+	// ratio. Less reliable as the filter saturates.
+	ApproxSize    uint64 `protobuf:"varint,3,opt,name=approx_size,json=approxSize,proto3" json:"approx_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BloomDecoded) Reset() {
+	*x = BloomDecoded{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BloomDecoded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BloomDecoded) ProtoMessage() {}
+
+func (x *BloomDecoded) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BloomDecoded.ProtoReflect.Descriptor instead.
+func (*BloomDecoded) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *BloomDecoded) GetCapacityBits() uint64 {
+	if x != nil {
+		return x.CapacityBits
+	}
+	return 0
+}
+
+func (x *BloomDecoded) GetHashFunctions() uint32 {
+	if x != nil {
+		return x.HashFunctions
+	}
+	return 0
+}
+
+func (x *BloomDecoded) GetApproxSize() uint64 {
+	if x != nil {
+		return x.ApproxSize
+	}
+	return 0
+}
+
 // StateValue is the result of a Get / GetWindow / GetRange. `present` is false
 // when the entity / bucket does not exist; `data` is always the raw stored
 // bytes; `decoded` is populated when the request set decode=true.
@@ -888,7 +1162,7 @@ type StateValue struct {
 
 func (x *StateValue) Reset() {
 	*x = StateValue{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -900,7 +1174,7 @@ func (x *StateValue) String() string {
 func (*StateValue) ProtoMessage() {}
 
 func (x *StateValue) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -913,7 +1187,7 @@ func (x *StateValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateValue.ProtoReflect.Descriptor instead.
 func (*StateValue) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{13}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StateValue) GetPresent() bool {
@@ -997,15 +1271,33 @@ const file_murmur_admin_v1_admin_proto_rawDesc = "" +
 	"\n" +
 	"start_unix\x18\x03 \x01(\x03R\tstartUnix\x12\x19\n" +
 	"\bend_unix\x18\x04 \x01(\x03R\aendUnix\x12\x16\n" +
-	"\x06decode\x18\x05 \x01(\bR\x06decode\"r\n" +
+	"\x06decode\x18\x05 \x01(\bR\x06decode\"\x8e\x02\n" +
 	"\fDecodedValue\x12!\n" +
 	"\vint64_value\x18\x01 \x01(\x03H\x00R\n" +
 	"int64Value\x126\n" +
-	"\x06opaque\x18\x02 \x01(\v2\x1c.murmur.admin.v1.OpaqueValueH\x00R\x06opaqueB\a\n" +
+	"\x06opaque\x18\x02 \x01(\v2\x1c.murmur.admin.v1.OpaqueValueH\x00R\x06opaque\x12/\n" +
+	"\x03hll\x18\x03 \x01(\v2\x1b.murmur.admin.v1.HLLDecodedH\x00R\x03hll\x122\n" +
+	"\x04topk\x18\x04 \x01(\v2\x1c.murmur.admin.v1.TopKDecodedH\x00R\x04topk\x125\n" +
+	"\x05bloom\x18\x05 \x01(\v2\x1d.murmur.admin.v1.BloomDecodedH\x00R\x05bloomB\a\n" +
 	"\x05value\"<\n" +
 	"\vOpaqueValue\x12\x19\n" +
 	"\bbyte_len\x18\x01 \x01(\x03R\abyteLen\x12\x12\n" +
-	"\x04kind\x18\x02 \x01(\tR\x04kind\"s\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"Z\n" +
+	"\n" +
+	"HLLDecoded\x121\n" +
+	"\x14cardinality_estimate\x18\x01 \x01(\x04R\x13cardinalityEstimate\x12\x19\n" +
+	"\bbyte_len\x18\x02 \x01(\x03R\abyteLen\"2\n" +
+	"\bTopKItem\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\"L\n" +
+	"\vTopKDecoded\x12\f\n" +
+	"\x01k\x18\x01 \x01(\x03R\x01k\x12/\n" +
+	"\x05items\x18\x02 \x03(\v2\x19.murmur.admin.v1.TopKItemR\x05items\"{\n" +
+	"\fBloomDecoded\x12#\n" +
+	"\rcapacity_bits\x18\x01 \x01(\x04R\fcapacityBits\x12%\n" +
+	"\x0ehash_functions\x18\x02 \x01(\rR\rhashFunctions\x12\x1f\n" +
+	"\vapprox_size\x18\x03 \x01(\x04R\n" +
+	"approxSize\"s\n" +
 	"\n" +
 	"StateValue\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12\x12\n" +
@@ -1033,7 +1325,7 @@ func file_murmur_admin_v1_admin_proto_rawDescGZIP() []byte {
 	return file_murmur_admin_v1_admin_proto_rawDescData
 }
 
-var file_murmur_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_murmur_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_murmur_admin_v1_admin_proto_goTypes = []any{
 	(*HealthRequest)(nil),             // 0: murmur.admin.v1.HealthRequest
 	(*HealthResponse)(nil),            // 1: murmur.admin.v1.HealthResponse
@@ -1048,32 +1340,40 @@ var file_murmur_admin_v1_admin_proto_goTypes = []any{
 	(*GetRangeRequest)(nil),           // 10: murmur.admin.v1.GetRangeRequest
 	(*DecodedValue)(nil),              // 11: murmur.admin.v1.DecodedValue
 	(*OpaqueValue)(nil),               // 12: murmur.admin.v1.OpaqueValue
-	(*StateValue)(nil),                // 13: murmur.admin.v1.StateValue
-	nil,                               // 14: murmur.admin.v1.PipelineStats.LatenciesEntry
+	(*HLLDecoded)(nil),                // 13: murmur.admin.v1.HLLDecoded
+	(*TopKItem)(nil),                  // 14: murmur.admin.v1.TopKItem
+	(*TopKDecoded)(nil),               // 15: murmur.admin.v1.TopKDecoded
+	(*BloomDecoded)(nil),              // 16: murmur.admin.v1.BloomDecoded
+	(*StateValue)(nil),                // 17: murmur.admin.v1.StateValue
+	nil,                               // 18: murmur.admin.v1.PipelineStats.LatenciesEntry
 }
 var file_murmur_admin_v1_admin_proto_depIdxs = []int32{
 	2,  // 0: murmur.admin.v1.ListPipelinesResponse.pipelines:type_name -> murmur.admin.v1.PipelineInfo
-	14, // 1: murmur.admin.v1.PipelineStats.latencies:type_name -> murmur.admin.v1.PipelineStats.LatenciesEntry
+	18, // 1: murmur.admin.v1.PipelineStats.latencies:type_name -> murmur.admin.v1.PipelineStats.LatenciesEntry
 	12, // 2: murmur.admin.v1.DecodedValue.opaque:type_name -> murmur.admin.v1.OpaqueValue
-	11, // 3: murmur.admin.v1.StateValue.decoded:type_name -> murmur.admin.v1.DecodedValue
-	5,  // 4: murmur.admin.v1.PipelineStats.LatenciesEntry.value:type_name -> murmur.admin.v1.LatencyStats
-	0,  // 5: murmur.admin.v1.AdminService.Health:input_type -> murmur.admin.v1.HealthRequest
-	3,  // 6: murmur.admin.v1.AdminService.ListPipelines:input_type -> murmur.admin.v1.ListPipelinesRequest
-	7,  // 7: murmur.admin.v1.AdminService.GetPipelineMetrics:input_type -> murmur.admin.v1.GetPipelineMetricsRequest
-	8,  // 8: murmur.admin.v1.AdminService.GetState:input_type -> murmur.admin.v1.GetStateRequest
-	9,  // 9: murmur.admin.v1.AdminService.GetWindow:input_type -> murmur.admin.v1.GetWindowRequest
-	10, // 10: murmur.admin.v1.AdminService.GetRange:input_type -> murmur.admin.v1.GetRangeRequest
-	1,  // 11: murmur.admin.v1.AdminService.Health:output_type -> murmur.admin.v1.HealthResponse
-	4,  // 12: murmur.admin.v1.AdminService.ListPipelines:output_type -> murmur.admin.v1.ListPipelinesResponse
-	6,  // 13: murmur.admin.v1.AdminService.GetPipelineMetrics:output_type -> murmur.admin.v1.PipelineStats
-	13, // 14: murmur.admin.v1.AdminService.GetState:output_type -> murmur.admin.v1.StateValue
-	13, // 15: murmur.admin.v1.AdminService.GetWindow:output_type -> murmur.admin.v1.StateValue
-	13, // 16: murmur.admin.v1.AdminService.GetRange:output_type -> murmur.admin.v1.StateValue
-	11, // [11:17] is the sub-list for method output_type
-	5,  // [5:11] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	13, // 3: murmur.admin.v1.DecodedValue.hll:type_name -> murmur.admin.v1.HLLDecoded
+	15, // 4: murmur.admin.v1.DecodedValue.topk:type_name -> murmur.admin.v1.TopKDecoded
+	16, // 5: murmur.admin.v1.DecodedValue.bloom:type_name -> murmur.admin.v1.BloomDecoded
+	14, // 6: murmur.admin.v1.TopKDecoded.items:type_name -> murmur.admin.v1.TopKItem
+	11, // 7: murmur.admin.v1.StateValue.decoded:type_name -> murmur.admin.v1.DecodedValue
+	5,  // 8: murmur.admin.v1.PipelineStats.LatenciesEntry.value:type_name -> murmur.admin.v1.LatencyStats
+	0,  // 9: murmur.admin.v1.AdminService.Health:input_type -> murmur.admin.v1.HealthRequest
+	3,  // 10: murmur.admin.v1.AdminService.ListPipelines:input_type -> murmur.admin.v1.ListPipelinesRequest
+	7,  // 11: murmur.admin.v1.AdminService.GetPipelineMetrics:input_type -> murmur.admin.v1.GetPipelineMetricsRequest
+	8,  // 12: murmur.admin.v1.AdminService.GetState:input_type -> murmur.admin.v1.GetStateRequest
+	9,  // 13: murmur.admin.v1.AdminService.GetWindow:input_type -> murmur.admin.v1.GetWindowRequest
+	10, // 14: murmur.admin.v1.AdminService.GetRange:input_type -> murmur.admin.v1.GetRangeRequest
+	1,  // 15: murmur.admin.v1.AdminService.Health:output_type -> murmur.admin.v1.HealthResponse
+	4,  // 16: murmur.admin.v1.AdminService.ListPipelines:output_type -> murmur.admin.v1.ListPipelinesResponse
+	6,  // 17: murmur.admin.v1.AdminService.GetPipelineMetrics:output_type -> murmur.admin.v1.PipelineStats
+	17, // 18: murmur.admin.v1.AdminService.GetState:output_type -> murmur.admin.v1.StateValue
+	17, // 19: murmur.admin.v1.AdminService.GetWindow:output_type -> murmur.admin.v1.StateValue
+	17, // 20: murmur.admin.v1.AdminService.GetRange:output_type -> murmur.admin.v1.StateValue
+	15, // [15:21] is the sub-list for method output_type
+	9,  // [9:15] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_murmur_admin_v1_admin_proto_init() }
@@ -1084,6 +1384,9 @@ func file_murmur_admin_v1_admin_proto_init() {
 	file_murmur_admin_v1_admin_proto_msgTypes[11].OneofWrappers = []any{
 		(*DecodedValue_Int64Value)(nil),
 		(*DecodedValue_Opaque)(nil),
+		(*DecodedValue_Hll)(nil),
+		(*DecodedValue_Topk)(nil),
+		(*DecodedValue_Bloom)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1091,7 +1394,7 @@ func file_murmur_admin_v1_admin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_murmur_admin_v1_admin_proto_rawDesc), len(file_murmur_admin_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   15,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

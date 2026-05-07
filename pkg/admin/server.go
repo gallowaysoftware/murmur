@@ -25,6 +25,9 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/bloom"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/hll"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
 	adminv1 "github.com/gallowaysoftware/murmur/proto/gen/murmur/admin/v1"
 	"github.com/gallowaysoftware/murmur/proto/gen/murmur/admin/v1/adminv1connect"
 )
@@ -216,9 +219,14 @@ func (s *Server) dispatch(reg registered, op string, params map[string]string, d
 	return connect.NewResponse(out), nil
 }
 
-// decodeForKind renders stored bytes as a monoid-typed DecodedValue. Unknown
-// kinds and sketches today produce an Opaque payload; native sketch decoding
-// (HLL → cardinality, TopK → items, Bloom → size+FPR) is a planned addition.
+// decodeForKind renders stored bytes as a monoid-typed DecodedValue. Each
+// well-known monoid kind has a typed branch; unknown kinds fall back to
+// Opaque (byte length + kind hint) so the UI can still display something.
+//
+// On decode failure (corrupt bytes, version skew, …) the function emits the
+// Opaque variant rather than propagating the error, so a single bad entity
+// doesn't break the rest of the dashboard. The byte-len + kind hint at least
+// confirms the row exists.
 func decodeForKind(kind string, data []byte) *adminv1.DecodedValue {
 	switch kind {
 	case "sum", "count", "min", "max":
@@ -229,12 +237,57 @@ func decodeForKind(kind string, data []byte) *adminv1.DecodedValue {
 		return &adminv1.DecodedValue{
 			Value: &adminv1.DecodedValue_Int64Value{Int64Value: v},
 		}
-	default:
+
+	case "hll":
+		est, err := hll.Estimate(data)
+		if err != nil {
+			break
+		}
 		return &adminv1.DecodedValue{
-			Value: &adminv1.DecodedValue_Opaque{
-				Opaque: &adminv1.OpaqueValue{ByteLen: int64(len(data)), Kind: kind},
+			Value: &adminv1.DecodedValue_Hll{
+				Hll: &adminv1.HLLDecoded{
+					CardinalityEstimate: est,
+					ByteLen:             int64(len(data)),
+				},
 			},
 		}
+
+	case "topk":
+		items, err := topk.Items(data)
+		if err != nil {
+			break
+		}
+		out := make([]*adminv1.TopKItem, 0, len(items))
+		for _, it := range items {
+			out = append(out, &adminv1.TopKItem{Key: it.Key, Count: it.Count})
+		}
+		return &adminv1.DecodedValue{
+			Value: &adminv1.DecodedValue_Topk{
+				Topk: &adminv1.TopKDecoded{K: int64(len(items)), Items: out},
+			},
+		}
+
+	case "bloom":
+		cap_, k, approx, err := bloom.Inspect(data)
+		if err != nil {
+			break
+		}
+		return &adminv1.DecodedValue{
+			Value: &adminv1.DecodedValue_Bloom{
+				Bloom: &adminv1.BloomDecoded{
+					CapacityBits:  cap_,
+					HashFunctions: k,
+					ApproxSize:    approx,
+				},
+			},
+		}
+	}
+
+	// Fallback path: unknown kind, or decode failed.
+	return &adminv1.DecodedValue{
+		Value: &adminv1.DecodedValue_Opaque{
+			Opaque: &adminv1.OpaqueValue{ByteLen: int64(len(data)), Kind: kind},
+		},
 	}
 }
 

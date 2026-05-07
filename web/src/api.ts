@@ -64,11 +64,35 @@ export type PipelineStats = {
   latencies: Record<string, LatencyJSON>
 }
 
+export type DecodedHLL = {
+  cardinality_estimate: number
+  byte_len: number
+}
+
+export type DecodedTopKItem = { key: string; count: number }
+export type DecodedTopK = {
+  k: number
+  items: DecodedTopKItem[]
+}
+
+export type DecodedBloom = {
+  capacity_bits: number
+  hash_functions: number
+  approx_size: number
+}
+
 export type StateValue = {
   present: boolean
   /** Base64-encoded raw bytes. */
   data?: string
-  decoded?: { int64?: number; byte_len?: number; kind?: string }
+  decoded?: {
+    int64?: number
+    byte_len?: number
+    kind?: string
+    hll?: DecodedHLL
+    topk?: DecodedTopK
+    bloom?: DecodedBloom
+  }
 }
 
 // --- Conversion helpers (proto → UI types) ---
@@ -123,6 +147,31 @@ function stateFromPb(v: PbStateValue): StateValue {
       out.decoded = { int64: Number(d.value) }
     } else if (d?.case === 'opaque') {
       out.decoded = { byte_len: Number(d.value.byteLen), kind: d.value.kind }
+    } else if (d?.case === 'hll') {
+      out.decoded = {
+        hll: {
+          cardinality_estimate: Number(d.value.cardinalityEstimate),
+          byte_len: Number(d.value.byteLen),
+        },
+      }
+    } else if (d?.case === 'topk') {
+      out.decoded = {
+        topk: {
+          k: Number(d.value.k),
+          items: d.value.items.map((it) => ({
+            key: it.key,
+            count: Number(it.count),
+          })),
+        },
+      }
+    } else if (d?.case === 'bloom') {
+      out.decoded = {
+        bloom: {
+          capacity_bits: Number(d.value.capacityBits),
+          hash_functions: d.value.hashFunctions,
+          approx_size: Number(d.value.approxSize),
+        },
+      }
     }
   }
   return out

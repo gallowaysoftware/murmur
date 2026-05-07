@@ -309,21 +309,53 @@ function ResultPanel({ resp, kind }: { resp: StateValue; kind: string | undefine
       aux = <KindBadge kind={kind} encoding="int64 little-endian" />
       break
     }
-    case 'hll':
-    case 'topk':
-    case 'bloom': {
-      const bytes = resp.decoded?.byte_len ?? approxBase64Bytes(resp.data)
-      primary = (
-        <div>
-          <div className="text-fg-muted text-base">opaque {kind} sketch</div>
-          <div className="text-fg-faint text-sm mt-1 tabular-nums">
-            {bytes} bytes — server-side decode lands in the next release
+    case 'hll': {
+      if (resp.decoded?.hll) {
+        primary = (
+          <div>
+            <div className="text-fg-strong">~{resp.decoded.hll.cardinality_estimate.toLocaleString()}</div>
+            <div className="text-fg-faint text-sm mt-1 tabular-nums font-sans">
+              estimated unique elements · {resp.decoded.hll.byte_len.toLocaleString()} byte sketch
+              · ~1.6% standard error
+            </div>
           </div>
-        </div>
-      )
-      aux = <KindBadge kind={kind} encoding="binary" />
+        )
+      } else {
+        primary = <span className="text-fg-muted">decoded value missing</span>
+      }
+      aux = <KindBadge kind={kind} encoding="HLL++" />
       break
     }
+
+    case 'topk': {
+      if (resp.decoded?.topk) {
+        primary = <TopKList topk={resp.decoded.topk} />
+      } else {
+        primary = <span className="text-fg-muted">decoded value missing</span>
+      }
+      aux = <KindBadge kind={kind} encoding="Misra-Gries" />
+      break
+    }
+
+    case 'bloom': {
+      if (resp.decoded?.bloom) {
+        const b = resp.decoded.bloom
+        primary = (
+          <div>
+            <div className="text-fg-strong">~{b.approx_size.toLocaleString()}</div>
+            <div className="text-fg-faint text-sm mt-1 tabular-nums font-sans">
+              estimated insertions · {b.capacity_bits.toLocaleString()} bits ·
+              {' '}{b.hash_functions} hashes
+            </div>
+          </div>
+        )
+      } else {
+        primary = <span className="text-fg-muted">decoded value missing</span>
+      }
+      aux = <KindBadge kind={kind} encoding="Bloom" />
+      break
+    }
+
     default:
       primary = <span className="font-mono">{resp.data ?? '(absent)'}</span>
   }
@@ -355,8 +387,42 @@ function KindBadge({ kind, encoding }: { kind: string; encoding: string }) {
   )
 }
 
-function approxBase64Bytes(b64: string | undefined): number {
-  if (!b64) return 0
-  // base64 expands by 4/3; this is an approximation suitable for display.
-  return Math.floor((b64.length * 3) / 4)
+/** Renders a Misra-Gries TopK as a ranked bar chart. The longest count is
+ *  scaled to 100% width; other rows scale proportionally so visual rank
+ *  follows numeric rank. Counts are tabular-nums so digits don't dance.
+ */
+function TopKList({ topk }: { topk: import('../api').DecodedTopK }) {
+  const items = topk.items
+  if (items.length === 0) {
+    return <span className="text-fg-muted">empty sketch</span>
+  }
+  const max = items[0]?.count ?? 1
+  return (
+    <div className="space-y-2 font-sans text-base">
+      <div className="text-fg-faint text-xs uppercase tracking-wider">
+        Top {items.length} of K={topk.k}
+      </div>
+      {items.map((it, i) => {
+        const pct = max > 0 ? Math.max(2, (it.count / max) * 100) : 0
+        return (
+          <div key={it.key} className="grid grid-cols-[1.5rem_1fr_auto] items-center gap-3">
+            <div className="text-fg-faint tabular-nums text-sm">{i + 1}.</div>
+            <div className="relative">
+              <div
+                className="absolute inset-0 rounded bg-accent-bg border border-accent-border"
+                style={{ width: `${pct}%` }}
+                aria-hidden
+              />
+              <div className="relative px-2 py-1 font-mono text-fg-strong text-sm truncate">
+                {it.key}
+              </div>
+            </div>
+            <div className="font-mono tabular-nums text-fg-strong text-sm">
+              {it.count.toLocaleString()}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
 }

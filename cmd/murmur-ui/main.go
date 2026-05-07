@@ -26,6 +26,9 @@ import (
 
 	"github.com/gallowaysoftware/murmur/pkg/admin"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/bloom"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/hll"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
 )
 
 func main() {
@@ -95,6 +98,9 @@ func registerDemoPipelines(srv *admin.Server) {
 		}
 	})
 
+	// HLL — use a real sketch so the server's hll.Estimate decoder produces
+	// a meaningful cardinality estimate in the Query Console.
+	hllSketches := buildDemoHLLs()
 	srv.Register(admin.PipelineInfo{
 		Name:          "unique_visitors",
 		MonoidKind:    "hll",
@@ -104,18 +110,12 @@ func registerDemoPipelines(srv *admin.Server) {
 		StoreType:     "dynamodb",
 		SourceType:    "kafka",
 	}, func(op string, params map[string]string) ([]byte, bool, error) {
-		entity := params["entity"]
-		if entity == "" {
-			return nil, false, nil
-		}
-		// 256-byte synthetic "HLL" payload.
-		out := make([]byte, 256)
-		for i := range out {
-			out[i] = byte(i ^ len(entity))
-		}
-		return out, true, nil
+		b, ok := hllSketches[params["entity"]]
+		return b, ok, nil
 	})
 
+	// TopK — real Misra-Gries sketch with realistic product counts.
+	topkSketch := buildDemoTopK()
 	srv.Register(admin.PipelineInfo{
 		Name:       "top_products",
 		MonoidKind: "topk",
@@ -123,8 +123,90 @@ func registerDemoPipelines(srv *admin.Server) {
 		StoreType:  "dynamodb",
 		SourceType: "kinesis",
 	}, func(op string, params map[string]string) ([]byte, bool, error) {
-		return []byte("\x00\x00\x00\x0a\x00\x00\x00\x00"), true, nil
+		if params["entity"] != "global" {
+			return nil, false, nil
+		}
+		return topkSketch, true, nil
 	})
+
+	// Bloom — a real filter populated with synthetic device IDs.
+	bloomSketch := buildDemoBloom()
+	srv.Register(admin.PipelineInfo{
+		Name:       "seen_devices",
+		MonoidKind: "bloom",
+		Windowed:   false,
+		StoreType:  "dynamodb",
+		SourceType: "kafka",
+	}, func(op string, params map[string]string) ([]byte, bool, error) {
+		if params["entity"] != "global" {
+			return nil, false, nil
+		}
+		return bloomSketch, true, nil
+	})
+}
+
+// buildDemoHLLs constructs a marshaled HLL per "page-X" entity, each populated
+// with a known number of synthetic user IDs. The Query Console will see the
+// decoded cardinality estimate within ~1.6% of these counts.
+func buildDemoHLLs() map[string][]byte {
+	cases := map[string]int{
+		"page-A": 53000,
+		"page-B": 412,
+		"page-C": 9876,
+	}
+	out := make(map[string][]byte, len(cases))
+	m := hll.HLL()
+	for entity, n := range cases {
+		state := m.Identity()
+		for i := 0; i < n; i++ {
+			elem := []byte(fmt.Sprintf("%s-user-%d", entity, i))
+			state = m.Combine(state, hll.Single(elem))
+		}
+		out[entity] = state
+	}
+	return out
+}
+
+// buildDemoTopK populates a Misra-Gries sketch with a heavy-tailed product
+// distribution so the rendered top-K list reads as realistic rankings.
+func buildDemoTopK() []byte {
+	const k uint32 = 10
+	m := topk.New(k)
+	state := m.Identity()
+	products := []struct {
+		name  string
+		count uint64
+	}{
+		{"sku-001-purple-widget", 12_847},
+		{"sku-007-orange-gizmo", 9_312},
+		{"sku-042-bluefin-cable", 7_506},
+		{"sku-101-thunderclap", 4_220},
+		{"sku-203-aurora-bundle", 3_117},
+		{"sku-404-not-found", 2_055},
+		{"sku-512-stardust-foam", 1_809},
+		{"sku-731-quiet-fan", 1_104},
+		{"sku-808-twilight-mug", 962},
+		{"sku-911-dispatcher", 605},
+	}
+	for _, p := range products {
+		state = m.Combine(state, topk.SingleN(k, p.name, p.count))
+	}
+	return state
+}
+
+// buildDemoBloom populates a Bloom filter with 5,000 synthetic device IDs so
+// the Query Console can render capacity / hashes / approx-size from real shape.
+//
+// Uses the default-capacity monoid so the per-event Single() singletons share
+// the same (m, k) parameters — Combine refuses to merge mismatched shapes
+// (would silently return Identity, masking the bug as approx_size=0).
+func buildDemoBloom() []byte {
+	m := bloom.Bloom() // 100K-element capacity, p=0.01
+	state := m.Identity()
+	for i := 0; i < 5_000; i++ {
+		state = m.Combine(state, bloom.Single([]byte(fmt.Sprintf("device-%06d", i))))
+	}
+	return state
 }
 
 // runDemoTickers feeds the recorder with synthetic metrics for the demo pipelines.
@@ -135,6 +217,7 @@ func runDemoTickers(rec *metrics.InMemory) {
 	go tick(rec, "page_views", 80, 0.0, "cache_merge", 0.05, 0.6)
 	go tick(rec, "unique_visitors", 20, 0.001, "store_merge", 1.5, 8.0)
 	go tick(rec, "top_products", 5, 0.05, "store_merge", 2.0, 12.0)
+	go tick(rec, "seen_devices", 12, 0.0, "store_merge", 0.7, 3.5)
 }
 
 func tick(rec *metrics.InMemory, name string, rate int, errRate float64, op string, latP50ms, latP95ms float64) {

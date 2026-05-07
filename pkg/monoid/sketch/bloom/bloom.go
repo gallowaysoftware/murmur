@@ -116,3 +116,21 @@ func Contains(sketch, element []byte) bool {
 // Equal reports whether two marshaled filters have identical bits and shape. Used in
 // tests for determinism checks.
 func Equal(a, b []byte) bool { return bytes.Equal(a, b) }
+
+// Inspect returns the (capacity m, hash count k, approximate number of inserted
+// elements) triple from a marshaled filter. Used by the admin server to render
+// a human-readable view of an opaque sketch in the Query Console.
+//
+// "Approximate size" comes from the bits-and-blooms library's estimator —
+// derived from the bit-fill ratio against (m, k); accurate within a few percent
+// at typical fill levels, less reliable as the filter approaches saturation.
+func Inspect(sketch []byte) (capacity uint64, hashes uint32, approxSize uint64, err error) {
+	if len(sketch) == 0 {
+		return 0, 0, 0, nil
+	}
+	bf := bloom.New(1, 1) // shape is read from the marshaled form
+	if err := bf.UnmarshalBinary(sketch); err != nil {
+		return 0, 0, 0, err
+	}
+	return uint64(bf.Cap()), uint32(bf.K()), uint64(bf.ApproximatedSize()), nil
+}
