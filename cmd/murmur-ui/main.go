@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,13 +35,25 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	demo := flag.Bool("demo", false, "register synthetic demo pipelines for UI development")
+	allowOrigins := flag.String("allow-origin", "",
+		"comma-separated list of CORS-allowed origins; pass \"*\" for permissive (dev only). "+
+			"Default empty = same-origin only, which is correct for the embedded UI.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
 	rec := metrics.NewInMemory()
-	srv := admin.NewServer(rec)
+
+	var serverOpts []admin.Option
+	if *allowOrigins != "" {
+		origins := strings.Split(*allowOrigins, ",")
+		for i := range origins {
+			origins[i] = strings.TrimSpace(origins[i])
+		}
+		serverOpts = append(serverOpts, admin.WithAllowedOrigins(origins...))
+	}
+	srv := admin.NewServer(rec, serverOpts...)
 
 	if *demo {
 		registerDemoPipelines(srv)

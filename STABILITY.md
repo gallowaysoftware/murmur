@@ -22,12 +22,12 @@ edges callers should plan around.
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
 | `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; runtime no longer crashes on a transient store failure |
-| `pkg/exec/bootstrap` | experimental | metrics integration not yet wired |
+| `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
 | `pkg/query` | mostly stable | `Get` / `GetWindow` / `GetRange` / `LambdaQuery` are likely v1 surface |
 | `pkg/query/grpc` | experimental | generic byte-encoded responses; per-pipeline codegen is roadmap |
-| `pkg/admin` | experimental | CORS is permissive by default; no auth middleware |
+| `pkg/admin` | experimental | CORS is closed by default; opt in via `WithAllowedOrigins`. No auth middleware yet |
 | `pkg/swap` | mostly stable | small surface; the Terraform module does not yet integrate it |
 | `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
 | `cmd/murmur-ui` | experimental | demo-grade dashboard; not yet a production ops surface |
@@ -53,18 +53,21 @@ edges callers should plan around.
    monoid. A 16-way race test against dynamodb-local confirms exactly one
    MarkSeen wins.
 
-4. **Min/Max under empty/missing buckets.** `windowed.MergeBuckets` seeds the
-   fold with `m.Identity()`, so a windowed `Min` over a partially-empty range
-   reports `0` for those buckets — usually wrong.
+4. ~~**Min/Max under empty/missing buckets.**~~ Resolved by the
+   `Bounded[V]`-based Min/Max from PR-3: empty buckets fold as the unset
+   `Bounded[V]{Set: false}` (which IS the identity), so a windowed `Min`
+   over a partially-empty range correctly reports the min of populated
+   buckets and `Set: false` if everything was empty.
 
 5. **`go.mod` `replace` directive.** Importing
    `pkg/exec/batch/sparkconnect` requires consumers to mirror the
    `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go ...`
    line. Tracked: upstream the patches or split the package into its own module.
 
-6. **CORS.** `pkg/admin` ships `Access-Control-Allow-Origin: *` for local-dev
-   convenience. Do not expose to the public internet without first wiring
-   `WithAllowedOrigins([]string)` (tracked).
+6. ~~**CORS.**~~ Fixed: `pkg/admin.NewServer` now defaults to no CORS headers
+   (same-origin only). Open it up to the origins you want via
+   `admin.WithAllowedOrigins("https://your-dashboard", …)` or pass `"*"` for
+   permissive — `cmd/murmur-ui` exposes `--allow-origin` for the latter.
 
 7. ~~**No CI.**~~ Fixed: `.github/workflows/ci.yml` runs `gofmt`, `go vet`,
    unit tests with `-race`, `golangci-lint`, and the web `tsc` / `lint` /

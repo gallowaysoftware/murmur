@@ -34,6 +34,7 @@ type RunOption func(*runConfig)
 
 type runConfig struct {
 	recorder metrics.Recorder
+	dedup    state.Deduper
 }
 
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
@@ -41,6 +42,20 @@ func WithMetrics(r metrics.Recorder) RunOption {
 	return func(c *runConfig) {
 		if r != nil {
 			c.recorder = r
+		}
+	}
+}
+
+// WithDedup installs a state.Deduper for snapshot-side dedup. Useful when a
+// bootstrap is re-run (operator retry, partial-failure recovery): without it
+// every document is folded again on re-run; with it only documents not yet
+// claimed are processed. The Deduper sees the same EventID derivation the
+// SnapshotSource emits — for Mongo that's the document _id, so re-running
+// against the same collection is idempotent.
+func WithDedup(d state.Deduper) RunOption {
+	return func(c *runConfig) {
+		if d != nil {
+			c.dedup = d
 		}
 	}
 }
@@ -85,6 +100,21 @@ func Run[T any, V any](
 	}()
 
 	for rec := range records {
+		// Dedup, if configured: skip records whose EventID was already claimed
+		// by a prior bootstrap run. Backend errors fall through to processing
+		// (better to double-count than to silently drop on a flaky dedup).
+		if cfg.dedup != nil && rec.EventID != "" {
+			first, err := cfg.dedup.MarkSeen(ctx, rec.EventID)
+			if err != nil {
+				cfg.recorder.RecordError(name, fmt.Errorf("dedup MarkSeen %q: %w", rec.EventID, err))
+			} else if !first {
+				cfg.recorder.RecordEvent(name + ":dedup_skip")
+				if rec.Ack != nil {
+					_ = rec.Ack()
+				}
+				continue
+			}
+		}
 		if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
 			cfg.recorder.RecordError(name, err)
 			return nil, err

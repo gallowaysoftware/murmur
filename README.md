@@ -43,7 +43,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 - **At-least-once with optional dedup.** Pass `streaming.WithDedup(d)` (where `d` is a `pkg/state/dynamodb.Deduper`) to make replay-after-crash idempotent for any monoid. Without it, the streaming runtime is at-least-once with no per-EventID dedup — fine for idempotent monoids (Set, Min, Max, Bloom) but double-counts non-idempotent ones (Sum, HLL, TopK).
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
 - ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.
-- **CORS is permissive on the admin server.** `pkg/admin` ships with `Access-Control-Allow-Origin: *`. Do not expose the admin API to the public internet today; keep it on a private subnet behind your VPC.
+- **CORS is closed by default.** Pass `admin.WithAllowedOrigins("https://dashboard.example", …)` (or `cmd/murmur-ui --allow-origin=…`) to open it up. The admin API is read-only but still leaks pipeline metadata, so don't expose it to the public internet without auth in front.
 - **CI runs on every PR.** `gofmt` / `go vet` / unit tests with `-race` / `golangci-lint` / web `tsc` + `eslint` + `vite build`. Dependabot is wired up for Go, npm, and Actions.
 
 ## Quick taste

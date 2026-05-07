@@ -34,9 +34,25 @@ import (
 
 // Server is the admin control surface. Concurrent-safe.
 type Server struct {
-	mu        sync.RWMutex
-	pipelines map[string]registered
-	recorder  *metrics.InMemory
+	mu             sync.RWMutex
+	pipelines      map[string]registered
+	recorder       *metrics.InMemory
+	allowedOrigins []string // empty → no CORS headers; "*" → permissive
+}
+
+// Option configures a Server. Apply via NewServer(rec, opts...).
+type Option func(*Server)
+
+// WithAllowedOrigins sets the list of origins the admin server will respond to
+// from cross-origin browsers. Pass exact origins ("https://dashboard.example")
+// or the wildcard "*". Default is no CORS headers — same-origin only — which is
+// the right default for the embedded UI in cmd/murmur-ui. Use "*" for local
+// development against the Vite dev server (it proxies /api so cross-origin
+// only matters when the UI is served by some other origin).
+func WithAllowedOrigins(origins ...string) Option {
+	return func(s *Server) {
+		s.allowedOrigins = append(s.allowedOrigins[:0], origins...)
+	}
 }
 
 type registered struct {
@@ -66,11 +82,18 @@ type QueryFn func(op string, params map[string]string) (data []byte, present boo
 
 // NewServer constructs an admin Server. The recorder is shared with whatever
 // runtime you've installed it on (typically streaming.Run via WithMetrics).
-func NewServer(recorder *metrics.InMemory) *Server {
-	return &Server{
+//
+// CORS is closed by default — pass WithAllowedOrigins(…) to open it up to the
+// origins that should be able to talk to this server.
+func NewServer(recorder *metrics.InMemory, opts ...Option) *Server {
+	s := &Server{
 		pipelines: make(map[string]registered),
 		recorder:  recorder,
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Register installs a pipeline's metadata and query closure. Idempotent —
@@ -87,7 +110,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	path, h := adminv1connect.NewAdminServiceHandler(s)
 	mux.Handle(path, h)
-	return cors(mux)
+	return s.corsMiddleware(mux)
 }
 
 // --- AdminServiceHandler implementation ---
@@ -329,18 +352,50 @@ func formatInt(n int64) string {
 	return string(buf[i:])
 }
 
-// cors permits all origins for local dev. Tighten for production via a future
-// WithAllowedOrigins option (tracked in STABILITY.md).
-func cors(next http.Handler) http.Handler {
+// corsMiddleware applies CORS headers based on the server's WithAllowedOrigins
+// configuration:
+//
+//   - empty allowed list:  no CORS headers, same-origin only (the default).
+//   - "*" in the list:     permissive — Access-Control-Allow-Origin: *.
+//   - exact origins:       Access-Control-Allow-Origin echoes the request's
+//     Origin header iff it appears in the allowed list,
+//     and the response includes Vary: Origin so caches
+//     don't bleed responses across origins.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, Grpc-Timeout")
-		w.Header().Set("Access-Control-Expose-Headers", "Grpc-Status, Grpc-Message")
+		s.applyCORS(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
+	if len(s.allowedOrigins) == 0 {
+		return
+	}
+	origin := r.Header.Get("Origin")
+	allow := ""
+	for _, o := range s.allowedOrigins {
+		if o == "*" {
+			allow = "*"
+			break
+		}
+		if o == origin {
+			allow = origin
+			break
+		}
+	}
+	if allow == "" {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", allow)
+	if allow != "*" {
+		w.Header().Add("Vary", "Origin")
+	}
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, Grpc-Timeout")
+	w.Header().Set("Access-Control-Expose-Headers", "Grpc-Status, Grpc-Message")
 }
