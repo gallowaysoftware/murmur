@@ -27,9 +27,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
@@ -60,12 +62,22 @@ func BytesIdentity() Encoder[[]byte] {
 
 // Server bridges the generated Connect QueryServiceHandler to a pipeline's
 // Store + monoid. Mount it on an http.ServeMux via Handler().
+//
+// Concurrent requests for the same (RPC, entity, bucket/window/range) are
+// coalesced via a singleflight.Group keyed by the request shape, so a thousand
+// simultaneous feed renders asking for the same hot counter become one
+// underlying store call. The dedup window is the lifetime of the in-flight
+// call — once the future resolves, the next request is fresh.
 type Server[V any] struct {
 	store  state.Store[V]
 	mon    monoid.Monoid[V]
 	window *windowed.Config
 	encode Encoder[V]
 	nowFn  func() time.Time
+
+	// sf coalesces concurrent identical reads. Cheap when traffic is cold
+	// (a no-op fastpath); huge wins on hot keys at feed-render time.
+	sf singleflight.Group
 }
 
 // Config configures a query Server.
@@ -95,6 +107,31 @@ func NewServer[V any](cfg Config[V]) *Server[V] {
 	}
 }
 
+// coalescedResult holds the outcome of a single underlying store call so
+// every singleflight participant can fan it back out.
+type coalescedResult[V any] struct {
+	value   V
+	present bool
+}
+
+// coalesceGet runs fn at most once per concurrent group keyed by `key`. The
+// first caller does the actual work; everyone else awaits the same result.
+func coalesceGet[V any](sf *singleflight.Group, key string, fn func() (V, bool, error)) (V, bool, error) {
+	out, err, _ := sf.Do(key, func() (any, error) {
+		v, ok, err := fn()
+		if err != nil {
+			return nil, err
+		}
+		return coalescedResult[V]{value: v, present: ok}, nil
+	})
+	if err != nil {
+		var zero V
+		return zero, false, err
+	}
+	r := out.(coalescedResult[V])
+	return r.value, r.present, nil
+}
+
 // Handler returns the Connect HTTP handler and its mount path. Wire it into a
 // net/http server with `mux.Handle(path, h)`. The path follows the Connect
 // convention `/murmur.v1.QueryService/`.
@@ -112,8 +149,26 @@ func (s *Server[V]) Handler() (string, http.Handler) {
 // value for entity (non-windowed pipelines). On a missing key, returns
 // {present: false, data: nil}; clients should branch on `present` rather than
 // on len(data).
+//
+// Concurrent identical Gets are coalesced via singleflight: under load on a
+// hot entity, one underlying store.Get serves N waiters. Set
+// `req.fresh_read = true` to bypass coalescing and force an authoritative
+// read — used for read-your-writes ("user just liked this; show their
+// like count").
 func (s *Server[V]) Get(ctx context.Context, req *connect.Request[pb.GetRequest]) (*connect.Response[pb.GetResponse], error) {
-	v, ok, err := query.Get(ctx, s.store, req.Msg.GetEntity())
+	entity := req.Msg.GetEntity()
+	doGet := func() (V, bool, error) { return query.Get(ctx, s.store, entity) }
+
+	var (
+		v   V
+		ok  bool
+		err error
+	)
+	if req.Msg.GetFreshRead() {
+		v, ok, err = doGet()
+	} else {
+		v, ok, err = coalesceGet(&s.sf, "Get|"+entity, doGet)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -151,12 +206,36 @@ func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetMany
 // most-recent buckets covering `duration_seconds` ending at the server's now
 // via the configured monoid. Returns CodeFailedPrecondition for non-windowed
 // pipelines so clients can route to Get instead.
+//
+// Concurrent identical GetWindows are coalesced via singleflight; the
+// coalesce key includes the bucketed `now` so two requests one second apart
+// can share work, while requests across a bucket boundary do not.
 func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWindowRequest]) (*connect.Response[pb.GetWindowResponse], error) {
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
+	now := s.nowFn()
 	d := time.Duration(req.Msg.GetDurationSeconds()) * time.Second
-	v, err := query.GetWindow(ctx, s.store, s.mon, *s.window, req.Msg.GetEntity(), d, s.nowFn())
+	entity := req.Msg.GetEntity()
+	doFetch := func() (V, bool, error) {
+		out, err := query.GetWindow(ctx, s.store, s.mon, *s.window, entity, d, now)
+		return out, true, err
+	}
+
+	var (
+		v   V
+		err error
+	)
+	if req.Msg.GetFreshRead() {
+		v, _, err = doFetch()
+	} else {
+		// Coalesce key: bucketed "now" means consecutive requests within the
+		// same bucket reuse a single store call; first request in a new bucket
+		// does the work. This bounds staleness to at most one bucket.
+		bucket := s.window.BucketID(now)
+		key := "GetWindow|" + entity + "|" + strconv.FormatInt(int64(d/time.Second), 10) + "|" + strconv.FormatInt(bucket, 10)
+		v, _, err = coalesceGet(&s.sf, key, doFetch)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -168,13 +247,34 @@ func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWi
 // GetRange implements murmur.v1.QueryService/GetRange. Merges every bucket
 // whose ID falls in [start_unix, end_unix] inclusive. Same not-windowed
 // failure mode as GetWindow.
+//
+// Coalesced via singleflight on (entity, start_unix, end_unix) — the range
+// is fully specified by the caller, so identical concurrent ranges share
+// work directly.
 func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRangeRequest]) (*connect.Response[pb.GetRangeResponse], error) {
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
-	start := time.Unix(req.Msg.GetStartUnix(), 0).UTC()
-	end := time.Unix(req.Msg.GetEndUnix(), 0).UTC()
-	v, err := query.GetRange(ctx, s.store, s.mon, *s.window, req.Msg.GetEntity(), start, end)
+	startUnix := req.Msg.GetStartUnix()
+	endUnix := req.Msg.GetEndUnix()
+	entity := req.Msg.GetEntity()
+	doFetch := func() (V, bool, error) {
+		start := time.Unix(startUnix, 0).UTC()
+		end := time.Unix(endUnix, 0).UTC()
+		out, err := query.GetRange(ctx, s.store, s.mon, *s.window, entity, start, end)
+		return out, true, err
+	}
+
+	var (
+		v   V
+		err error
+	)
+	if req.Msg.GetFreshRead() {
+		v, _, err = doFetch()
+	} else {
+		key := "GetRange|" + entity + "|" + strconv.FormatInt(startUnix, 10) + "|" + strconv.FormatInt(endUnix, 10)
+		v, _, err = coalesceGet(&s.sf, key, doFetch)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

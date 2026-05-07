@@ -257,6 +257,13 @@ export const api = {
   },
 }
 
+// Note: the data-plane QueryService (proto/murmur/v1/query.proto) supports
+// `fresh_read` on every read RPC for read-your-writes scenarios. This admin
+// client targets the dashboard AdminService — fresh_read isn't relevant
+// here because dashboard reads are not user-driven write-then-read flows.
+// Application code that needs read-your-writes uses the data-plane client
+// (proto/gen/murmur/v1) directly and sets `fresh_read: true` on the request.
+
 // --- Error rendering ---
 
 /**

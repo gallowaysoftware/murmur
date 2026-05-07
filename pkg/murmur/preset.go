@@ -16,6 +16,7 @@ package murmur
 import (
 	"time"
 
+	"github.com/gallowaysoftware/murmur/pkg/monoid/compose"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/hll"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
@@ -234,6 +235,137 @@ func (b *TopNBuilder[T]) Build() *pipeline.Pipeline[T, []byte] {
 		p = p.Aggregate(topk.New(b.k), *b.window)
 	} else {
 		p = p.Aggregate(topk.New(b.k))
+	}
+	if b.src != nil {
+		p = p.From(b.src)
+	}
+	return p
+}
+
+// Trending is a time-decayed-sum pipeline preset. Each event contributes a
+// configurable score (default 1.0) to a per-key running sum that decays
+// older contributions exponentially toward the most recent observation.
+// The result is "score of how much activity has happened recently, with
+// older activity counting less" — the canonical building block for "hot"
+// / "trending" feeds.
+//
+// Half-life sets the decay rate. Pass 1*time.Hour for "last hour matters
+// most" / "fast-burning trends"; 6*time.Hour for "today's hot"; 24*time.Hour
+// for "yesterday and today both matter."
+//
+// Caveat: this is NOT Reddit's `log(votes) + (time/factor)` formula
+// directly — Reddit's formula isn't a monoid. Trending implements
+// time-weighted summation, which is the building block; if you want
+// Reddit-style log-shape ranking, apply `log(EvaluateAt(d, halfLife, now))`
+// at query time.
+//
+// State type is []byte (DecayedSumBytes wire format); pair with
+// pkg/state/dynamodb.BytesStore. Decode with compose.DecodeDecayed and
+// evaluate at query time via compose.EvaluateAt.
+func Trending[T any](name string, halfLife time.Duration) *TrendingBuilder[T] {
+	return &TrendingBuilder[T]{
+		name:     name,
+		halfLife: halfLife,
+		amountFn: func(T) float64 { return 1.0 }, // sensible default: each event = 1 unit
+	}
+}
+
+// TrendingBuilder builds a Trending (DecayedSumBytes) pipeline. Required:
+// KeyBy, StoreIn. Optional: From, Daily/Hourly windowing, Amount (override
+// the default per-event score), Clock (override time.Now for tests).
+type TrendingBuilder[T any] struct {
+	name     string
+	halfLife time.Duration
+	keyFn    func(T) string
+	amountFn func(T) float64
+	src      source.Source[T]
+	store    state.Store[[]byte]
+	window   *windowed.Config
+	now      func() time.Time
+}
+
+// From sets the live event source.
+func (b *TrendingBuilder[T]) From(s source.Source[T]) *TrendingBuilder[T] {
+	b.src = s
+	return b
+}
+
+// KeyBy sets the function that derives the aggregation key from each event
+// (e.g. post ID for "trending posts" or hashtag for "trending hashtags").
+// Required.
+func (b *TrendingBuilder[T]) KeyBy(fn func(T) string) *TrendingBuilder[T] {
+	b.keyFn = fn
+	return b
+}
+
+// Amount overrides the per-event contribution score. Default is 1.0 per
+// event. Use this for weighted trending — e.g., a like from a verified
+// account contributes 5.0 instead of 1.0:
+//
+//	murmur.Trending[Like]("hot_posts", time.Hour).
+//	    Amount(func(l Like) float64 {
+//	        if l.UserVerified { return 5.0 }
+//	        return 1.0
+//	    })
+func (b *TrendingBuilder[T]) Amount(fn func(T) float64) *TrendingBuilder[T] {
+	if fn != nil {
+		b.amountFn = fn
+	}
+	return b
+}
+
+// StoreIn sets the state store. Pair with pkg/state/dynamodb.NewBytesStore
+// using compose.DecayedSumBytes(halfLife) as the monoid.
+func (b *TrendingBuilder[T]) StoreIn(s state.Store[[]byte]) *TrendingBuilder[T] {
+	b.store = s
+	return b
+}
+
+// Daily configures daily tumbling buckets with the given retention.
+// Useful for "today's hottest" / "this week's hottest" — each bucket is a
+// separate decayed-sum row; queries merge N adjacent buckets via the
+// monoid's Combine.
+func (b *TrendingBuilder[T]) Daily(retention time.Duration) *TrendingBuilder[T] {
+	w := windowed.Daily(retention)
+	b.window = &w
+	return b
+}
+
+// Hourly configures hourly tumbling buckets — typical for fast-burning
+// "trending right now" feeds.
+func (b *TrendingBuilder[T]) Hourly(retention time.Duration) *TrendingBuilder[T] {
+	w := windowed.Hourly(retention)
+	b.window = &w
+	return b
+}
+
+// Clock overrides time.Now for the per-event timestamp. Useful for tests
+// with deterministic clocks; production code should leave this unset.
+func (b *TrendingBuilder[T]) Clock(now func() time.Time) *TrendingBuilder[T] {
+	if now != nil {
+		b.now = now
+	}
+	return b
+}
+
+// Build assembles a *pipeline.Pipeline. The value extractor lifts each
+// event's amountFn output to a Decayed observation timestamped at the
+// configured clock (default time.Now), encoded via compose.DecayedBytes.
+func (b *TrendingBuilder[T]) Build() *pipeline.Pipeline[T, []byte] {
+	now := b.now
+	if now == nil {
+		now = time.Now
+	}
+	p := pipeline.NewPipeline[T, []byte](b.name).
+		Key(b.keyFn).
+		Value(func(t T) []byte {
+			return compose.DecayedBytes(b.amountFn(t), now())
+		}).
+		StoreIn(b.store)
+	if b.window != nil {
+		p = p.Aggregate(compose.DecayedSumBytes(b.halfLife), *b.window)
+	} else {
+		p = p.Aggregate(compose.DecayedSumBytes(b.halfLife))
 	}
 	if b.src != nil {
 		p = p.From(b.src)

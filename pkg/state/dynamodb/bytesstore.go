@@ -136,9 +136,19 @@ func (s *BytesStore) GetMany(ctx context.Context, ks []state.Key) ([][]byte, []b
 	return vals, oks, nil
 }
 
-// MergeUpdate performs the read-combine-conditional-write loop.
+// MergeUpdate performs the read-combine-conditional-write loop. CAS contention
+// (ConditionalCheckFailedException) retries with exponential backoff + full
+// jitter, identical to the BatchGetItem retry policy. Without backoff, N
+// concurrent writers on the same hot key would all retry at once and burn
+// tight CPU + DDB request capacity in lockstep — under enough contention
+// they'd never make forward progress.
 func (s *BytesStore) MergeUpdate(ctx context.Context, k state.Key, delta []byte, ttl time.Duration) error {
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
+		if attempt > 0 {
+			if err := backoffWait(ctx, attempt); err != nil {
+				return err
+			}
+		}
 		cur, version, exists, err := s.getWithVersion(ctx, k)
 		if err != nil {
 			return err
@@ -156,7 +166,7 @@ func (s *BytesStore) MergeUpdate(ctx context.Context, k state.Key, delta []byte,
 		}
 		var ccf *types.ConditionalCheckFailedException
 		if errors.As(err, &ccf) {
-			// Concurrent writer landed first; retry.
+			// Concurrent writer landed first; back off and retry.
 			continue
 		}
 		return err

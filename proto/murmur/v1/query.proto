@@ -41,11 +41,19 @@ service QueryService {
 // GetRequest is the input for Get — a single entity lookup.
 message GetRequest {
   string entity = 1;
+
+  // fresh_read, when true, bypasses any server-side caching/coalescing
+  // layer and forces an authoritative read. Use this for read-your-writes
+  // semantics (e.g. "the user just liked this — show their like count
+  // INCLUDING the write they just made"). Default false; the default path
+  // can serve cached / coalesced results within a small staleness budget.
+  bool fresh_read = 2;
 }
 
 // GetManyRequest batches multiple entity lookups in one round-trip.
 message GetManyRequest {
   repeated string entities = 1;
+  bool fresh_read = 2;
 }
 
 // GetWindowRequest asks for a sliding-window merge.
@@ -53,6 +61,7 @@ message GetWindowRequest {
   string entity = 1;
   // Window duration in seconds (e.g. 86400 for last 24 h).
   int64 duration_seconds = 2;
+  bool fresh_read = 3;
 }
 
 // GetRangeRequest asks for an absolute-time-range merge.
@@ -60,6 +69,7 @@ message GetRangeRequest {
   string entity = 1;
   int64 start_unix = 2;
   int64 end_unix = 3;
+  bool fresh_read = 4;
 }
 
 // Value is the inner payload returned by Get / GetWindow / GetRange.

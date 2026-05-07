@@ -23,8 +23,14 @@ const (
 
 // GetRequest is the input for Get — a single entity lookup.
 type GetRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Entity        string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	// fresh_read, when true, bypasses any server-side caching/coalescing
+	// layer and forces an authoritative read. Use this for read-your-writes
+	// semantics (e.g. "the user just liked this — show their like count
+	// INCLUDING the write they just made"). Default false; the default path
+	// can serve cached / coalesced results within a small staleness budget.
+	FreshRead     bool `protobuf:"varint,2,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -66,10 +72,18 @@ func (x *GetRequest) GetEntity() string {
 	return ""
 }
 
+func (x *GetRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
 // GetManyRequest batches multiple entity lookups in one round-trip.
 type GetManyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entities      []string               `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
+	FreshRead     bool                   `protobuf:"varint,2,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -111,12 +125,20 @@ func (x *GetManyRequest) GetEntities() []string {
 	return nil
 }
 
+func (x *GetManyRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
 // GetWindowRequest asks for a sliding-window merge.
 type GetWindowRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	// Window duration in seconds (e.g. 86400 for last 24 h).
 	DurationSeconds int64 `protobuf:"varint,2,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	FreshRead       bool  `protobuf:"varint,3,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -165,12 +187,20 @@ func (x *GetWindowRequest) GetDurationSeconds() int64 {
 	return 0
 }
 
+func (x *GetWindowRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
 // GetRangeRequest asks for an absolute-time-range merge.
 type GetRangeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entity        string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	StartUnix     int64                  `protobuf:"varint,2,opt,name=start_unix,json=startUnix,proto3" json:"start_unix,omitempty"`
 	EndUnix       int64                  `protobuf:"varint,3,opt,name=end_unix,json=endUnix,proto3" json:"end_unix,omitempty"`
+	FreshRead     bool                   `protobuf:"varint,4,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -224,6 +254,13 @@ func (x *GetRangeRequest) GetEndUnix() int64 {
 		return x.EndUnix
 	}
 	return 0
+}
+
+func (x *GetRangeRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
 }
 
 // Value is the inner payload returned by Get / GetWindow / GetRange.
@@ -463,20 +500,28 @@ var File_murmur_v1_query_proto protoreflect.FileDescriptor
 
 const file_murmur_v1_query_proto_rawDesc = "" +
 	"\n" +
-	"\x15murmur/v1/query.proto\x12\tmurmur.v1\"$\n" +
+	"\x15murmur/v1/query.proto\x12\tmurmur.v1\"C\n" +
 	"\n" +
 	"GetRequest\x12\x16\n" +
-	"\x06entity\x18\x01 \x01(\tR\x06entity\",\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x02 \x01(\bR\tfreshRead\"K\n" +
 	"\x0eGetManyRequest\x12\x1a\n" +
-	"\bentities\x18\x01 \x03(\tR\bentities\"U\n" +
+	"\bentities\x18\x01 \x03(\tR\bentities\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x02 \x01(\bR\tfreshRead\"t\n" +
 	"\x10GetWindowRequest\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12)\n" +
-	"\x10duration_seconds\x18\x02 \x01(\x03R\x0fdurationSeconds\"c\n" +
+	"\x10duration_seconds\x18\x02 \x01(\x03R\x0fdurationSeconds\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x03 \x01(\bR\tfreshRead\"\x82\x01\n" +
 	"\x0fGetRangeRequest\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x1d\n" +
 	"\n" +
 	"start_unix\x18\x02 \x01(\x03R\tstartUnix\x12\x19\n" +
-	"\bend_unix\x18\x03 \x01(\x03R\aendUnix\"5\n" +
+	"\bend_unix\x18\x03 \x01(\x03R\aendUnix\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x04 \x01(\bR\tfreshRead\"5\n" +
 	"\x05Value\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"5\n" +

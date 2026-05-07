@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,5 +197,129 @@ func TestQuery_GetWindow_NotWindowed(t *testing.T) {
 	// FailedPrecondition signal — clients should be able to branch on this.
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("error code: got %s, want failed_precondition", connect.CodeOf(err))
+	}
+}
+
+// countingStore wraps a fakeStore and records how many Get calls landed.
+// Used to prove singleflight collapses concurrent identical reads down to
+// one underlying store call.
+type countingStore struct {
+	inner     fakeStore
+	gets      atomic.Int64
+	getDelay  time.Duration
+	startGate <-chan struct{} // gates the first Get so concurrent waiters can pile up
+}
+
+func (s *countingStore) Get(ctx context.Context, k state.Key) (int64, bool, error) {
+	s.gets.Add(1)
+	if s.startGate != nil {
+		<-s.startGate
+	}
+	if s.getDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return 0, false, ctx.Err()
+		case <-time.After(s.getDelay):
+		}
+	}
+	return s.inner.Get(ctx, k)
+}
+func (s *countingStore) GetMany(ctx context.Context, ks []state.Key) ([]int64, []bool, error) {
+	return s.inner.GetMany(ctx, ks)
+}
+func (s *countingStore) MergeUpdate(ctx context.Context, k state.Key, d int64, ttl time.Duration) error {
+	return s.inner.MergeUpdate(ctx, k, d, ttl)
+}
+func (*countingStore) Close() error { return nil }
+
+func TestQuery_Get_CoalescesConcurrentReads(t *testing.T) {
+	gate := make(chan struct{})
+	store := &countingStore{
+		inner:     fakeStore{state.Key{Entity: "hot"}: 42},
+		getDelay:  100 * time.Millisecond,
+		startGate: gate,
+	}
+	client, cleanup := startServer[int64](t, mgrpc.Config[int64]{
+		Store:  store,
+		Monoid: core.Sum[int64](),
+		Encode: mgrpc.Int64LE(),
+	})
+	defer cleanup()
+
+	// Fire 50 concurrent identical Gets; they should all complete with the
+	// same value but trigger a single underlying store.Get call.
+	const N = 50
+	var wg sync.WaitGroup
+	results := make([]int64, N)
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := client.Get(context.Background(), connect.NewRequest(&pb.GetRequest{Entity: "hot"}))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i] = decodeInt64(resp.Msg.GetValue().GetData())
+		}(i)
+	}
+	// Give all goroutines a moment to converge on the singleflight Group, then
+	// release the underlying store. Without singleflight all 50 would have
+	// already called store.Get by now.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if results[i] != 42 {
+			t.Errorf("call %d: got %d, want 42", i, results[i])
+		}
+	}
+	// Singleflight collapses concurrent in-flight identical calls. We expect
+	// exactly 1 store.Get; allow up to 3 to tolerate goroutine scheduling
+	// where some waiters reach the singleflight after the first resolves.
+	if got := store.gets.Load(); got > 3 {
+		t.Errorf("store.Get calls: got %d, want ~1 (max 3 with scheduling slop)", got)
+	}
+}
+
+func TestQuery_Get_FreshReadBypassesCoalescing(t *testing.T) {
+	gate := make(chan struct{})
+	close(gate) // released up front so reads return promptly
+	store := &countingStore{
+		inner:     fakeStore{state.Key{Entity: "hot"}: 42},
+		startGate: gate,
+	}
+	client, cleanup := startServer[int64](t, mgrpc.Config[int64]{
+		Store:  store,
+		Monoid: core.Sum[int64](),
+		Encode: mgrpc.Int64LE(),
+	})
+	defer cleanup()
+
+	const N = 20
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.Get(context.Background(), connect.NewRequest(&pb.GetRequest{
+				Entity:    "hot",
+				FreshRead: true,
+			}))
+			if err != nil {
+				t.Errorf("Get: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// fresh_read=true should bypass singleflight — every call hits the store.
+	if got := store.gets.Load(); got < N {
+		t.Errorf("store.Get calls with fresh_read=true: got %d, want %d (no coalescing)", got, N)
 	}
 }

@@ -1,13 +1,23 @@
 package murmur_test
 
 import (
+	"encoding/binary"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/murmur"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 )
+
+func decodeFloat64(t *testing.T, b []byte) float64 {
+	t.Helper()
+	if len(b) < 8 {
+		t.Fatalf("decodeFloat64: short input %d", len(b))
+	}
+	return math.Float64frombits(binary.LittleEndian.Uint64(b[:8]))
+}
 
 type ev struct {
 	K string
@@ -67,5 +77,54 @@ func TestTopN_Build(t *testing.T) {
 	got := p.ValueFn()(ev{K: "x", U: "alice"})
 	if len(got) == 0 {
 		t.Errorf("topk Single bytes empty")
+	}
+}
+
+func TestTrending_BuildAndValue(t *testing.T) {
+	at := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	p := murmur.Trending[ev]("hot_posts", time.Hour).
+		KeyBy(func(e ev) string { return e.K }).
+		Hourly(7 * 24 * time.Hour).
+		Clock(func() time.Time { return at }).
+		Build()
+
+	if p.Name() != "hot_posts" {
+		t.Errorf("name: got %q, want hot_posts", p.Name())
+	}
+	if p.Window() == nil {
+		t.Fatal("expected windowed pipeline")
+	}
+	// Value extractor should produce a 17-byte Decayed wire form with the
+	// configured clock as the timestamp.
+	bytes := p.ValueFn()(ev{K: "post-1", U: "u-1"})
+	if len(bytes) != 17 {
+		t.Fatalf("Decayed wire size: got %d, want 17", len(bytes))
+	}
+}
+
+func TestTrending_AmountOverride(t *testing.T) {
+	p := murmur.Trending[ev]("weighted_hot", time.Hour).
+		KeyBy(func(e ev) string { return e.K }).
+		// Verified-account boost: a like from "verified-user" weighs 5×.
+		Amount(func(e ev) float64 {
+			if e.U == "verified-user" {
+				return 5.0
+			}
+			return 1.0
+		}).
+		Clock(func() time.Time { return time.Unix(0, 0) }). // deterministic
+		Build()
+
+	verifiedBytes := p.ValueFn()(ev{K: "post-1", U: "verified-user"})
+	regularBytes := p.ValueFn()(ev{K: "post-1", U: "regular-user"})
+
+	// Both serialize to 17 bytes; verify the encoded amounts.
+	verified := decodeFloat64(t, verifiedBytes[0:8])
+	regular := decodeFloat64(t, regularBytes[0:8])
+	if verified != 5.0 {
+		t.Errorf("verified amount: got %v, want 5.0", verified)
+	}
+	if regular != 1.0 {
+		t.Errorf("regular amount: got %v, want 1.0", regular)
 	}
 }

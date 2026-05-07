@@ -15,7 +15,7 @@ edges callers should plan around.
 | `pkg/monoid/compose` | experimental | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1 |
-| `pkg/state/dynamodb` | experimental | `BatchGetItem` does not yet retry `UnprocessedKeys`; CAS path lacks backoff |
+| `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy |
 | `pkg/state/valkey` | experimental | only `Int64Cache` ships; sketch-bytes cache is roadmap; no native PFADD path |
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
