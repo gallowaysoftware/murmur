@@ -21,11 +21,9 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
 
 	pageviews "github.com/gallowaysoftware/murmur/examples/page-view-counters"
-	"github.com/gallowaysoftware/murmur/pkg/exec/streaming"
+	"github.com/gallowaysoftware/murmur/pkg/murmur"
 )
 
 func main() {
@@ -49,9 +47,7 @@ func main() {
 		"valkey", cfg.ValkeyAddress != "",
 	)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
+	ctx := context.Background()
 	pipe, store, cache, err := pageviews.Build(ctx, cfg, true)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
@@ -64,12 +60,7 @@ func main() {
 		_ = store.Close()
 	}()
 
-	logger.Info("running streaming runtime")
-	if err := streaming.Run(ctx, pipe); err != nil {
-		logger.Error("streaming.Run returned", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("streaming runtime exited cleanly")
+	os.Exit(murmur.RunStreamingWorker(ctx, pipe))
 }
 
 func envOr(key, fallback string) string {

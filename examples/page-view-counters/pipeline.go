@@ -14,8 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
-	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
+	"github.com/gallowaysoftware/murmur/pkg/murmur"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	mkafka "github.com/gallowaysoftware/murmur/pkg/source/kafka"
 	"github.com/gallowaysoftware/murmur/pkg/state"
@@ -81,13 +81,12 @@ func Build(ctx context.Context, cfg Config, withSource bool) (*pipeline.Pipeline
 		cache = c
 	}
 
-	pipe := pipeline.NewPipeline[PageView, int64]("page_views").
-		Key(func(e PageView) string { return e.PageID }).
-		Value(func(PageView) int64 { return 1 }).
-		Aggregate(core.Sum[int64](), Window).
+	builder := murmur.Counter[PageView]("page_views").
+		KeyBy(func(e PageView) string { return e.PageID }).
+		Daily(90 * 24 * time.Hour).
 		StoreIn(store)
 	if cache != nil {
-		pipe = pipe.Cache(cache)
+		builder = builder.Cache(cache)
 	}
 
 	if withSource {
@@ -100,10 +99,10 @@ func Build(ctx context.Context, cfg Config, withSource bool) (*pipeline.Pipeline
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		pipe = pipe.From(src)
+		builder = builder.From(src)
 	}
 
-	return pipe, store, cache, nil
+	return builder.Build(), store, cache, nil
 }
 
 func splitAndTrim(s, sep string) []string {
