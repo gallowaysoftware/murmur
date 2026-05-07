@@ -136,7 +136,8 @@ function statsFromPb(s: PbPipelineStats): PipelineStats {
   }
 }
 
-function stateFromPb(v: PbStateValue): StateValue {
+function stateFromPb(v: PbStateValue | undefined): StateValue {
+  if (!v) return { present: false }
   const out: StateValue = { present: v.present }
   if (v.data && v.data.length > 0) {
     out.data = bytesToBase64(v.data)
@@ -202,7 +203,10 @@ export const api = {
 
   pipelineMetrics: async (name: string, signal?: AbortSignal): Promise<PipelineStats> => {
     const r = await client.getPipelineMetrics({ name }, { signal })
-    return statsFromPb(r)
+    if (!r.stats) {
+      throw new Error(`pipelineMetrics ${name}: server returned an empty stats payload`)
+    }
+    return statsFromPb(r.stats)
   },
 
   getState: async (
@@ -217,7 +221,7 @@ export const api = {
       bucket: bucket !== undefined ? BigInt(bucket) : 0n,
       decode,
     })
-    return stateFromPb(r)
+    return stateFromPb(r.value)
   },
 
   getWindow: async (
@@ -232,7 +236,7 @@ export const api = {
       durationSeconds: BigInt(durationSeconds),
       decode,
     })
-    return stateFromPb(r)
+    return stateFromPb(r.value)
   },
 
   getRange: async (
@@ -249,7 +253,7 @@ export const api = {
       endUnix: BigInt(endUnix),
       decode,
     })
-    return stateFromPb(r)
+    return stateFromPb(r.value)
   },
 }
 

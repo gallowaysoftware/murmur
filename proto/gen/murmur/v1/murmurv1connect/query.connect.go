@@ -45,16 +45,18 @@ const (
 
 // QueryServiceClient is a client for the murmur.v1.QueryService service.
 type QueryServiceClient interface {
-	// Get returns the all-time aggregation value for entity (non-windowed pipelines).
-	Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.Value], error)
-	// GetWindow returns the aggregation merged across the bucket range covering the most
-	// recent duration_seconds, ending at the server's "now".
-	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.Value], error)
-	// GetRange returns the aggregation merged across the bucket range covering
-	// [start_unix, end_unix].
-	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.Value], error)
-	// GetMany batches Get calls.
-	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.Values], error)
+	// Get returns the all-time aggregation value for entity (non-windowed
+	// pipelines).
+	Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.GetResponse], error)
+	// GetWindow returns the aggregation merged across the bucket range
+	// covering the most recent `duration_seconds`, ending at the server's "now".
+	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error)
+	// GetRange returns the aggregation merged across the bucket range
+	// covering [start_unix, end_unix].
+	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error)
+	// GetMany batches Get calls. Response order matches request order so
+	// callers can zip without an index map.
+	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error)
 }
 
 // NewQueryServiceClient constructs a client for the murmur.v1.QueryService service. By default, it
@@ -68,25 +70,25 @@ func NewQueryServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 	baseURL = strings.TrimRight(baseURL, "/")
 	queryServiceMethods := v1.File_murmur_v1_query_proto.Services().ByName("QueryService").Methods()
 	return &queryServiceClient{
-		get: connect.NewClient[v1.GetRequest, v1.Value](
+		get: connect.NewClient[v1.GetRequest, v1.GetResponse](
 			httpClient,
 			baseURL+QueryServiceGetProcedure,
 			connect.WithSchema(queryServiceMethods.ByName("Get")),
 			connect.WithClientOptions(opts...),
 		),
-		getWindow: connect.NewClient[v1.GetWindowRequest, v1.Value](
+		getWindow: connect.NewClient[v1.GetWindowRequest, v1.GetWindowResponse](
 			httpClient,
 			baseURL+QueryServiceGetWindowProcedure,
 			connect.WithSchema(queryServiceMethods.ByName("GetWindow")),
 			connect.WithClientOptions(opts...),
 		),
-		getRange: connect.NewClient[v1.GetRangeRequest, v1.Value](
+		getRange: connect.NewClient[v1.GetRangeRequest, v1.GetRangeResponse](
 			httpClient,
 			baseURL+QueryServiceGetRangeProcedure,
 			connect.WithSchema(queryServiceMethods.ByName("GetRange")),
 			connect.WithClientOptions(opts...),
 		),
-		getMany: connect.NewClient[v1.GetManyRequest, v1.Values](
+		getMany: connect.NewClient[v1.GetManyRequest, v1.GetManyResponse](
 			httpClient,
 			baseURL+QueryServiceGetManyProcedure,
 			connect.WithSchema(queryServiceMethods.ByName("GetMany")),
@@ -97,44 +99,46 @@ func NewQueryServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 
 // queryServiceClient implements QueryServiceClient.
 type queryServiceClient struct {
-	get       *connect.Client[v1.GetRequest, v1.Value]
-	getWindow *connect.Client[v1.GetWindowRequest, v1.Value]
-	getRange  *connect.Client[v1.GetRangeRequest, v1.Value]
-	getMany   *connect.Client[v1.GetManyRequest, v1.Values]
+	get       *connect.Client[v1.GetRequest, v1.GetResponse]
+	getWindow *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
+	getRange  *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
+	getMany   *connect.Client[v1.GetManyRequest, v1.GetManyResponse]
 }
 
 // Get calls murmur.v1.QueryService.Get.
-func (c *queryServiceClient) Get(ctx context.Context, req *connect.Request[v1.GetRequest]) (*connect.Response[v1.Value], error) {
+func (c *queryServiceClient) Get(ctx context.Context, req *connect.Request[v1.GetRequest]) (*connect.Response[v1.GetResponse], error) {
 	return c.get.CallUnary(ctx, req)
 }
 
 // GetWindow calls murmur.v1.QueryService.GetWindow.
-func (c *queryServiceClient) GetWindow(ctx context.Context, req *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.Value], error) {
+func (c *queryServiceClient) GetWindow(ctx context.Context, req *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error) {
 	return c.getWindow.CallUnary(ctx, req)
 }
 
 // GetRange calls murmur.v1.QueryService.GetRange.
-func (c *queryServiceClient) GetRange(ctx context.Context, req *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.Value], error) {
+func (c *queryServiceClient) GetRange(ctx context.Context, req *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error) {
 	return c.getRange.CallUnary(ctx, req)
 }
 
 // GetMany calls murmur.v1.QueryService.GetMany.
-func (c *queryServiceClient) GetMany(ctx context.Context, req *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.Values], error) {
+func (c *queryServiceClient) GetMany(ctx context.Context, req *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error) {
 	return c.getMany.CallUnary(ctx, req)
 }
 
 // QueryServiceHandler is an implementation of the murmur.v1.QueryService service.
 type QueryServiceHandler interface {
-	// Get returns the all-time aggregation value for entity (non-windowed pipelines).
-	Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.Value], error)
-	// GetWindow returns the aggregation merged across the bucket range covering the most
-	// recent duration_seconds, ending at the server's "now".
-	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.Value], error)
-	// GetRange returns the aggregation merged across the bucket range covering
-	// [start_unix, end_unix].
-	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.Value], error)
-	// GetMany batches Get calls.
-	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.Values], error)
+	// Get returns the all-time aggregation value for entity (non-windowed
+	// pipelines).
+	Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.GetResponse], error)
+	// GetWindow returns the aggregation merged across the bucket range
+	// covering the most recent `duration_seconds`, ending at the server's "now".
+	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error)
+	// GetRange returns the aggregation merged across the bucket range
+	// covering [start_unix, end_unix].
+	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error)
+	// GetMany batches Get calls. Response order matches request order so
+	// callers can zip without an index map.
+	GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error)
 }
 
 // NewQueryServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -187,18 +191,18 @@ func NewQueryServiceHandler(svc QueryServiceHandler, opts ...connect.HandlerOpti
 // UnimplementedQueryServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedQueryServiceHandler struct{}
 
-func (UnimplementedQueryServiceHandler) Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.Value], error) {
+func (UnimplementedQueryServiceHandler) Get(context.Context, *connect.Request[v1.GetRequest]) (*connect.Response[v1.GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.Get is not implemented"))
 }
 
-func (UnimplementedQueryServiceHandler) GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.Value], error) {
+func (UnimplementedQueryServiceHandler) GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetWindow is not implemented"))
 }
 
-func (UnimplementedQueryServiceHandler) GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.Value], error) {
+func (UnimplementedQueryServiceHandler) GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetRange is not implemented"))
 }
 
-func (UnimplementedQueryServiceHandler) GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.Values], error) {
+func (UnimplementedQueryServiceHandler) GetMany(context.Context, *connect.Request[v1.GetManyRequest]) (*connect.Response[v1.GetManyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetMany is not implemented"))
 }

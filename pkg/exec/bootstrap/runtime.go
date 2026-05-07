@@ -65,7 +65,7 @@ func WithDedup(d state.Deduper) RunOption {
 func Run[T any, V any](
 	ctx context.Context,
 	p *pipeline.Pipeline[T, V],
-	src snapshot.SnapshotSource[T],
+	src snapshot.Source[T],
 	opts ...RunOption,
 ) (snapshot.HandoffToken, error) {
 	if err := p.Build(); err != nil {

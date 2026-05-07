@@ -51,6 +51,11 @@ const (
 // AdminService is the control surface. Every endpoint is read-only today; any
 // future write endpoints (e.g. trigger replay, swap state-table version) will
 // be added as new RPCs rather than overloading existing ones.
+//
+// All RPCs follow the buf-STANDARD per-RPC request/response message
+// convention: each RPC's response is its own message type so the schema can
+// add fields independently per endpoint without forcing a coordinated
+// rollout.
 type AdminServiceClient interface {
 	// Health is a simple liveness probe. Returns "ok" when the server is up.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
@@ -59,16 +64,16 @@ type AdminServiceClient interface {
 	// GetPipelineMetrics returns the in-memory metrics snapshot for one
 	// pipeline. Suitable for ~2 s polling; for sub-second updates consider
 	// streaming (a planned addition).
-	GetPipelineMetrics(ctx context.Context, in *GetPipelineMetricsRequest, opts ...grpc.CallOption) (*PipelineStats, error)
+	GetPipelineMetrics(ctx context.Context, in *GetPipelineMetricsRequest, opts ...grpc.CallOption) (*GetPipelineMetricsResponse, error)
 	// GetState reads the all-time aggregation value for an entity (or one bucket
 	// of a windowed pipeline if `bucket` is set).
-	GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*StateValue, error)
+	GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*GetStateResponse, error)
 	// GetWindow returns the aggregation merged across the bucket range covering
 	// the most recent `duration_seconds`, ending at the server's "now".
-	GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*StateValue, error)
+	GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*GetWindowResponse, error)
 	// GetRange returns the aggregation merged across the bucket range covering
 	// [start_unix, end_unix].
-	GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*StateValue, error)
+	GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*GetRangeResponse, error)
 }
 
 type adminServiceClient struct {
@@ -99,9 +104,9 @@ func (c *adminServiceClient) ListPipelines(ctx context.Context, in *ListPipeline
 	return out, nil
 }
 
-func (c *adminServiceClient) GetPipelineMetrics(ctx context.Context, in *GetPipelineMetricsRequest, opts ...grpc.CallOption) (*PipelineStats, error) {
+func (c *adminServiceClient) GetPipelineMetrics(ctx context.Context, in *GetPipelineMetricsRequest, opts ...grpc.CallOption) (*GetPipelineMetricsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PipelineStats)
+	out := new(GetPipelineMetricsResponse)
 	err := c.cc.Invoke(ctx, AdminService_GetPipelineMetrics_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -109,9 +114,9 @@ func (c *adminServiceClient) GetPipelineMetrics(ctx context.Context, in *GetPipe
 	return out, nil
 }
 
-func (c *adminServiceClient) GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*StateValue, error) {
+func (c *adminServiceClient) GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*GetStateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StateValue)
+	out := new(GetStateResponse)
 	err := c.cc.Invoke(ctx, AdminService_GetState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -119,9 +124,9 @@ func (c *adminServiceClient) GetState(ctx context.Context, in *GetStateRequest, 
 	return out, nil
 }
 
-func (c *adminServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*StateValue, error) {
+func (c *adminServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*GetWindowResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StateValue)
+	out := new(GetWindowResponse)
 	err := c.cc.Invoke(ctx, AdminService_GetWindow_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -129,9 +134,9 @@ func (c *adminServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest
 	return out, nil
 }
 
-func (c *adminServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*StateValue, error) {
+func (c *adminServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*GetRangeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StateValue)
+	out := new(GetRangeResponse)
 	err := c.cc.Invoke(ctx, AdminService_GetRange_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -146,6 +151,11 @@ func (c *adminServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, 
 // AdminService is the control surface. Every endpoint is read-only today; any
 // future write endpoints (e.g. trigger replay, swap state-table version) will
 // be added as new RPCs rather than overloading existing ones.
+//
+// All RPCs follow the buf-STANDARD per-RPC request/response message
+// convention: each RPC's response is its own message type so the schema can
+// add fields independently per endpoint without forcing a coordinated
+// rollout.
 type AdminServiceServer interface {
 	// Health is a simple liveness probe. Returns "ok" when the server is up.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
@@ -154,16 +164,16 @@ type AdminServiceServer interface {
 	// GetPipelineMetrics returns the in-memory metrics snapshot for one
 	// pipeline. Suitable for ~2 s polling; for sub-second updates consider
 	// streaming (a planned addition).
-	GetPipelineMetrics(context.Context, *GetPipelineMetricsRequest) (*PipelineStats, error)
+	GetPipelineMetrics(context.Context, *GetPipelineMetricsRequest) (*GetPipelineMetricsResponse, error)
 	// GetState reads the all-time aggregation value for an entity (or one bucket
 	// of a windowed pipeline if `bucket` is set).
-	GetState(context.Context, *GetStateRequest) (*StateValue, error)
+	GetState(context.Context, *GetStateRequest) (*GetStateResponse, error)
 	// GetWindow returns the aggregation merged across the bucket range covering
 	// the most recent `duration_seconds`, ending at the server's "now".
-	GetWindow(context.Context, *GetWindowRequest) (*StateValue, error)
+	GetWindow(context.Context, *GetWindowRequest) (*GetWindowResponse, error)
 	// GetRange returns the aggregation merged across the bucket range covering
 	// [start_unix, end_unix].
-	GetRange(context.Context, *GetRangeRequest) (*StateValue, error)
+	GetRange(context.Context, *GetRangeRequest) (*GetRangeResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -180,16 +190,16 @@ func (UnimplementedAdminServiceServer) Health(context.Context, *HealthRequest) (
 func (UnimplementedAdminServiceServer) ListPipelines(context.Context, *ListPipelinesRequest) (*ListPipelinesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPipelines not implemented")
 }
-func (UnimplementedAdminServiceServer) GetPipelineMetrics(context.Context, *GetPipelineMetricsRequest) (*PipelineStats, error) {
+func (UnimplementedAdminServiceServer) GetPipelineMetrics(context.Context, *GetPipelineMetricsRequest) (*GetPipelineMetricsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPipelineMetrics not implemented")
 }
-func (UnimplementedAdminServiceServer) GetState(context.Context, *GetStateRequest) (*StateValue, error) {
+func (UnimplementedAdminServiceServer) GetState(context.Context, *GetStateRequest) (*GetStateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetState not implemented")
 }
-func (UnimplementedAdminServiceServer) GetWindow(context.Context, *GetWindowRequest) (*StateValue, error) {
+func (UnimplementedAdminServiceServer) GetWindow(context.Context, *GetWindowRequest) (*GetWindowResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetWindow not implemented")
 }
-func (UnimplementedAdminServiceServer) GetRange(context.Context, *GetRangeRequest) (*StateValue, error) {
+func (UnimplementedAdminServiceServer) GetRange(context.Context, *GetRangeRequest) (*GetRangeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRange not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}

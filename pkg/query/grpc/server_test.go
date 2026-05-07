@@ -86,7 +86,7 @@ func TestQuery_Get_NonWindowed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get %s: %v", tc.entity, err)
 		}
-		v := resp.Msg
+		v := resp.Msg.GetValue()
 		if v.GetPresent() != tc.wantPresent {
 			t.Errorf("%s present: got %v, want %v", tc.entity, v.GetPresent(), tc.wantPresent)
 		}
@@ -168,7 +168,7 @@ func TestQuery_GetWindow_Daily(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
-			if got := decodeInt64(resp.Msg.GetData()); got != tc.want {
+			if got := decodeInt64(resp.Msg.GetValue().GetData()); got != tc.want {
 				t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 			}
 		})

@@ -520,6 +520,53 @@ func (x *GetPipelineMetricsRequest) GetName() string {
 	return ""
 }
 
+// GetPipelineMetricsResponse wraps PipelineStats so the response can grow
+// (e.g. add a `lag_seconds`, `pending_dlq` field) without forcing the inner
+// PipelineStats schema to change in lockstep.
+type GetPipelineMetricsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stats         *PipelineStats         `protobuf:"bytes,1,opt,name=stats,proto3" json:"stats,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPipelineMetricsResponse) Reset() {
+	*x = GetPipelineMetricsResponse{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPipelineMetricsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPipelineMetricsResponse) ProtoMessage() {}
+
+func (x *GetPipelineMetricsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPipelineMetricsResponse.ProtoReflect.Descriptor instead.
+func (*GetPipelineMetricsResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *GetPipelineMetricsResponse) GetStats() *PipelineStats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
 type GetStateRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Name   string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -534,7 +581,7 @@ type GetStateRequest struct {
 
 func (x *GetStateRequest) Reset() {
 	*x = GetStateRequest{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[8]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -546,7 +593,7 @@ func (x *GetStateRequest) String() string {
 func (*GetStateRequest) ProtoMessage() {}
 
 func (x *GetStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[8]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -559,7 +606,7 @@ func (x *GetStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStateRequest.ProtoReflect.Descriptor instead.
 func (*GetStateRequest) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{8}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetStateRequest) GetName() string {
@@ -602,7 +649,7 @@ type GetWindowRequest struct {
 
 func (x *GetWindowRequest) Reset() {
 	*x = GetWindowRequest{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[9]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -614,7 +661,7 @@ func (x *GetWindowRequest) String() string {
 func (*GetWindowRequest) ProtoMessage() {}
 
 func (x *GetWindowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[9]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -627,7 +674,7 @@ func (x *GetWindowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWindowRequest.ProtoReflect.Descriptor instead.
 func (*GetWindowRequest) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{9}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetWindowRequest) GetName() string {
@@ -671,7 +718,7 @@ type GetRangeRequest struct {
 
 func (x *GetRangeRequest) Reset() {
 	*x = GetRangeRequest{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[10]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -683,7 +730,7 @@ func (x *GetRangeRequest) String() string {
 func (*GetRangeRequest) ProtoMessage() {}
 
 func (x *GetRangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[10]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -696,7 +743,7 @@ func (x *GetRangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRangeRequest.ProtoReflect.Descriptor instead.
 func (*GetRangeRequest) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{10}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetRangeRequest) GetName() string {
@@ -753,7 +800,7 @@ type DecodedValue struct {
 
 func (x *DecodedValue) Reset() {
 	*x = DecodedValue{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[11]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +812,7 @@ func (x *DecodedValue) String() string {
 func (*DecodedValue) ProtoMessage() {}
 
 func (x *DecodedValue) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[11]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +825,7 @@ func (x *DecodedValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DecodedValue.ProtoReflect.Descriptor instead.
 func (*DecodedValue) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{11}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DecodedValue) GetValue() isDecodedValue_Value {
@@ -882,7 +929,7 @@ type OpaqueValue struct {
 
 func (x *OpaqueValue) Reset() {
 	*x = OpaqueValue{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[12]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -894,7 +941,7 @@ func (x *OpaqueValue) String() string {
 func (*OpaqueValue) ProtoMessage() {}
 
 func (x *OpaqueValue) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[12]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -907,7 +954,7 @@ func (x *OpaqueValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpaqueValue.ProtoReflect.Descriptor instead.
 func (*OpaqueValue) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{12}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *OpaqueValue) GetByteLen() int64 {
@@ -936,7 +983,7 @@ type HLLDecoded struct {
 
 func (x *HLLDecoded) Reset() {
 	*x = HLLDecoded{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -948,7 +995,7 @@ func (x *HLLDecoded) String() string {
 func (*HLLDecoded) ProtoMessage() {}
 
 func (x *HLLDecoded) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[13]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -961,7 +1008,7 @@ func (x *HLLDecoded) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HLLDecoded.ProtoReflect.Descriptor instead.
 func (*HLLDecoded) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{13}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *HLLDecoded) GetCardinalityEstimate() uint64 {
@@ -988,7 +1035,7 @@ type TopKItem struct {
 
 func (x *TopKItem) Reset() {
 	*x = TopKItem{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1000,7 +1047,7 @@ func (x *TopKItem) String() string {
 func (*TopKItem) ProtoMessage() {}
 
 func (x *TopKItem) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[14]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1013,7 +1060,7 @@ func (x *TopKItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopKItem.ProtoReflect.Descriptor instead.
 func (*TopKItem) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{14}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TopKItem) GetKey() string {
@@ -1042,7 +1089,7 @@ type TopKDecoded struct {
 
 func (x *TopKDecoded) Reset() {
 	*x = TopKDecoded{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1054,7 +1101,7 @@ func (x *TopKDecoded) String() string {
 func (*TopKDecoded) ProtoMessage() {}
 
 func (x *TopKDecoded) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[15]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1067,7 +1114,7 @@ func (x *TopKDecoded) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopKDecoded.ProtoReflect.Descriptor instead.
 func (*TopKDecoded) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{15}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TopKDecoded) GetK() int64 {
@@ -1099,7 +1146,7 @@ type BloomDecoded struct {
 
 func (x *BloomDecoded) Reset() {
 	*x = BloomDecoded{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1111,7 +1158,7 @@ func (x *BloomDecoded) String() string {
 func (*BloomDecoded) ProtoMessage() {}
 
 func (x *BloomDecoded) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[16]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1124,7 +1171,7 @@ func (x *BloomDecoded) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BloomDecoded.ProtoReflect.Descriptor instead.
 func (*BloomDecoded) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{16}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *BloomDecoded) GetCapacityBits() uint64 {
@@ -1148,9 +1195,12 @@ func (x *BloomDecoded) GetApproxSize() uint64 {
 	return 0
 }
 
-// StateValue is the result of a Get / GetWindow / GetRange. `present` is false
-// when the entity / bucket does not exist; `data` is always the raw stored
-// bytes; `decoded` is populated when the request set decode=true.
+// StateValue is the inner payload returned by Get / GetWindow / GetRange.
+// `present` is false when the entity / bucket does not exist; `data` is
+// always the raw stored bytes; `decoded` is populated when the request set
+// decode=true. StateValue is used as a field of GetStateResponse,
+// GetWindowResponse, and GetRangeResponse — sharing the inner shape is
+// intentional (the data is the same, only the lookup semantics differ).
 type StateValue struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Present       bool                   `protobuf:"varint,1,opt,name=present,proto3" json:"present,omitempty"`
@@ -1162,7 +1212,7 @@ type StateValue struct {
 
 func (x *StateValue) Reset() {
 	*x = StateValue{}
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1174,7 +1224,7 @@ func (x *StateValue) String() string {
 func (*StateValue) ProtoMessage() {}
 
 func (x *StateValue) ProtoReflect() protoreflect.Message {
-	mi := &file_murmur_admin_v1_admin_proto_msgTypes[17]
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1187,7 +1237,7 @@ func (x *StateValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateValue.ProtoReflect.Descriptor instead.
 func (*StateValue) Descriptor() ([]byte, []int) {
-	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{17}
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StateValue) GetPresent() bool {
@@ -1207,6 +1257,138 @@ func (x *StateValue) GetData() []byte {
 func (x *StateValue) GetDecoded() *DecodedValue {
 	if x != nil {
 		return x.Decoded
+	}
+	return nil
+}
+
+type GetStateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Value         *StateValue            `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStateResponse) Reset() {
+	*x = GetStateResponse{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStateResponse) ProtoMessage() {}
+
+func (x *GetStateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStateResponse.ProtoReflect.Descriptor instead.
+func (*GetStateResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *GetStateResponse) GetValue() *StateValue {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+type GetWindowResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Value         *StateValue            `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWindowResponse) Reset() {
+	*x = GetWindowResponse{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWindowResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWindowResponse) ProtoMessage() {}
+
+func (x *GetWindowResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWindowResponse.ProtoReflect.Descriptor instead.
+func (*GetWindowResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *GetWindowResponse) GetValue() *StateValue {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+type GetRangeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Value         *StateValue            `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRangeResponse) Reset() {
+	*x = GetRangeResponse{}
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRangeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRangeResponse) ProtoMessage() {}
+
+func (x *GetRangeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_admin_v1_admin_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRangeResponse.ProtoReflect.Descriptor instead.
+func (*GetRangeResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_admin_v1_admin_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *GetRangeResponse) GetValue() *StateValue {
+	if x != nil {
+		return x.Value
 	}
 	return nil
 }
@@ -1254,7 +1436,9 @@ const file_murmur_admin_v1_admin_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x123\n" +
 	"\x05value\x18\x02 \x01(\v2\x1d.murmur.admin.v1.LatencyStatsR\x05value:\x028\x01\"/\n" +
 	"\x19GetPipelineMetricsRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"m\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"R\n" +
+	"\x1aGetPipelineMetricsResponse\x124\n" +
+	"\x05stats\x18\x01 \x01(\v2\x1e.murmur.admin.v1.PipelineStatsR\x05stats\"m\n" +
 	"\x0fGetStateRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06entity\x18\x02 \x01(\tR\x06entity\x12\x16\n" +
@@ -1302,14 +1486,20 @@ const file_murmur_admin_v1_admin_proto_rawDesc = "" +
 	"StateValue\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x127\n" +
-	"\adecoded\x18\x03 \x01(\v2\x1d.murmur.admin.v1.DecodedValueR\adecoded2\xfe\x03\n" +
+	"\adecoded\x18\x03 \x01(\v2\x1d.murmur.admin.v1.DecodedValueR\adecoded\"E\n" +
+	"\x10GetStateResponse\x121\n" +
+	"\x05value\x18\x01 \x01(\v2\x1b.murmur.admin.v1.StateValueR\x05value\"F\n" +
+	"\x11GetWindowResponse\x121\n" +
+	"\x05value\x18\x01 \x01(\v2\x1b.murmur.admin.v1.StateValueR\x05value\"E\n" +
+	"\x10GetRangeResponse\x121\n" +
+	"\x05value\x18\x01 \x01(\v2\x1b.murmur.admin.v1.StateValueR\x05value2\x9e\x04\n" +
 	"\fAdminService\x12I\n" +
 	"\x06Health\x12\x1e.murmur.admin.v1.HealthRequest\x1a\x1f.murmur.admin.v1.HealthResponse\x12^\n" +
-	"\rListPipelines\x12%.murmur.admin.v1.ListPipelinesRequest\x1a&.murmur.admin.v1.ListPipelinesResponse\x12`\n" +
-	"\x12GetPipelineMetrics\x12*.murmur.admin.v1.GetPipelineMetricsRequest\x1a\x1e.murmur.admin.v1.PipelineStats\x12I\n" +
-	"\bGetState\x12 .murmur.admin.v1.GetStateRequest\x1a\x1b.murmur.admin.v1.StateValue\x12K\n" +
-	"\tGetWindow\x12!.murmur.admin.v1.GetWindowRequest\x1a\x1b.murmur.admin.v1.StateValue\x12I\n" +
-	"\bGetRange\x12 .murmur.admin.v1.GetRangeRequest\x1a\x1b.murmur.admin.v1.StateValueB\xc5\x01\n" +
+	"\rListPipelines\x12%.murmur.admin.v1.ListPipelinesRequest\x1a&.murmur.admin.v1.ListPipelinesResponse\x12m\n" +
+	"\x12GetPipelineMetrics\x12*.murmur.admin.v1.GetPipelineMetricsRequest\x1a+.murmur.admin.v1.GetPipelineMetricsResponse\x12O\n" +
+	"\bGetState\x12 .murmur.admin.v1.GetStateRequest\x1a!.murmur.admin.v1.GetStateResponse\x12R\n" +
+	"\tGetWindow\x12!.murmur.admin.v1.GetWindowRequest\x1a\".murmur.admin.v1.GetWindowResponse\x12O\n" +
+	"\bGetRange\x12 .murmur.admin.v1.GetRangeRequest\x1a!.murmur.admin.v1.GetRangeResponseB\xc5\x01\n" +
 	"\x13com.murmur.admin.v1B\n" +
 	"AdminProtoP\x01ZDgithub.com/gallowaysoftware/murmur/proto/gen/murmur/admin/v1;adminv1\xa2\x02\x03MAX\xaa\x02\x0fMurmur.Admin.V1\xca\x02\x0fMurmur\\Admin\\V1\xe2\x02\x1bMurmur\\Admin\\V1\\GPBMetadata\xea\x02\x11Murmur::Admin::V1b\x06proto3"
 
@@ -1325,55 +1515,63 @@ func file_murmur_admin_v1_admin_proto_rawDescGZIP() []byte {
 	return file_murmur_admin_v1_admin_proto_rawDescData
 }
 
-var file_murmur_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_murmur_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_murmur_admin_v1_admin_proto_goTypes = []any{
-	(*HealthRequest)(nil),             // 0: murmur.admin.v1.HealthRequest
-	(*HealthResponse)(nil),            // 1: murmur.admin.v1.HealthResponse
-	(*PipelineInfo)(nil),              // 2: murmur.admin.v1.PipelineInfo
-	(*ListPipelinesRequest)(nil),      // 3: murmur.admin.v1.ListPipelinesRequest
-	(*ListPipelinesResponse)(nil),     // 4: murmur.admin.v1.ListPipelinesResponse
-	(*LatencyStats)(nil),              // 5: murmur.admin.v1.LatencyStats
-	(*PipelineStats)(nil),             // 6: murmur.admin.v1.PipelineStats
-	(*GetPipelineMetricsRequest)(nil), // 7: murmur.admin.v1.GetPipelineMetricsRequest
-	(*GetStateRequest)(nil),           // 8: murmur.admin.v1.GetStateRequest
-	(*GetWindowRequest)(nil),          // 9: murmur.admin.v1.GetWindowRequest
-	(*GetRangeRequest)(nil),           // 10: murmur.admin.v1.GetRangeRequest
-	(*DecodedValue)(nil),              // 11: murmur.admin.v1.DecodedValue
-	(*OpaqueValue)(nil),               // 12: murmur.admin.v1.OpaqueValue
-	(*HLLDecoded)(nil),                // 13: murmur.admin.v1.HLLDecoded
-	(*TopKItem)(nil),                  // 14: murmur.admin.v1.TopKItem
-	(*TopKDecoded)(nil),               // 15: murmur.admin.v1.TopKDecoded
-	(*BloomDecoded)(nil),              // 16: murmur.admin.v1.BloomDecoded
-	(*StateValue)(nil),                // 17: murmur.admin.v1.StateValue
-	nil,                               // 18: murmur.admin.v1.PipelineStats.LatenciesEntry
+	(*HealthRequest)(nil),              // 0: murmur.admin.v1.HealthRequest
+	(*HealthResponse)(nil),             // 1: murmur.admin.v1.HealthResponse
+	(*PipelineInfo)(nil),               // 2: murmur.admin.v1.PipelineInfo
+	(*ListPipelinesRequest)(nil),       // 3: murmur.admin.v1.ListPipelinesRequest
+	(*ListPipelinesResponse)(nil),      // 4: murmur.admin.v1.ListPipelinesResponse
+	(*LatencyStats)(nil),               // 5: murmur.admin.v1.LatencyStats
+	(*PipelineStats)(nil),              // 6: murmur.admin.v1.PipelineStats
+	(*GetPipelineMetricsRequest)(nil),  // 7: murmur.admin.v1.GetPipelineMetricsRequest
+	(*GetPipelineMetricsResponse)(nil), // 8: murmur.admin.v1.GetPipelineMetricsResponse
+	(*GetStateRequest)(nil),            // 9: murmur.admin.v1.GetStateRequest
+	(*GetWindowRequest)(nil),           // 10: murmur.admin.v1.GetWindowRequest
+	(*GetRangeRequest)(nil),            // 11: murmur.admin.v1.GetRangeRequest
+	(*DecodedValue)(nil),               // 12: murmur.admin.v1.DecodedValue
+	(*OpaqueValue)(nil),                // 13: murmur.admin.v1.OpaqueValue
+	(*HLLDecoded)(nil),                 // 14: murmur.admin.v1.HLLDecoded
+	(*TopKItem)(nil),                   // 15: murmur.admin.v1.TopKItem
+	(*TopKDecoded)(nil),                // 16: murmur.admin.v1.TopKDecoded
+	(*BloomDecoded)(nil),               // 17: murmur.admin.v1.BloomDecoded
+	(*StateValue)(nil),                 // 18: murmur.admin.v1.StateValue
+	(*GetStateResponse)(nil),           // 19: murmur.admin.v1.GetStateResponse
+	(*GetWindowResponse)(nil),          // 20: murmur.admin.v1.GetWindowResponse
+	(*GetRangeResponse)(nil),           // 21: murmur.admin.v1.GetRangeResponse
+	nil,                                // 22: murmur.admin.v1.PipelineStats.LatenciesEntry
 }
 var file_murmur_admin_v1_admin_proto_depIdxs = []int32{
 	2,  // 0: murmur.admin.v1.ListPipelinesResponse.pipelines:type_name -> murmur.admin.v1.PipelineInfo
-	18, // 1: murmur.admin.v1.PipelineStats.latencies:type_name -> murmur.admin.v1.PipelineStats.LatenciesEntry
-	12, // 2: murmur.admin.v1.DecodedValue.opaque:type_name -> murmur.admin.v1.OpaqueValue
-	13, // 3: murmur.admin.v1.DecodedValue.hll:type_name -> murmur.admin.v1.HLLDecoded
-	15, // 4: murmur.admin.v1.DecodedValue.topk:type_name -> murmur.admin.v1.TopKDecoded
-	16, // 5: murmur.admin.v1.DecodedValue.bloom:type_name -> murmur.admin.v1.BloomDecoded
-	14, // 6: murmur.admin.v1.TopKDecoded.items:type_name -> murmur.admin.v1.TopKItem
-	11, // 7: murmur.admin.v1.StateValue.decoded:type_name -> murmur.admin.v1.DecodedValue
-	5,  // 8: murmur.admin.v1.PipelineStats.LatenciesEntry.value:type_name -> murmur.admin.v1.LatencyStats
-	0,  // 9: murmur.admin.v1.AdminService.Health:input_type -> murmur.admin.v1.HealthRequest
-	3,  // 10: murmur.admin.v1.AdminService.ListPipelines:input_type -> murmur.admin.v1.ListPipelinesRequest
-	7,  // 11: murmur.admin.v1.AdminService.GetPipelineMetrics:input_type -> murmur.admin.v1.GetPipelineMetricsRequest
-	8,  // 12: murmur.admin.v1.AdminService.GetState:input_type -> murmur.admin.v1.GetStateRequest
-	9,  // 13: murmur.admin.v1.AdminService.GetWindow:input_type -> murmur.admin.v1.GetWindowRequest
-	10, // 14: murmur.admin.v1.AdminService.GetRange:input_type -> murmur.admin.v1.GetRangeRequest
-	1,  // 15: murmur.admin.v1.AdminService.Health:output_type -> murmur.admin.v1.HealthResponse
-	4,  // 16: murmur.admin.v1.AdminService.ListPipelines:output_type -> murmur.admin.v1.ListPipelinesResponse
-	6,  // 17: murmur.admin.v1.AdminService.GetPipelineMetrics:output_type -> murmur.admin.v1.PipelineStats
-	17, // 18: murmur.admin.v1.AdminService.GetState:output_type -> murmur.admin.v1.StateValue
-	17, // 19: murmur.admin.v1.AdminService.GetWindow:output_type -> murmur.admin.v1.StateValue
-	17, // 20: murmur.admin.v1.AdminService.GetRange:output_type -> murmur.admin.v1.StateValue
-	15, // [15:21] is the sub-list for method output_type
-	9,  // [9:15] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	22, // 1: murmur.admin.v1.PipelineStats.latencies:type_name -> murmur.admin.v1.PipelineStats.LatenciesEntry
+	6,  // 2: murmur.admin.v1.GetPipelineMetricsResponse.stats:type_name -> murmur.admin.v1.PipelineStats
+	13, // 3: murmur.admin.v1.DecodedValue.opaque:type_name -> murmur.admin.v1.OpaqueValue
+	14, // 4: murmur.admin.v1.DecodedValue.hll:type_name -> murmur.admin.v1.HLLDecoded
+	16, // 5: murmur.admin.v1.DecodedValue.topk:type_name -> murmur.admin.v1.TopKDecoded
+	17, // 6: murmur.admin.v1.DecodedValue.bloom:type_name -> murmur.admin.v1.BloomDecoded
+	15, // 7: murmur.admin.v1.TopKDecoded.items:type_name -> murmur.admin.v1.TopKItem
+	12, // 8: murmur.admin.v1.StateValue.decoded:type_name -> murmur.admin.v1.DecodedValue
+	18, // 9: murmur.admin.v1.GetStateResponse.value:type_name -> murmur.admin.v1.StateValue
+	18, // 10: murmur.admin.v1.GetWindowResponse.value:type_name -> murmur.admin.v1.StateValue
+	18, // 11: murmur.admin.v1.GetRangeResponse.value:type_name -> murmur.admin.v1.StateValue
+	5,  // 12: murmur.admin.v1.PipelineStats.LatenciesEntry.value:type_name -> murmur.admin.v1.LatencyStats
+	0,  // 13: murmur.admin.v1.AdminService.Health:input_type -> murmur.admin.v1.HealthRequest
+	3,  // 14: murmur.admin.v1.AdminService.ListPipelines:input_type -> murmur.admin.v1.ListPipelinesRequest
+	7,  // 15: murmur.admin.v1.AdminService.GetPipelineMetrics:input_type -> murmur.admin.v1.GetPipelineMetricsRequest
+	9,  // 16: murmur.admin.v1.AdminService.GetState:input_type -> murmur.admin.v1.GetStateRequest
+	10, // 17: murmur.admin.v1.AdminService.GetWindow:input_type -> murmur.admin.v1.GetWindowRequest
+	11, // 18: murmur.admin.v1.AdminService.GetRange:input_type -> murmur.admin.v1.GetRangeRequest
+	1,  // 19: murmur.admin.v1.AdminService.Health:output_type -> murmur.admin.v1.HealthResponse
+	4,  // 20: murmur.admin.v1.AdminService.ListPipelines:output_type -> murmur.admin.v1.ListPipelinesResponse
+	8,  // 21: murmur.admin.v1.AdminService.GetPipelineMetrics:output_type -> murmur.admin.v1.GetPipelineMetricsResponse
+	19, // 22: murmur.admin.v1.AdminService.GetState:output_type -> murmur.admin.v1.GetStateResponse
+	20, // 23: murmur.admin.v1.AdminService.GetWindow:output_type -> murmur.admin.v1.GetWindowResponse
+	21, // 24: murmur.admin.v1.AdminService.GetRange:output_type -> murmur.admin.v1.GetRangeResponse
+	19, // [19:25] is the sub-list for method output_type
+	13, // [13:19] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_murmur_admin_v1_admin_proto_init() }
@@ -1381,7 +1579,7 @@ func file_murmur_admin_v1_admin_proto_init() {
 	if File_murmur_admin_v1_admin_proto != nil {
 		return
 	}
-	file_murmur_admin_v1_admin_proto_msgTypes[11].OneofWrappers = []any{
+	file_murmur_admin_v1_admin_proto_msgTypes[12].OneofWrappers = []any{
 		(*DecodedValue_Int64Value)(nil),
 		(*DecodedValue_Opaque)(nil),
 		(*DecodedValue_Hll)(nil),
@@ -1394,7 +1592,7 @@ func file_murmur_admin_v1_admin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_murmur_admin_v1_admin_proto_rawDesc), len(file_murmur_admin_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

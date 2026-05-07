@@ -31,7 +31,9 @@ type Item struct {
 	Count uint64
 }
 
-// Default K when callers don't specify.
+// DefaultK is the K parameter (number of heavy hitters retained) used by the
+// no-arg TopK() factory and the Single() helper. Override with New(k) /
+// SingleN(k, …) for pipelines that want a different capacity.
 const DefaultK = 10
 
 // TopK returns a Misra-Gries top-K monoid with the default K.

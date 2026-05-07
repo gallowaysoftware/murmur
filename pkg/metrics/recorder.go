@@ -34,11 +34,18 @@ type Recorder interface {
 	RecordLatency(pipeline string, op string, d time.Duration)
 }
 
-// Noop discards all metrics. Useful as a default and in tests.
+// Noop discards all metrics. Useful as a default and in tests; satisfies
+// Recorder with zero allocations and zero method-call overhead the compiler
+// can't inline away.
 type Noop struct{}
 
-func (Noop) RecordEvent(string)                          {}
-func (Noop) RecordError(string, error)                   {}
+// RecordEvent implements Recorder.RecordEvent.
+func (Noop) RecordEvent(string) {}
+
+// RecordError implements Recorder.RecordError.
+func (Noop) RecordError(string, error) {}
+
+// RecordLatency implements Recorder.RecordLatency.
 func (Noop) RecordLatency(string, string, time.Duration) {}
 
 // PipelineStats is an immutable snapshot of metrics for a single pipeline.

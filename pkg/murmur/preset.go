@@ -42,10 +42,38 @@ type CounterBuilder[T any] struct {
 	window *windowed.Config
 }
 
-func (b *CounterBuilder[T]) From(s source.Source[T]) *CounterBuilder[T]      { b.src = s; return b }
-func (b *CounterBuilder[T]) KeyBy(fn func(T) string) *CounterBuilder[T]      { b.keyFn = fn; return b }
-func (b *CounterBuilder[T]) StoreIn(s state.Store[int64]) *CounterBuilder[T] { b.store = s; return b }
-func (b *CounterBuilder[T]) Cache(c state.Cache[int64]) *CounterBuilder[T]   { b.cache = c; return b }
+// From sets the live event source. Required for streaming.Run; can be omitted
+// when the same builder is used to construct a pipeline that will only run in
+// bootstrap or replay mode.
+func (b *CounterBuilder[T]) From(s source.Source[T]) *CounterBuilder[T] {
+	b.src = s
+	return b
+}
+
+// KeyBy sets the function that derives the aggregation key from each event.
+// The returned string is the entity used in the state store and any queries.
+// Required.
+func (b *CounterBuilder[T]) KeyBy(fn func(T) string) *CounterBuilder[T] {
+	b.keyFn = fn
+	return b
+}
+
+// StoreIn sets the state store the pipeline writes through. Required.
+// Typically state.Store[int64] backed by [pkg/state/dynamodb.Int64SumStore]
+// for production, or a fakeStore for tests.
+func (b *CounterBuilder[T]) StoreIn(s state.Store[int64]) *CounterBuilder[T] {
+	b.store = s
+	return b
+}
+
+// Cache sets the optional read accelerator (typically a Valkey-backed cache).
+// Writes are mirrored to the cache after the primary store has accepted them;
+// reads can short-circuit through the cache. Cache loss never affects
+// correctness — see pkg/state/valkey.
+func (b *CounterBuilder[T]) Cache(c state.Cache[int64]) *CounterBuilder[T] {
+	b.cache = c
+	return b
+}
 
 // Daily configures daily tumbling buckets with the given retention.
 func (b *CounterBuilder[T]) Daily(retention time.Duration) *CounterBuilder[T] {
@@ -89,6 +117,8 @@ func UniqueCount[T any](name string, elementFn func(T) []byte) *UniqueCountBuild
 	return &UniqueCountBuilder[T]{name: name, elementFn: elementFn}
 }
 
+// UniqueCountBuilder builds a UniqueCount (HLL) pipeline. Required: KeyBy,
+// StoreIn. Optional: From, Daily/Hourly windowing.
 type UniqueCountBuilder[T any] struct {
 	name      string
 	keyFn     func(T) string
@@ -98,28 +128,43 @@ type UniqueCountBuilder[T any] struct {
 	window    *windowed.Config
 }
 
-func (b *UniqueCountBuilder[T]) From(s source.Source[T]) *UniqueCountBuilder[T] { b.src = s; return b }
+// From sets the live event source. Same semantics as CounterBuilder.From.
+func (b *UniqueCountBuilder[T]) From(s source.Source[T]) *UniqueCountBuilder[T] {
+	b.src = s
+	return b
+}
+
+// KeyBy sets the function that derives the aggregation key from each event.
 func (b *UniqueCountBuilder[T]) KeyBy(fn func(T) string) *UniqueCountBuilder[T] {
 	b.keyFn = fn
 	return b
 }
+
+// StoreIn sets the state store. HLL sketch state is stored as []byte; pair
+// with [pkg/state/dynamodb.BytesStore] for production or a synthetic store
+// for tests.
 func (b *UniqueCountBuilder[T]) StoreIn(s state.Store[[]byte]) *UniqueCountBuilder[T] {
 	b.store = s
 	return b
 }
 
+// Daily configures daily tumbling buckets with the given retention.
 func (b *UniqueCountBuilder[T]) Daily(retention time.Duration) *UniqueCountBuilder[T] {
 	w := windowed.Daily(retention)
 	b.window = &w
 	return b
 }
 
+// Hourly configures hourly tumbling buckets with the given retention.
 func (b *UniqueCountBuilder[T]) Hourly(retention time.Duration) *UniqueCountBuilder[T] {
 	w := windowed.Hourly(retention)
 	b.window = &w
 	return b
 }
 
+// Build assembles a *pipeline.Pipeline ready for streaming.Run / bootstrap.Run /
+// replay.Run. The HLL value extractor is wired automatically: each event's
+// elementFn output is lifted into a one-element sketch via hll.Single.
 func (b *UniqueCountBuilder[T]) Build() *pipeline.Pipeline[T, []byte] {
 	p := pipeline.NewPipeline[T, []byte](b.name).
 		Key(b.keyFn).
@@ -142,6 +187,8 @@ func TopN[T any](name string, k uint32, elementFn func(T) string) *TopNBuilder[T
 	return &TopNBuilder[T]{name: name, k: k, elementFn: elementFn}
 }
 
+// TopNBuilder builds a TopN (Misra-Gries) pipeline. Required: KeyBy, StoreIn.
+// Optional: From, Daily windowing.
 type TopNBuilder[T any] struct {
 	name      string
 	k         uint32
@@ -152,16 +199,32 @@ type TopNBuilder[T any] struct {
 	window    *windowed.Config
 }
 
-func (b *TopNBuilder[T]) From(s source.Source[T]) *TopNBuilder[T]       { b.src = s; return b }
-func (b *TopNBuilder[T]) KeyBy(fn func(T) string) *TopNBuilder[T]       { b.keyFn = fn; return b }
-func (b *TopNBuilder[T]) StoreIn(s state.Store[[]byte]) *TopNBuilder[T] { b.store = s; return b }
+// From sets the live event source.
+func (b *TopNBuilder[T]) From(s source.Source[T]) *TopNBuilder[T] { b.src = s; return b }
 
+// KeyBy sets the function that derives the aggregation key from each event
+// (e.g. "global" for a single Top-N over all events, or a per-tenant ID).
+func (b *TopNBuilder[T]) KeyBy(fn func(T) string) *TopNBuilder[T] { b.keyFn = fn; return b }
+
+// StoreIn sets the state store. TopK sketch state is stored as []byte; pair
+// with [pkg/state/dynamodb.BytesStore].
+func (b *TopNBuilder[T]) StoreIn(s state.Store[[]byte]) *TopNBuilder[T] {
+	b.store = s
+	return b
+}
+
+// Daily configures daily tumbling buckets with the given retention. Useful
+// for "today's top 10" / "last 7 days' top 10" — each bucket gets its own
+// Misra-Gries summary; the query layer merges N adjacent buckets.
 func (b *TopNBuilder[T]) Daily(retention time.Duration) *TopNBuilder[T] {
 	w := windowed.Daily(retention)
 	b.window = &w
 	return b
 }
 
+// Build assembles a *pipeline.Pipeline ready for streaming.Run / bootstrap.Run /
+// replay.Run. The value extractor lifts each event's elementFn output into a
+// one-element TopK sketch via topk.SingleN at the configured K.
 func (b *TopNBuilder[T]) Build() *pipeline.Pipeline[T, []byte] {
 	p := pipeline.NewPipeline[T, []byte](b.name).
 		Key(b.keyFn).

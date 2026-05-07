@@ -26,10 +26,15 @@ import (
 // the live source on transition.
 type HandoffToken []byte
 
-// SnapshotSource scans a datastore and emits records as synthetic events. Implementations
-// should support resumable, chunked progress so a long-running bootstrap can survive
-// worker restarts.
-type SnapshotSource[T any] interface {
+// Source scans a datastore and emits records as synthetic events.
+// Implementations should support resumable, chunked progress so a long-running
+// bootstrap can survive worker restarts.
+//
+// Distinct from pkg/source.Source (the live-streaming abstraction): a
+// snapshot.Source is one-shot and finite; a [pkg/source.Source] is open-ended
+// and streaming. Bootstrap mode uses snapshot.Source; live mode uses
+// [pkg/source.Source].
+type Source[T any] interface {
 	// CaptureHandoff captures the live-source resume position before scanning begins.
 	// Called once at bootstrap start.
 	CaptureHandoff(ctx context.Context) (HandoffToken, error)

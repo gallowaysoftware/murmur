@@ -75,16 +75,16 @@ type AdminServiceClient interface {
 	// GetPipelineMetrics returns the in-memory metrics snapshot for one
 	// pipeline. Suitable for ~2 s polling; for sub-second updates consider
 	// streaming (a planned addition).
-	GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.PipelineStats], error)
+	GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.GetPipelineMetricsResponse], error)
 	// GetState reads the all-time aggregation value for an entity (or one bucket
 	// of a windowed pipeline if `bucket` is set).
-	GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.StateValue], error)
+	GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.GetStateResponse], error)
 	// GetWindow returns the aggregation merged across the bucket range covering
 	// the most recent `duration_seconds`, ending at the server's "now".
-	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.StateValue], error)
+	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error)
 	// GetRange returns the aggregation merged across the bucket range covering
 	// [start_unix, end_unix].
-	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.StateValue], error)
+	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the murmur.admin.v1.AdminService service. By
@@ -110,25 +110,25 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("ListPipelines")),
 			connect.WithClientOptions(opts...),
 		),
-		getPipelineMetrics: connect.NewClient[v1.GetPipelineMetricsRequest, v1.PipelineStats](
+		getPipelineMetrics: connect.NewClient[v1.GetPipelineMetricsRequest, v1.GetPipelineMetricsResponse](
 			httpClient,
 			baseURL+AdminServiceGetPipelineMetricsProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("GetPipelineMetrics")),
 			connect.WithClientOptions(opts...),
 		),
-		getState: connect.NewClient[v1.GetStateRequest, v1.StateValue](
+		getState: connect.NewClient[v1.GetStateRequest, v1.GetStateResponse](
 			httpClient,
 			baseURL+AdminServiceGetStateProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("GetState")),
 			connect.WithClientOptions(opts...),
 		),
-		getWindow: connect.NewClient[v1.GetWindowRequest, v1.StateValue](
+		getWindow: connect.NewClient[v1.GetWindowRequest, v1.GetWindowResponse](
 			httpClient,
 			baseURL+AdminServiceGetWindowProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("GetWindow")),
 			connect.WithClientOptions(opts...),
 		),
-		getRange: connect.NewClient[v1.GetRangeRequest, v1.StateValue](
+		getRange: connect.NewClient[v1.GetRangeRequest, v1.GetRangeResponse](
 			httpClient,
 			baseURL+AdminServiceGetRangeProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("GetRange")),
@@ -141,10 +141,10 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 type adminServiceClient struct {
 	health             *connect.Client[v1.HealthRequest, v1.HealthResponse]
 	listPipelines      *connect.Client[v1.ListPipelinesRequest, v1.ListPipelinesResponse]
-	getPipelineMetrics *connect.Client[v1.GetPipelineMetricsRequest, v1.PipelineStats]
-	getState           *connect.Client[v1.GetStateRequest, v1.StateValue]
-	getWindow          *connect.Client[v1.GetWindowRequest, v1.StateValue]
-	getRange           *connect.Client[v1.GetRangeRequest, v1.StateValue]
+	getPipelineMetrics *connect.Client[v1.GetPipelineMetricsRequest, v1.GetPipelineMetricsResponse]
+	getState           *connect.Client[v1.GetStateRequest, v1.GetStateResponse]
+	getWindow          *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
+	getRange           *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
 }
 
 // Health calls murmur.admin.v1.AdminService.Health.
@@ -158,22 +158,22 @@ func (c *adminServiceClient) ListPipelines(ctx context.Context, req *connect.Req
 }
 
 // GetPipelineMetrics calls murmur.admin.v1.AdminService.GetPipelineMetrics.
-func (c *adminServiceClient) GetPipelineMetrics(ctx context.Context, req *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.PipelineStats], error) {
+func (c *adminServiceClient) GetPipelineMetrics(ctx context.Context, req *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.GetPipelineMetricsResponse], error) {
 	return c.getPipelineMetrics.CallUnary(ctx, req)
 }
 
 // GetState calls murmur.admin.v1.AdminService.GetState.
-func (c *adminServiceClient) GetState(ctx context.Context, req *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.StateValue], error) {
+func (c *adminServiceClient) GetState(ctx context.Context, req *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.GetStateResponse], error) {
 	return c.getState.CallUnary(ctx, req)
 }
 
 // GetWindow calls murmur.admin.v1.AdminService.GetWindow.
-func (c *adminServiceClient) GetWindow(ctx context.Context, req *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.StateValue], error) {
+func (c *adminServiceClient) GetWindow(ctx context.Context, req *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error) {
 	return c.getWindow.CallUnary(ctx, req)
 }
 
 // GetRange calls murmur.admin.v1.AdminService.GetRange.
-func (c *adminServiceClient) GetRange(ctx context.Context, req *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.StateValue], error) {
+func (c *adminServiceClient) GetRange(ctx context.Context, req *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error) {
 	return c.getRange.CallUnary(ctx, req)
 }
 
@@ -186,16 +186,16 @@ type AdminServiceHandler interface {
 	// GetPipelineMetrics returns the in-memory metrics snapshot for one
 	// pipeline. Suitable for ~2 s polling; for sub-second updates consider
 	// streaming (a planned addition).
-	GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.PipelineStats], error)
+	GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.GetPipelineMetricsResponse], error)
 	// GetState reads the all-time aggregation value for an entity (or one bucket
 	// of a windowed pipeline if `bucket` is set).
-	GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.StateValue], error)
+	GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.GetStateResponse], error)
 	// GetWindow returns the aggregation merged across the bucket range covering
 	// the most recent `duration_seconds`, ending at the server's "now".
-	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.StateValue], error)
+	GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error)
 	// GetRange returns the aggregation merged across the bucket range covering
 	// [start_unix, end_unix].
-	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.StateValue], error)
+	GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -272,18 +272,18 @@ func (UnimplementedAdminServiceHandler) ListPipelines(context.Context, *connect.
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.admin.v1.AdminService.ListPipelines is not implemented"))
 }
 
-func (UnimplementedAdminServiceHandler) GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.PipelineStats], error) {
+func (UnimplementedAdminServiceHandler) GetPipelineMetrics(context.Context, *connect.Request[v1.GetPipelineMetricsRequest]) (*connect.Response[v1.GetPipelineMetricsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.admin.v1.AdminService.GetPipelineMetrics is not implemented"))
 }
 
-func (UnimplementedAdminServiceHandler) GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.StateValue], error) {
+func (UnimplementedAdminServiceHandler) GetState(context.Context, *connect.Request[v1.GetStateRequest]) (*connect.Response[v1.GetStateResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.admin.v1.AdminService.GetState is not implemented"))
 }
 
-func (UnimplementedAdminServiceHandler) GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.StateValue], error) {
+func (UnimplementedAdminServiceHandler) GetWindow(context.Context, *connect.Request[v1.GetWindowRequest]) (*connect.Response[v1.GetWindowResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.admin.v1.AdminService.GetWindow is not implemented"))
 }
 
-func (UnimplementedAdminServiceHandler) GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.StateValue], error) {
+func (UnimplementedAdminServiceHandler) GetRange(context.Context, *connect.Request[v1.GetRangeRequest]) (*connect.Response[v1.GetRangeResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.admin.v1.AdminService.GetRange is not implemented"))
 }

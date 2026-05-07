@@ -13,20 +13,26 @@ package monoid
 // an opaque user-defined monoid that only the Go executors can run.
 type Kind string
 
+// Built-in Kind values. Backend executors switch on these to translate the
+// abstract monoid into a runtime-native operation; admin servers use them to
+// pick a typed decoder for the Query Console; users adding a new well-known
+// monoid should add a new Kind constant here so that switch-statements
+// elsewhere fail loudly during compile rather than silently fall through to
+// KindCustom.
 const (
-	KindSum    Kind = "sum"
-	KindCount  Kind = "count"
-	KindMin    Kind = "min"
-	KindMax    Kind = "max"
-	KindFirst  Kind = "first"
-	KindLast   Kind = "last"
-	KindSet    Kind = "set"
-	KindHLL    Kind = "hll"
-	KindTopK   Kind = "topk"
-	KindBloom  Kind = "bloom"
-	KindMap    Kind = "map"
-	KindTuple  Kind = "tuple"
-	KindCustom Kind = "custom"
+	KindSum    Kind = "sum"    // numeric addition; DDB ADD on int64 / float64
+	KindCount  Kind = "count"  // event-counting flavor of Sum (always +1)
+	KindMin    Kind = "min"    // running minimum; uses core.Bounded[V]
+	KindMax    Kind = "max"    // running maximum; uses core.Bounded[V]
+	KindFirst  Kind = "first"  // earliest-timestamp wins
+	KindLast   Kind = "last"   // latest-timestamp wins
+	KindSet    Kind = "set"    // map-set union
+	KindHLL    Kind = "hll"    // HyperLogLog cardinality sketch
+	KindTopK   Kind = "topk"   // Misra-Gries top-K heavy hitters
+	KindBloom  Kind = "bloom"  // Bloom filter set membership
+	KindMap    Kind = "map"    // per-key Combine via inner monoid
+	KindTuple  Kind = "tuple"  // componentwise Combine via inner monoids
+	KindCustom Kind = "custom" // user-defined opaque monoid; Go-only backends
 )
 
 // Monoid is an associative binary operation Combine over values of type V with an Identity

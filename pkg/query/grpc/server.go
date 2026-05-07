@@ -103,19 +103,31 @@ func (s *Server[V]) Handler() (string, http.Handler) {
 }
 
 // --- QueryServiceHandler implementation ---
+//
+// Each method below implements the matching RPC defined in
+// proto/murmur/v1/query.proto. The proto comments are the authoritative
+// contract; the Go-side comments cover Go-specific behavior.
 
-func (s *Server[V]) Get(ctx context.Context, req *connect.Request[pb.GetRequest]) (*connect.Response[pb.Value], error) {
+// Get implements murmur.v1.QueryService/Get. Returns the all-time aggregation
+// value for entity (non-windowed pipelines). On a missing key, returns
+// {present: false, data: nil}; clients should branch on `present` rather than
+// on len(data).
+func (s *Server[V]) Get(ctx context.Context, req *connect.Request[pb.GetRequest]) (*connect.Response[pb.GetResponse], error) {
 	v, ok, err := query.Get(ctx, s.store, req.Msg.GetEntity())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	if !ok {
-		return connect.NewResponse(&pb.Value{Present: false}), nil
+	val := &pb.Value{Present: false}
+	if ok {
+		val = &pb.Value{Present: true, Data: s.encode(v)}
 	}
-	return connect.NewResponse(&pb.Value{Present: true, Data: s.encode(v)}), nil
+	return connect.NewResponse(&pb.GetResponse{Value: val}), nil
 }
 
-func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetManyRequest]) (*connect.Response[pb.Values], error) {
+// GetMany implements murmur.v1.QueryService/GetMany. Same shape as Get but
+// for many entities in one round-trip; the response preserves request order
+// so clients can zip without an extra index map.
+func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetManyRequest]) (*connect.Response[pb.GetManyResponse], error) {
 	keys := make([]state.Key, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
 		keys[i] = state.Key{Entity: e}
@@ -124,7 +136,7 @@ func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetMany
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	out := &pb.Values{Values: make([]*pb.Value, len(req.Msg.GetEntities()))}
+	out := &pb.GetManyResponse{Values: make([]*pb.Value, len(req.Msg.GetEntities()))}
 	for i := range req.Msg.GetEntities() {
 		if !oks[i] {
 			out.Values[i] = &pb.Value{Present: false}
@@ -135,7 +147,11 @@ func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetMany
 	return connect.NewResponse(out), nil
 }
 
-func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWindowRequest]) (*connect.Response[pb.Value], error) {
+// GetWindow implements murmur.v1.QueryService/GetWindow. Merges the N
+// most-recent buckets covering `duration_seconds` ending at the server's now
+// via the configured monoid. Returns CodeFailedPrecondition for non-windowed
+// pipelines so clients can route to Get instead.
+func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWindowRequest]) (*connect.Response[pb.GetWindowResponse], error) {
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
@@ -144,10 +160,15 @@ func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWi
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.Value{Present: true, Data: s.encode(v)}), nil
+	return connect.NewResponse(&pb.GetWindowResponse{
+		Value: &pb.Value{Present: true, Data: s.encode(v)},
+	}), nil
 }
 
-func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRangeRequest]) (*connect.Response[pb.Value], error) {
+// GetRange implements murmur.v1.QueryService/GetRange. Merges every bucket
+// whose ID falls in [start_unix, end_unix] inclusive. Same not-windowed
+// failure mode as GetWindow.
+func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRangeRequest]) (*connect.Response[pb.GetRangeResponse], error) {
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
@@ -157,5 +178,7 @@ func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRan
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.Value{Present: true, Data: s.encode(v)}), nil
+	return connect.NewResponse(&pb.GetRangeResponse{
+		Value: &pb.Value{Present: true, Data: s.encode(v)},
+	}), nil
 }

@@ -29,20 +29,35 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// QueryService exposes Murmur's read-side merge for a single pipeline. Phase 1 ships a
-// generic Value (bytes) shape; Phase 2 will codegen pipeline-typed responses
-// (CounterResponse, HLLResponse, etc.) from the pipeline definition.
+// QueryService is Murmur's read-side data plane — applications hit it
+// directly to get the merged aggregation value for a key (or for a
+// window / range of keys). The same handler speaks gRPC, gRPC-Web, and
+// Connect (HTTP+JSON) on a single port via Connect-RPC, so callers can
+// pick whichever transport their client supports.
+//
+// Phase 1 ships a generic Value (bytes) shape so the service is monoid-
+// agnostic; clients decode the bytes per the pipeline's monoid kind
+// (int64-LE for Sum/Count/Min/Max, marshaled HLL/TopK/Bloom for sketches).
+// Phase 2 will codegen pipeline-typed responses (CounterResponse,
+// HLLResponse, etc.) so the wire format becomes self-describing.
+//
+// All RPCs follow the buf-STANDARD per-RPC response convention: each RPC
+// has its own response message wrapping the shared Value payload, so a
+// future field addition for one RPC doesn't force a schema change for the
+// others.
 type QueryServiceClient interface {
-	// Get returns the all-time aggregation value for entity (non-windowed pipelines).
-	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*Value, error)
-	// GetWindow returns the aggregation merged across the bucket range covering the most
-	// recent duration_seconds, ending at the server's "now".
-	GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*Value, error)
-	// GetRange returns the aggregation merged across the bucket range covering
-	// [start_unix, end_unix].
-	GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*Value, error)
-	// GetMany batches Get calls.
-	GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*Values, error)
+	// Get returns the all-time aggregation value for entity (non-windowed
+	// pipelines).
+	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
+	// GetWindow returns the aggregation merged across the bucket range
+	// covering the most recent `duration_seconds`, ending at the server's "now".
+	GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*GetWindowResponse, error)
+	// GetRange returns the aggregation merged across the bucket range
+	// covering [start_unix, end_unix].
+	GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*GetRangeResponse, error)
+	// GetMany batches Get calls. Response order matches request order so
+	// callers can zip without an index map.
+	GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*GetManyResponse, error)
 }
 
 type queryServiceClient struct {
@@ -53,9 +68,9 @@ func NewQueryServiceClient(cc grpc.ClientConnInterface) QueryServiceClient {
 	return &queryServiceClient{cc}
 }
 
-func (c *queryServiceClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*Value, error) {
+func (c *queryServiceClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Value)
+	out := new(GetResponse)
 	err := c.cc.Invoke(ctx, QueryService_Get_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -63,9 +78,9 @@ func (c *queryServiceClient) Get(ctx context.Context, in *GetRequest, opts ...gr
 	return out, nil
 }
 
-func (c *queryServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*Value, error) {
+func (c *queryServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*GetWindowResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Value)
+	out := new(GetWindowResponse)
 	err := c.cc.Invoke(ctx, QueryService_GetWindow_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -73,9 +88,9 @@ func (c *queryServiceClient) GetWindow(ctx context.Context, in *GetWindowRequest
 	return out, nil
 }
 
-func (c *queryServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*Value, error) {
+func (c *queryServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*GetRangeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Value)
+	out := new(GetRangeResponse)
 	err := c.cc.Invoke(ctx, QueryService_GetRange_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -83,9 +98,9 @@ func (c *queryServiceClient) GetRange(ctx context.Context, in *GetRangeRequest, 
 	return out, nil
 }
 
-func (c *queryServiceClient) GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*Values, error) {
+func (c *queryServiceClient) GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*GetManyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Values)
+	out := new(GetManyResponse)
 	err := c.cc.Invoke(ctx, QueryService_GetMany_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -97,20 +112,35 @@ func (c *queryServiceClient) GetMany(ctx context.Context, in *GetManyRequest, op
 // All implementations must embed UnimplementedQueryServiceServer
 // for forward compatibility.
 //
-// QueryService exposes Murmur's read-side merge for a single pipeline. Phase 1 ships a
-// generic Value (bytes) shape; Phase 2 will codegen pipeline-typed responses
-// (CounterResponse, HLLResponse, etc.) from the pipeline definition.
+// QueryService is Murmur's read-side data plane — applications hit it
+// directly to get the merged aggregation value for a key (or for a
+// window / range of keys). The same handler speaks gRPC, gRPC-Web, and
+// Connect (HTTP+JSON) on a single port via Connect-RPC, so callers can
+// pick whichever transport their client supports.
+//
+// Phase 1 ships a generic Value (bytes) shape so the service is monoid-
+// agnostic; clients decode the bytes per the pipeline's monoid kind
+// (int64-LE for Sum/Count/Min/Max, marshaled HLL/TopK/Bloom for sketches).
+// Phase 2 will codegen pipeline-typed responses (CounterResponse,
+// HLLResponse, etc.) so the wire format becomes self-describing.
+//
+// All RPCs follow the buf-STANDARD per-RPC response convention: each RPC
+// has its own response message wrapping the shared Value payload, so a
+// future field addition for one RPC doesn't force a schema change for the
+// others.
 type QueryServiceServer interface {
-	// Get returns the all-time aggregation value for entity (non-windowed pipelines).
-	Get(context.Context, *GetRequest) (*Value, error)
-	// GetWindow returns the aggregation merged across the bucket range covering the most
-	// recent duration_seconds, ending at the server's "now".
-	GetWindow(context.Context, *GetWindowRequest) (*Value, error)
-	// GetRange returns the aggregation merged across the bucket range covering
-	// [start_unix, end_unix].
-	GetRange(context.Context, *GetRangeRequest) (*Value, error)
-	// GetMany batches Get calls.
-	GetMany(context.Context, *GetManyRequest) (*Values, error)
+	// Get returns the all-time aggregation value for entity (non-windowed
+	// pipelines).
+	Get(context.Context, *GetRequest) (*GetResponse, error)
+	// GetWindow returns the aggregation merged across the bucket range
+	// covering the most recent `duration_seconds`, ending at the server's "now".
+	GetWindow(context.Context, *GetWindowRequest) (*GetWindowResponse, error)
+	// GetRange returns the aggregation merged across the bucket range
+	// covering [start_unix, end_unix].
+	GetRange(context.Context, *GetRangeRequest) (*GetRangeResponse, error)
+	// GetMany batches Get calls. Response order matches request order so
+	// callers can zip without an index map.
+	GetMany(context.Context, *GetManyRequest) (*GetManyResponse, error)
 	mustEmbedUnimplementedQueryServiceServer()
 }
 
@@ -121,16 +151,16 @@ type QueryServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedQueryServiceServer struct{}
 
-func (UnimplementedQueryServiceServer) Get(context.Context, *GetRequest) (*Value, error) {
+func (UnimplementedQueryServiceServer) Get(context.Context, *GetRequest) (*GetResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Get not implemented")
 }
-func (UnimplementedQueryServiceServer) GetWindow(context.Context, *GetWindowRequest) (*Value, error) {
+func (UnimplementedQueryServiceServer) GetWindow(context.Context, *GetWindowRequest) (*GetWindowResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetWindow not implemented")
 }
-func (UnimplementedQueryServiceServer) GetRange(context.Context, *GetRangeRequest) (*Value, error) {
+func (UnimplementedQueryServiceServer) GetRange(context.Context, *GetRangeRequest) (*GetRangeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRange not implemented")
 }
-func (UnimplementedQueryServiceServer) GetMany(context.Context, *GetManyRequest) (*Values, error) {
+func (UnimplementedQueryServiceServer) GetMany(context.Context, *GetManyRequest) (*GetManyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMany not implemented")
 }
 func (UnimplementedQueryServiceServer) mustEmbedUnimplementedQueryServiceServer() {}

@@ -1,4 +1,4 @@
-// Package mongo provides a Mongo-backed implementation of snapshot.SnapshotSource for
+// Package mongo provides a Mongo-backed implementation of snapshot.Source for
 // Murmur's Bootstrap execution mode.
 //
 // Pattern (Debezium-style):
@@ -61,7 +61,7 @@ func BSONDecoder[T any]() Decoder[T] {
 	}
 }
 
-// Source implements snapshot.SnapshotSource for a single Mongo collection.
+// Source implements snapshot.Source for a single Mongo collection.
 type Source[T any] struct {
 	client        *mongo.Client
 	database      string
@@ -223,4 +223,4 @@ func extractID(raw bson.Raw) (string, error) {
 }
 
 // Compile-time check.
-var _ snapshot.SnapshotSource[any] = (*Source[any])(nil)
+var _ snapshot.Source[any] = (*Source[any])(nil)

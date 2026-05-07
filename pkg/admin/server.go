@@ -114,11 +114,23 @@ func (s *Server) Handler() http.Handler {
 }
 
 // --- AdminServiceHandler implementation ---
+//
+// Each method below implements the matching RPC defined in
+// proto/murmur/admin/v1/admin.proto. The proto comments are the authoritative
+// contract; these Go-side comments cover Go-specific behavior (which Connect
+// error code is used for what failure mode, which fields are honored, etc.).
 
+// Health implements murmur.admin.v1.AdminService/Health. Always returns
+// {status: "ok"}; the response is generated synchronously without touching
+// pipeline state, so a slow store cannot make the health endpoint flap.
 func (s *Server) Health(_ context.Context, _ *connect.Request[adminv1.HealthRequest]) (*connect.Response[adminv1.HealthResponse], error) {
 	return connect.NewResponse(&adminv1.HealthResponse{Status: "ok"}), nil
 }
 
+// ListPipelines implements murmur.admin.v1.AdminService/ListPipelines. Returns
+// every registered pipeline's metadata, sorted by name for stable client-side
+// rendering. Cheap (RAM-only) so the dashboard polls it every few seconds
+// without coordination.
 func (s *Server) ListPipelines(_ context.Context, _ *connect.Request[adminv1.ListPipelinesRequest]) (*connect.Response[adminv1.ListPipelinesResponse], error) {
 	s.mu.RLock()
 	infos := make([]*adminv1.PipelineInfo, 0, len(s.pipelines))
@@ -130,30 +142,36 @@ func (s *Server) ListPipelines(_ context.Context, _ *connect.Request[adminv1.Lis
 	return connect.NewResponse(&adminv1.ListPipelinesResponse{Pipelines: infos}), nil
 }
 
-func (s *Server) GetPipelineMetrics(_ context.Context, req *connect.Request[adminv1.GetPipelineMetricsRequest]) (*connect.Response[adminv1.PipelineStats], error) {
+// GetPipelineMetrics implements murmur.admin.v1.AdminService/GetPipelineMetrics.
+// Returns the in-memory metrics snapshot for one pipeline (events / errors /
+// latency percentiles). Returns CodeNotFound for unknown pipeline names so
+// clients can distinguish "no metrics yet" from "wrong name."
+func (s *Server) GetPipelineMetrics(_ context.Context, req *connect.Request[adminv1.GetPipelineMetricsRequest]) (*connect.Response[adminv1.GetPipelineMetricsResponse], error) {
 	name := req.Msg.GetName()
 	if !s.exists(name) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
 	}
 	if s.recorder == nil {
-		return connect.NewResponse(&adminv1.PipelineStats{Pipeline: name, Latencies: map[string]*adminv1.LatencyStats{}}), nil
+		return connect.NewResponse(&adminv1.GetPipelineMetricsResponse{
+			Stats: &adminv1.PipelineStats{Pipeline: name, Latencies: map[string]*adminv1.LatencyStats{}},
+		}), nil
 	}
 	snap := s.recorder.SnapshotOne(name)
-	out := &adminv1.PipelineStats{
+	stats := &adminv1.PipelineStats{
 		Pipeline:        snap.Pipeline,
 		EventsProcessed: snap.EventsProcessed,
 		Errors:          snap.Errors,
 		Latencies:       map[string]*adminv1.LatencyStats{},
 	}
 	if !snap.LastEventAt.IsZero() {
-		out.LastEventAt = snap.LastEventAt.UTC().Format(time.RFC3339Nano)
+		stats.LastEventAt = snap.LastEventAt.UTC().Format(time.RFC3339Nano)
 	}
 	if !snap.LastErrorAt.IsZero() {
-		out.LastErrorAt = snap.LastErrorAt.UTC().Format(time.RFC3339Nano)
+		stats.LastErrorAt = snap.LastErrorAt.UTC().Format(time.RFC3339Nano)
 	}
-	out.LastError = snap.LastError
+	stats.LastError = snap.LastError
 	for op, lat := range snap.Latencies {
-		out.Latencies[op] = &adminv1.LatencyStats{
+		stats.Latencies[op] = &adminv1.LatencyStats{
 			N:     int64(lat.N),
 			P50Ms: lat.P50,
 			P95Ms: lat.P95,
@@ -161,10 +179,15 @@ func (s *Server) GetPipelineMetrics(_ context.Context, req *connect.Request[admi
 			MaxMs: lat.Max,
 		}
 	}
-	return connect.NewResponse(out), nil
+	return connect.NewResponse(&adminv1.GetPipelineMetricsResponse{Stats: stats}), nil
 }
 
-func (s *Server) GetState(_ context.Context, req *connect.Request[adminv1.GetStateRequest]) (*connect.Response[adminv1.StateValue], error) {
+// GetState implements murmur.admin.v1.AdminService/GetState. Reads one
+// (entity[, bucket]) tuple from the registered pipeline's store. Honors
+// `decode=true` to populate StateValue.decoded with a monoid-typed view (see
+// decodeForKind). Returns CodeInvalidArgument for missing entity, CodeNotFound
+// for unknown pipeline, CodeInternal for store-side failures.
+func (s *Server) GetState(_ context.Context, req *connect.Request[adminv1.GetStateRequest]) (*connect.Response[adminv1.GetStateResponse], error) {
 	reg, ok := s.lookup(req.Msg.GetName())
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
@@ -176,10 +199,18 @@ func (s *Server) GetState(_ context.Context, req *connect.Request[adminv1.GetSta
 	if req.Msg.GetBucket() != 0 {
 		params["bucket"] = formatInt(req.Msg.GetBucket())
 	}
-	return s.dispatch(reg, "get", params, req.Msg.GetDecode())
+	val, err := s.queryStateValue(reg, "get", params, req.Msg.GetDecode())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&adminv1.GetStateResponse{Value: val}), nil
 }
 
-func (s *Server) GetWindow(_ context.Context, req *connect.Request[adminv1.GetWindowRequest]) (*connect.Response[adminv1.StateValue], error) {
+// GetWindow implements murmur.admin.v1.AdminService/GetWindow. Merges the N
+// most-recent buckets covering `duration_seconds` ending at the server's now
+// via the pipeline's monoid. Same error-code conventions as GetState plus
+// CodeInvalidArgument for non-positive durations.
+func (s *Server) GetWindow(_ context.Context, req *connect.Request[adminv1.GetWindowRequest]) (*connect.Response[adminv1.GetWindowResponse], error) {
 	reg, ok := s.lookup(req.Msg.GetName())
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
@@ -194,10 +225,17 @@ func (s *Server) GetWindow(_ context.Context, req *connect.Request[adminv1.GetWi
 		"entity":     req.Msg.GetEntity(),
 		"duration_s": formatInt(req.Msg.GetDurationSeconds()),
 	}
-	return s.dispatch(reg, "window", params, req.Msg.GetDecode())
+	val, err := s.queryStateValue(reg, "window", params, req.Msg.GetDecode())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&adminv1.GetWindowResponse{Value: val}), nil
 }
 
-func (s *Server) GetRange(_ context.Context, req *connect.Request[adminv1.GetRangeRequest]) (*connect.Response[adminv1.StateValue], error) {
+// GetRange implements murmur.admin.v1.AdminService/GetRange. Merges every
+// bucket whose ID falls in [start_unix, end_unix] inclusive. Same error-code
+// conventions as GetState plus CodeInvalidArgument when end < start.
+func (s *Server) GetRange(_ context.Context, req *connect.Request[adminv1.GetRangeRequest]) (*connect.Response[adminv1.GetRangeResponse], error) {
 	reg, ok := s.lookup(req.Msg.GetName())
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("pipeline not registered"))
@@ -213,7 +251,11 @@ func (s *Server) GetRange(_ context.Context, req *connect.Request[adminv1.GetRan
 		"start":  formatInt(req.Msg.GetStartUnix()),
 		"end":    formatInt(req.Msg.GetEndUnix()),
 	}
-	return s.dispatch(reg, "range", params, req.Msg.GetDecode())
+	val, err := s.queryStateValue(reg, "range", params, req.Msg.GetDecode())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&adminv1.GetRangeResponse{Value: val}), nil
 }
 
 // --- helpers ---
@@ -230,7 +272,10 @@ func (s *Server) exists(name string) bool {
 	return ok
 }
 
-func (s *Server) dispatch(reg registered, op string, params map[string]string, decode bool) (*connect.Response[adminv1.StateValue], error) {
+// queryStateValue runs the registered pipeline's QueryFn and produces the
+// shared StateValue payload. Each AdminService method then wraps the value
+// in its own per-RPC response (GetStateResponse, GetWindowResponse, etc).
+func (s *Server) queryStateValue(reg registered, op string, params map[string]string, decode bool) (*adminv1.StateValue, error) {
 	data, present, err := reg.Query(op, params)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -239,7 +284,7 @@ func (s *Server) dispatch(reg registered, op string, params map[string]string, d
 	if present && decode {
 		out.Decoded = decodeForKind(reg.Info.MonoidKind, data)
 	}
-	return connect.NewResponse(out), nil
+	return out, nil
 }
 
 // decodeForKind renders stored bytes as a monoid-typed DecodedValue. Each

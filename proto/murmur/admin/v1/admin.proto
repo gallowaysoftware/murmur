@@ -21,6 +21,11 @@ package murmur.admin.v1;
 // AdminService is the control surface. Every endpoint is read-only today; any
 // future write endpoints (e.g. trigger replay, swap state-table version) will
 // be added as new RPCs rather than overloading existing ones.
+//
+// All RPCs follow the buf-STANDARD per-RPC request/response message
+// convention: each RPC's response is its own message type so the schema can
+// add fields independently per endpoint without forcing a coordinated
+// rollout.
 service AdminService {
   // Health is a simple liveness probe. Returns "ok" when the server is up.
   rpc Health(HealthRequest) returns (HealthResponse);
@@ -31,19 +36,19 @@ service AdminService {
   // GetPipelineMetrics returns the in-memory metrics snapshot for one
   // pipeline. Suitable for ~2 s polling; for sub-second updates consider
   // streaming (a planned addition).
-  rpc GetPipelineMetrics(GetPipelineMetricsRequest) returns (PipelineStats);
+  rpc GetPipelineMetrics(GetPipelineMetricsRequest) returns (GetPipelineMetricsResponse);
 
   // GetState reads the all-time aggregation value for an entity (or one bucket
   // of a windowed pipeline if `bucket` is set).
-  rpc GetState(GetStateRequest) returns (StateValue);
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
 
   // GetWindow returns the aggregation merged across the bucket range covering
   // the most recent `duration_seconds`, ending at the server's "now".
-  rpc GetWindow(GetWindowRequest) returns (StateValue);
+  rpc GetWindow(GetWindowRequest) returns (GetWindowResponse);
 
   // GetRange returns the aggregation merged across the bucket range covering
   // [start_unix, end_unix].
-  rpc GetRange(GetRangeRequest) returns (StateValue);
+  rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
 }
 
 // HealthRequest is intentionally empty.
@@ -99,6 +104,13 @@ message PipelineStats {
 
 message GetPipelineMetricsRequest {
   string name = 1;
+}
+
+// GetPipelineMetricsResponse wraps PipelineStats so the response can grow
+// (e.g. add a `lag_seconds`, `pending_dlq` field) without forcing the inner
+// PipelineStats schema to change in lockstep.
+message GetPipelineMetricsResponse {
+  PipelineStats stats = 1;
 }
 
 message GetStateRequest {
@@ -177,11 +189,31 @@ message BloomDecoded {
   uint64 approx_size = 3;
 }
 
-// StateValue is the result of a Get / GetWindow / GetRange. `present` is false
-// when the entity / bucket does not exist; `data` is always the raw stored
-// bytes; `decoded` is populated when the request set decode=true.
+// StateValue is the inner payload returned by Get / GetWindow / GetRange.
+// `present` is false when the entity / bucket does not exist; `data` is
+// always the raw stored bytes; `decoded` is populated when the request set
+// decode=true. StateValue is used as a field of GetStateResponse,
+// GetWindowResponse, and GetRangeResponse — sharing the inner shape is
+// intentional (the data is the same, only the lookup semantics differ).
 message StateValue {
   bool present = 1;
   bytes data = 2;
   DecodedValue decoded = 3;
+}
+
+// GetStateResponse / GetWindowResponse / GetRangeResponse are independent
+// per-RPC response wrappers. They currently carry only the StateValue, but
+// each can grow query-shape-specific fields (e.g. `bucket_count` for
+// GetWindow, `cache_hit` for GetState) without affecting the others.
+
+message GetStateResponse {
+  StateValue value = 1;
+}
+
+message GetWindowResponse {
+  StateValue value = 1;
+}
+
+message GetRangeResponse {
+  StateValue value = 1;
 }
