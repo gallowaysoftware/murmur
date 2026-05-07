@@ -1,25 +1,44 @@
 import { useEffect, useState } from 'react'
-import { api, decodeInt64LE, type PipelineInfo } from '../api'
+import { useSearchParams } from 'react-router-dom'
+import { api, formatError, type PipelineInfo, type StateValue } from '../api'
 
 type Mode = 'get' | 'window' | 'range'
 
 export function QueryConsole() {
+  useEffect(() => {
+    document.title = 'Murmur · Query console'
+  }, [])
+
   const [pipelines, setPipelines] = useState<PipelineInfo[]>([])
-  const [pipeline, setPipeline] = useState('')
-  const [mode, setMode] = useState<Mode>('get')
-  const [entity, setEntity] = useState('')
-  const [durationS, setDurationS] = useState(86400)
-  const [startUnix, setStartUnix] = useState(() => Math.floor(Date.now() / 1000) - 86400 * 7)
-  const [endUnix, setEndUnix] = useState(() => Math.floor(Date.now() / 1000))
-  const [resp, setResp] = useState<{ value: string; raw: string } | null>(null)
+  const [search, setSearch] = useSearchParams()
+
+  const pipeline = search.get('pipeline') ?? ''
+  const mode = (search.get('mode') as Mode) || 'get'
+  const entity = search.get('entity') ?? ''
+  const durationS = Number(search.get('duration_s') ?? 86400)
+  const startUnix = Number(search.get('start') ?? Math.floor(Date.now() / 1000) - 86400 * 7)
+  const endUnix = Number(search.get('end') ?? Math.floor(Date.now() / 1000))
+
+  const [resp, setResp] = useState<StateValue | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
+    let cancelled = false
     api.listPipelines().then((p) => {
+      if (cancelled) return
       setPipelines(p)
-      if (!pipeline && p.length > 0) setPipeline(p[0].name)
+      if (!pipeline && p.length > 0) {
+        const next = new URLSearchParams(search)
+        next.set('pipeline', p[0].name)
+        setSearch(next, { replace: true })
+      }
     })
+    return () => {
+      cancelled = true
+    }
+    // We deliberately depend on no values — this initialization runs once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const selected = pipelines.find((p) => p.name === pipeline)
@@ -29,28 +48,32 @@ export function QueryConsole() {
     setErr(null)
     setLoading(true)
     try {
-      let result
+      let result: StateValue
       if (mode === 'get') result = await api.getState(pipeline, entity)
       else if (mode === 'window') result = await api.getWindow(pipeline, entity, durationS)
       else result = await api.getRange(pipeline, entity, startUnix, endUnix)
-
-      const formatted = formatValue(result.data, selected?.monoid_kind)
-      setResp({ value: formatted, raw: result.data ?? '' })
+      setResp(result)
     } catch (e) {
-      setErr(String(e))
+      setErr(formatError(e))
       setResp(null)
     } finally {
       setLoading(false)
     }
   }
 
+  const setParam = (k: string, v: string | number) => {
+    const next = new URLSearchParams(search)
+    next.set(k, String(v))
+    setSearch(next, { replace: false })
+  }
+
   return (
-    <div className="px-10 py-8 max-w-4xl">
+    <div className="px-6 sm:px-10 py-8 max-w-4xl">
       <header className="mb-6">
         <h1 className="text-2xl font-semibold text-fg-strong tracking-tight">Query console</h1>
         <p className="text-fg-muted text-sm mt-1">
           Issue ad-hoc reads against a pipeline's state. Same merge logic the gRPC service
-          uses, served via the admin REST API.
+          uses, served via the admin REST API. URL state is shareable.
         </p>
       </header>
 
@@ -59,7 +82,7 @@ export function QueryConsole() {
           <select
             className="ctl"
             value={pipeline}
-            onChange={(e) => setPipeline(e.target.value)}
+            onChange={(e) => setParam('pipeline', e.target.value)}
           >
             {pipelines.length === 0 && <option value="">(no pipelines registered)</option>}
             {pipelines.map((p) => (
@@ -76,7 +99,7 @@ export function QueryConsole() {
               <button
                 key={m}
                 type="button"
-                onClick={() => setMode(m)}
+                onClick={() => setParam('mode', m)}
                 className={
                   'px-3 py-1.5 rounded-md text-sm border transition-colors ' +
                   (mode === m
@@ -94,7 +117,7 @@ export function QueryConsole() {
           <input
             className="ctl"
             value={entity}
-            onChange={(e) => setEntity(e.target.value)}
+            onChange={(e) => setParam('entity', e.target.value)}
             placeholder="e.g. page-A"
           />
         </Field>
@@ -105,7 +128,7 @@ export function QueryConsole() {
               className="ctl"
               type="number"
               value={durationS}
-              onChange={(e) => setDurationS(Number(e.target.value))}
+              onChange={(e) => setParam('duration_s', e.target.value)}
             />
           </Field>
         )}
@@ -117,7 +140,7 @@ export function QueryConsole() {
                 className="ctl"
                 type="number"
                 value={startUnix}
-                onChange={(e) => setStartUnix(Number(e.target.value))}
+                onChange={(e) => setParam('start', e.target.value)}
               />
             </Field>
             <Field label="End (unix seconds)">
@@ -125,7 +148,7 @@ export function QueryConsole() {
                 className="ctl"
                 type="number"
                 value={endUnix}
-                onChange={(e) => setEndUnix(Number(e.target.value))}
+                onChange={(e) => setParam('end', e.target.value)}
               />
             </Field>
           </>
@@ -136,7 +159,7 @@ export function QueryConsole() {
             type="button"
             onClick={run}
             disabled={loading || !pipeline || !entity}
-            className="px-4 py-2 rounded-md bg-accent text-white font-medium hover:bg-accent-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 rounded-md bg-accent text-white font-medium hover:bg-accent-strong transition-colors disabled:bg-surface-3 disabled:text-fg-muted disabled:cursor-not-allowed"
           >
             {loading ? 'querying…' : 'Query'}
           </button>
@@ -144,20 +167,12 @@ export function QueryConsole() {
       </div>
 
       {err && (
-        <div className="mt-4 rounded-lg border border-bad bg-bad-bg p-4 text-sm">{err}</div>
-      )}
-
-      {resp && (
-        <div className="mt-4 rounded-lg border border-border bg-surface p-6">
-          <div className="text-[11px] uppercase tracking-wider text-fg-faint">Result</div>
-          <div className="mt-2 text-3xl font-mono text-fg-strong">{resp.value}</div>
-          {resp.raw && (
-            <div className="mt-3 text-xs text-fg-muted font-mono break-all">
-              raw: {resp.raw}
-            </div>
-          )}
+        <div role="alert" className="mt-4 rounded-lg border border-bad bg-bad-bg p-4 text-sm">
+          {err}
         </div>
       )}
+
+      {resp && <ResultPanel resp={resp} kind={selected?.monoid_kind} />}
 
       <style>{`
         .ctl {
@@ -169,7 +184,7 @@ export function QueryConsole() {
           width: 100%;
           font: inherit;
         }
-        .ctl:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+        .ctl:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
       `}</style>
     </div>
   )
@@ -184,23 +199,82 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function formatValue(b64: string | undefined, kind: string | undefined): string {
-  if (!b64) return '(absent)'
+function ResultPanel({ resp, kind }: { resp: StateValue; kind: string | undefined }) {
+  if (!resp.present) {
+    return (
+      <div className="mt-4 rounded-lg border border-border bg-surface p-6">
+        <div className="text-[11px] uppercase tracking-wider text-fg-faint">Result</div>
+        <div className="mt-2 text-fg-muted">absent — no value at that key</div>
+      </div>
+    )
+  }
+
+  let primary: React.ReactNode
+  let aux: React.ReactNode = null
+
   switch (kind) {
     case 'sum':
     case 'count':
     case 'min':
     case 'max': {
-      const n = decodeInt64LE(b64)
-      return n === null ? '(absent)' : n.toLocaleString()
+      const v = resp.decoded?.int64
+      primary =
+        v === undefined ? (
+          <span className="text-fg-muted">decoded value missing</span>
+        ) : (
+          v.toLocaleString()
+        )
+      aux = <KindBadge kind={kind} encoding="int64 little-endian" />
+      break
     }
     case 'hll':
-      return `HLL sketch (${atob(b64).length} bytes)`
     case 'topk':
-      return `TopK sketch (${atob(b64).length} bytes)`
-    case 'bloom':
-      return `Bloom filter (${atob(b64).length} bytes)`
+    case 'bloom': {
+      const bytes = resp.decoded?.byte_len ?? approxBase64Bytes(resp.data)
+      primary = (
+        <div>
+          <div className="text-fg-muted text-base">opaque {kind} sketch</div>
+          <div className="text-fg-faint text-sm mt-1 tabular-nums">
+            {bytes} bytes — server-side decode lands in the next release
+          </div>
+        </div>
+      )
+      aux = <KindBadge kind={kind} encoding="binary" />
+      break
+    }
     default:
-      return `${atob(b64).length} bytes`
+      primary = <span className="font-mono">{resp.data ?? '(absent)'}</span>
   }
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-surface p-6">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-fg-faint">Result</div>
+        {aux}
+      </div>
+      <div className="mt-2 text-3xl font-mono text-fg-strong tabular-nums">{primary}</div>
+      {resp.data && (
+        <details className="mt-3">
+          <summary className="text-xs text-fg-muted cursor-pointer hover:text-fg-strong">
+            raw bytes
+          </summary>
+          <div className="mt-2 text-xs text-fg-muted font-mono break-all">{resp.data}</div>
+        </details>
+      )}
+    </div>
+  )
+}
+
+function KindBadge({ kind, encoding }: { kind: string; encoding: string }) {
+  return (
+    <span className="text-xs text-fg-muted font-mono">
+      {kind} · {encoding}
+    </span>
+  )
+}
+
+function approxBase64Bytes(b64: string | undefined): number {
+  if (!b64) return 0
+  // base64 expands by 4/3; this is an approximation suitable for display.
+  return Math.floor((b64.length * 3) / 4)
 }

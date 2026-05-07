@@ -17,8 +17,8 @@
   /* Foreground */
   --fg: #d6d8df;
   --fg-strong: #f1f2f5;
-  --fg-muted: #7d8290;
-  --fg-faint: #555a68;
+  --fg-muted: #8b91a0;   /* AA contrast on --bg; previously 7d8290 */
+  --fg-faint: #7a8094;   /* AA contrast on --bg; previously 555a68 (3.2:1, failed) */
 
   /* Accent — purple, evokes "murmur" / starling murmuration */
   --accent: #a78bfa;
@@ -99,7 +99,19 @@ body {
   min-height: 100svh;
 }
 
-/* Pleasant scrollbars in dark mode */
+/* Global focus-visible: an accent ring that matches the dark theme; respected
+   by all interactive elements unless explicitly overridden. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Pleasant scrollbars in both Chromium and Firefox. */
+:root {
+  scrollbar-color: var(--surface-3) transparent;
+  scrollbar-width: thin;
+}
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

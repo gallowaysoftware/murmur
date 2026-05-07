@@ -27,3 +27,8 @@ go.work.sum
 .envrc
 *.local.yml
 *.local.yaml
+
+# Built UI artifacts — produced by `make web-build` (or `npm run build` in web/),
+# then copied into pkg/admin/dist for embed.FS. Don't track them.
+/web/dist/
+/pkg/admin/dist/

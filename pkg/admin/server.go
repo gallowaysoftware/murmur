@@ -130,9 +130,14 @@ type LatencyJSON struct {
 
 // StateValueJSON is the wire shape of a state read.
 type StateValueJSON struct {
-	Present bool   `json:"present"`
+	Present bool `json:"present"`
 	// DataB64 is the value bytes encoded as base64 (Go's encoding/json does this for []byte).
 	DataB64 []byte `json:"data,omitempty"`
+	// Decoded is a monoid-aware rendering of the bytes for UI consumption: int64 for
+	// Sum/Count/Min/Max, an opaque "byteLen" object for sketches today (HLL/TopK/
+	// Bloom decode to cardinality/items/size — wire-up planned in a follow-up).
+	// nil unless the request includes ?decode=true.
+	Decoded any `json:"decoded,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -229,7 +234,30 @@ func (s *Server) handleQuery(op string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, StateValueJSON{Present: present, DataB64: data})
+		out := StateValueJSON{Present: present, DataB64: data}
+		if present && r.URL.Query().Get("decode") == "true" {
+			out.Decoded = decodeForKind(reg.Info.MonoidKind, data)
+		}
+		writeJSON(w, out)
+	}
+}
+
+// decodeForKind returns a JSON-friendly rendering of a stored value based on the
+// pipeline's monoid Kind. Unknown / sketch kinds return an opaque {byte_len: N}
+// object today; native Spark / Valkey-backed sketch decoding is roadmap.
+func decodeForKind(kind string, data []byte) any {
+	switch kind {
+	case "sum", "count", "min", "max":
+		if len(data) < 8 {
+			return map[string]any{"int64": 0}
+		}
+		var v int64
+		for i := 0; i < 8; i++ {
+			v |= int64(data[i]) << (i * 8)
+		}
+		return map[string]any{"int64": v}
+	default:
+		return map[string]any{"byte_len": len(data), "kind": kind}
 	}
 }
 

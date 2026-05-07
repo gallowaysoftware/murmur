@@ -1,6 +1,11 @@
+import { useEffect } from 'react'
+
 export function About() {
+  useEffect(() => {
+    document.title = 'Murmur · About'
+  }, [])
   return (
-    <div className="px-10 py-8 max-w-3xl">
+    <div className="px-6 sm:px-10 py-8 max-w-3xl">
       <h1 className="text-2xl font-semibold text-fg-strong tracking-tight">About Murmur</h1>
       <p className="text-fg-muted mt-3">
         Lambda-architecture-aware streaming aggregation framework for Go. One pipeline DSL,

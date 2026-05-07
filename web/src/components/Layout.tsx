@@ -1,31 +1,26 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { clsx } from 'clsx'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api } from '../api'
+import { useLivePolling } from '../hooks/useLivePolling'
+import { ErrorBoundary } from './ErrorBoundary'
 
 export function Layout() {
-  const [healthy, setHealthy] = useState<boolean | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const ok = await api.health()
-        if (!cancelled) setHealthy(ok)
-      } catch {
-        if (!cancelled) setHealthy(false)
-      }
-    }
-    tick()
-    const id = setInterval(tick, 5000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
+  const { data: healthy } = useLivePolling<boolean>(
+    (signal) => api.health(signal),
+    5000,
+  )
+  const [navOpen, setNavOpen] = useState(false)
 
   return (
     <div className="flex min-h-svh">
-      <aside className="w-60 shrink-0 border-r border-border bg-surface flex flex-col">
+      {/* Sidebar — overlay drawer at narrow widths, fixed at md+. */}
+      <aside
+        className={clsx(
+          'fixed md:static z-30 inset-y-0 left-0 w-60 shrink-0 border-r border-border bg-surface flex flex-col transition-transform',
+          navOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+        )}
+      >
         <div className="px-5 py-5 flex items-center gap-3 border-b border-border">
           <Logo />
           <div>
@@ -34,9 +29,15 @@ export function Layout() {
           </div>
         </div>
         <nav className="flex flex-col px-3 py-4 gap-1 text-sm">
-          <NavItem to="/">Pipelines</NavItem>
-          <NavItem to="/query">Query console</NavItem>
-          <NavItem to="/about">About</NavItem>
+          <NavItem to="/" onClick={() => setNavOpen(false)}>
+            Pipelines
+          </NavItem>
+          <NavItem to="/query" onClick={() => setNavOpen(false)}>
+            Query console
+          </NavItem>
+          <NavItem to="/about" onClick={() => setNavOpen(false)}>
+            About
+          </NavItem>
         </nav>
         <div className="mt-auto px-5 py-4 text-xs text-fg-muted border-t border-border">
           <div className="flex items-center gap-2">
@@ -49,7 +50,7 @@ export function Layout() {
               )}
               aria-hidden
             />
-            <span>
+            <span aria-live="polite">
               {healthy === null
                 ? 'connecting…'
                 : healthy
@@ -60,18 +61,63 @@ export function Layout() {
           <div className="mt-2 text-fg-faint">v0.1 · phase 2</div>
         </div>
       </aside>
+
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          className="fixed inset-0 bg-black/50 z-20 md:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+
       <main className="flex-1 overflow-auto">
-        <Outlet />
+        {/* Mobile top bar with hamburger. */}
+        <div className="md:hidden border-b border-border bg-surface px-4 py-3 flex items-center gap-3">
+          <button
+            type="button"
+            aria-label="Open navigation"
+            onClick={() => setNavOpen(true)}
+            className="p-2 -ml-2 text-fg hover:text-fg-strong"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 20 20"
+              aria-hidden
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <path d="M3 6h14M3 10h14M3 14h14" />
+            </svg>
+          </button>
+          <span className="font-semibold text-fg-strong">Murmur</span>
+        </div>
+
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )
 }
 
-function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
+function NavItem({
+  to,
+  children,
+  onClick,
+}: {
+  to: string
+  children: React.ReactNode
+  onClick?: () => void
+}) {
   return (
     <NavLink
       to={to}
       end={to === '/'}
+      onClick={onClick}
       className={({ isActive }) =>
         clsx(
           'px-3 py-2 rounded-md transition-colors',
@@ -87,7 +133,6 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 }
 
 function Logo() {
-  // Stylized "M" — a tiny abstract murmuration.
   return (
     <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden>
       <defs>

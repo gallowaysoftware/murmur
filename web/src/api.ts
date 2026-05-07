@@ -36,12 +36,14 @@ export type StateValue = {
   present: boolean
   /** Base64-encoded bytes; decoders are monoid-specific. */
   data?: string
+  /** Server-decoded rendering keyed by monoid kind. Present when the request set decode=true. */
+  decoded?: { int64?: number; byte_len?: number; kind?: string }
 }
 
 const base = '/api'
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${base}${path}`)
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(`${base}${path}`, { signal })
   if (!r.ok) {
     throw new Error(`${r.status} ${r.statusText}: ${await r.text().catch(() => '')}`)
   }
@@ -49,35 +51,61 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export const api = {
-  health: () => fetch(`${base}/health`).then((r) => r.ok),
+  health: (signal?: AbortSignal) =>
+    fetch(`${base}/health`, { signal }).then((r) => r.ok),
 
-  listPipelines: () => get<PipelineInfo[]>('/pipelines'),
+  listPipelines: (signal?: AbortSignal) =>
+    get<PipelineInfo[]>('/pipelines', signal),
 
-  pipelineMetrics: (name: string) =>
-    get<PipelineStats>(`/pipelines/${encodeURIComponent(name)}/metrics`),
+  pipelineMetrics: (name: string, signal?: AbortSignal) =>
+    get<PipelineStats>(`/pipelines/${encodeURIComponent(name)}/metrics`, signal),
 
-  getState: (name: string, entity: string, bucket?: number) => {
+  getState: (name: string, entity: string, bucket?: number, decode = true) => {
     const q = new URLSearchParams({ entity })
     if (bucket !== undefined) q.set('bucket', String(bucket))
+    if (decode) q.set('decode', 'true')
     return get<StateValue>(`/pipelines/${encodeURIComponent(name)}/state?${q}`)
   },
 
-  getWindow: (name: string, entity: string, durationSeconds: number) => {
+  getWindow: (name: string, entity: string, durationSeconds: number, decode = true) => {
     const q = new URLSearchParams({ entity, duration_s: String(durationSeconds) })
+    if (decode) q.set('decode', 'true')
     return get<StateValue>(`/pipelines/${encodeURIComponent(name)}/window?${q}`)
   },
 
-  getRange: (name: string, entity: string, startUnix: number, endUnix: number) => {
+  getRange: (name: string, entity: string, startUnix: number, endUnix: number, decode = true) => {
     const q = new URLSearchParams({
       entity,
       start: String(startUnix),
       end: String(endUnix),
     })
+    if (decode) q.set('decode', 'true')
     return get<StateValue>(`/pipelines/${encodeURIComponent(name)}/range?${q}`)
   },
 }
 
-/** Decode an int64-little-endian-encoded base64 value (Sum / Count / Min / Max monoids). */
+/**
+ * Render a thrown error or rejected response as a single human-readable string.
+ * Distinguishes network failures (TypeError: Failed to fetch) from HTTP errors,
+ * and falls back to JSON-stringified objects for everything else.
+ */
+export function formatError(err: unknown): string {
+  if (err instanceof TypeError && err.message.includes('fetch')) {
+    return 'Network error: could not reach the admin server. Is murmur-ui running?'
+  }
+  if (err instanceof Error) return err.message
+  if (typeof err === 'string') return err
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
+}
+
+/** Decode an int64-little-endian-encoded base64 value (Sum / Count / Min / Max monoids).
+ *  Returns null on missing input. Uses BigInt.asIntN to sign-extend correctly across
+ *  the full int64 range, including INT64_MIN.
+ */
 export function decodeInt64LE(data: string | undefined): bigint | null {
   if (!data) return null
   const bin = atob(data)
@@ -86,10 +114,7 @@ export function decodeInt64LE(data: string | undefined): bigint | null {
   for (let i = 0; i < 8; i++) {
     v |= BigInt(bin.charCodeAt(i)) << (BigInt(i) * 8n)
   }
-  // Sign-extend.
-  const sign = 1n << 63n
-  if (v & sign) v = v - (1n << 64n)
-  return v
+  return BigInt.asIntN(64, v)
 }
 
 /** Format a number with comma separators. Works on number | bigint | null. */
