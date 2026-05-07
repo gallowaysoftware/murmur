@@ -23,6 +23,7 @@ edges callers should plan around.
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
 | `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window |
 | `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |
+| `pkg/projection` | experimental | bucket functions (Log/Linear/Manual) and hysteresis-band transition detection for projector-style change-data-capture into search indices. The pkg-level building block for doc/search-integration.md Pattern B |
 | `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
 | `pkg/exec/replay` | experimental | metrics integration not yet wired |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
