@@ -404,6 +404,106 @@ Use Pattern C only when you've measured that the bucket-stale value (Pattern B) 
 
 In a real product, you'll probably end up with **A as the foundation, B layered for filter-heavy queries, C reserved for one or two critical surfaces**. Don't pick one and force everything through it.
 
+## Pagination
+
+Pagination is the place Pattern A first hits a real wall, and any honest document has to address it.
+
+### Why it's hard
+
+When sort is determined inside the search engine — counters indexed alongside text — pagination is straightforward. OpenSearch knows the global order; `from + size` works, and `search_after` cursors continue stably from the last sort value of the previous page.
+
+When sort is determined **outside** the search engine — the rescore happens in your service against a candidate set OpenSearch returned — this property breaks. Page 1 is "recall N candidates → rescore N → return top size." For page 2, the obvious question doesn't have an obvious answer: which candidates does OpenSearch return, and how do you guarantee that the rescored items 21–40 are actually globally rank 21–40?
+
+Two failure modes if you do nothing:
+
+1. **Skipped or duplicated items.** If page 2 recalls a different chunk of OpenSearch results (using `from = 200`), the rescore order may have an item from chunk 2 that should have ranked above some item in chunk 1's rescored top 20. The user sees an item on page 2 that "should have been on page 1," or doesn't see it at all.
+2. **Drift across pages.** Counter values change between page-1 and page-2 requests. Even with identical recall sets, the rescored order shifts. The user pages through a feed where items reorder beneath them.
+
+These failure modes are well-understood. What's less well-known is that **all production search systems with external rescore have made a choice from a small set of established workarounds**, and the right choice depends on the page-depth distribution of your traffic.
+
+### Approach 1: deep recall, stateless
+
+Recall N where N is much larger than `page_size × max_supported_page`. Rescore all N. Slice the rescored list to the requested page.
+
+```go
+// Page p of size 20 with depth limit 10:
+// Recall 2000 candidates, rescore all 2000, return rescored[20*p : 20*(p+1)].
+```
+
+**Cost:** linear in `N × cost_per_rescore`. For N=2000 and counter-rescore-from-Murmur (cheap, ~10ms for 2000 items via several batched `GetMany` calls) this is fine. For N=2000 and a 100ms-per-doc transformer rerank, this is fatal.
+
+**Coherence:** within a single request, perfect. Across requests, none — every page request re-runs the rescore so counter changes between pages do shift order.
+
+**Best for:** shallow pagination (page 1–10), simple rescore (counter join), e-commerce-style search where most users don't go past page 3.
+
+### Approach 2: search-session cache
+
+First page request: recall N=large, rescore all N, **cache the rescored list** keyed by query under a session ID. Return page 1 plus the session ID.
+
+Subsequent page requests: look up the session, slice the cached list, return the requested page.
+
+```go
+// Page 1: recall + rescore + cache + return rescored[0:20], session_id=X
+// Page 2: lookup session X, return cached_rescored[20:40]
+// Page N: lookup session X, return cached_rescored[20*(N-1) : 20*N]
+// Cache eviction: TTL (5–15 min typical) or LRU
+```
+
+**Cost:** O(N × rescore) on first page, O(1) per subsequent page. Memory cost = `concurrent_sessions × N × per-doc-state`.
+
+**Coherence:** stable within the session window; counter changes during the session don't reorder pages. The user sees a consistent view, which is usually what they want.
+
+**Tradeoffs:** session storage (Redis/Valkey is the right shape — small payloads, TTL native), session affinity (any node can serve any session if cache is shared), session expiration UX (page request after TTL elapsed must recompute, possibly returning slightly different results — usually acceptable).
+
+This is the workhorse pattern for product search and social feeds. Twitter, Reddit, Bing all do variants of this. It's the right default when rescore cost is non-trivial.
+
+### Approach 3: search_after with a hybrid sort key (Pattern A + Pattern B)
+
+When you've already deployed Pattern B (bucketed indexing), you can paginate cursor-style on the indexed bucket and rescore only within each page.
+
+The OpenSearch sort key is composite: `(popularity_bucket DESC, _score DESC, doc_id ASC)`. OpenSearch knows the global order under that key. `search_after` cursors are stable across requests. The rescore happens *per page* on a small candidate set (the page itself, not the corpus).
+
+```text
+Page 1: search_after(null), sort=(bucket, _score, id)
+        → 20 candidates, all in bucket 6 + top BM25
+        → rescore those 20 with live counter, return.
+Page 2: search_after(last item's sort tuple from page 1)
+        → next 20 in bucket+BM25 order
+        → rescore + return.
+```
+
+**Cost:** per-page rescore over `page_size` items only. O(20) per page, regardless of page depth.
+
+**Coherence:** within-bucket ordering is BM25 (stable across requests). Cross-bucket ordering is the indexed bucket (stable until the projector updates the bucket field). The live-counter rescore happens *only within the page* — so the relative ranking of the 20 items on a given page reflects current counter values, but the cross-page boundary is stable.
+
+This is the answer for **infinite-feed UIs** where the user scrolls indefinitely and you want low constant per-page cost. Most modern social feeds use this shape.
+
+The tradeoff: items in different buckets are sorted by bucket first, BM25 second, regardless of how the live-counter rescore would have ordered them. If your rescore is supposed to pull a 90-likes-but-perfect-match item up past a 1k-likes-mediocre-match item, this approach won't do it. The two items are in different buckets and bucket order wins. Bucket granularity is a tunable — finer buckets (e.g., quartile within a log decade) make this less of a problem at the cost of more reindex transitions.
+
+### Approach 4: re-rescore each page
+
+The naive page 2 — recall the next chunk and rescore. **Don't do this.** You will see items shift between pages, items appear twice or not at all, and users will report the bug. Every search system that started here moved off it.
+
+### Decision matrix
+
+| Approach | First page | Page N (N=10) | Memory | Cross-page coherence | Right when |
+|---|---|---|---|---|---|
+| Deep recall, stateless | 1× | 1× | none | Within-request only | Shallow pages, cheap rescore |
+| Search-session cache | 1× | ~constant | session × N × payload | Strong, within TTL | Product search, social feed, ML rerank |
+| `search_after` + hybrid bucket | 1× | 1× (page-size only) | none | Strong, indexed | Infinite feeds, low-cost requirement |
+| Re-rescore each page | 1× | 1× | none | None — bug | Never |
+
+In practice, a real product picks one default and keeps an escape hatch. A search backend that supports both "session cache for page 1–20" and "deep recall stateless for page > 20" gives you the right cost profile across the depth distribution.
+
+### What Murmur provides
+
+The pagination problem isn't solved by Murmur — it's a search-service architecture concern. But Murmur's APIs make each approach cheap to implement:
+
+- Deep recall: `GetMany` batches up to 100 per `BatchGetItem` call; N=2000 is 20 round trips, ~20ms p99 with the singleflight coalescing layer absorbing concurrent identical queries.
+- Session cache: cache the rescored list, not the Murmur values themselves. The values are already cached server-side via `BytesCache` / `Int64Cache`; the session cache stores the *rescored, sorted candidate list*.
+- Hybrid bucket: requires Pattern B's projector. The bucket field is OpenSearch's; Murmur owns the source counter only.
+- The `fresh_read` flag is rarely useful for pagination — page consistency is achieved by caching, not by per-call freshness. Reserve `fresh_read` for the read-your-writes flow.
+
 ## Composing patterns: hierarchical rollups + bucketing
 
 `pipeline.KeyByMany` (see `pkg/pipeline/pipeline.go`) lets one event contribute to multiple aggregation keys. Combined with bucketed indexing, this gives clean per-cohort filters in OpenSearch:
@@ -433,6 +533,159 @@ The DDB Streams projector receives a stream record for each emitted key. Map eac
 | `global` | (single doc, separate index) | platform-wide trending |
 
 The projector decodes each stream record's `pk` to discover which rollup level this delta belongs to, applies the bucket function, and routes to the right index/field. This is plain dispatch — straightforward to write but needs to be designed alongside the query patterns.
+
+## Two-pass ML ranking: where Murmur fits in the modern stack
+
+The question this section answers: is the "OpenSearch for candidate generation, ML model for ranking" pattern outdated in a transformer / embedding world?
+
+**No — the two-pass shape is more relevant than ever.** What's changed is the cost profile of each pass and the role of vector retrieval. Pattern A from this document is the simplest possible instance of two-pass ranking; everything else this section covers is the same shape with a more expensive second pass and a richer first pass.
+
+### The pattern, restated
+
+```mermaid
+flowchart LR
+    Q["Query"] --> R1["Pass 1: candidate generation<br/><i>cheap, broad, returns thousands</i>"]
+    R1 -->|"top N (100s–1000s)"| R2["Pass 2: rerank<br/><i>expensive, narrow, returns dozens</i>"]
+    R2 -->|"top K (10s)"| Out["Result"]
+    R1 -.- R1note["Lexical (BM25) +<br/>vector (embedding kNN) +<br/>filters"]
+    R2 -.- R2note["Cross-encoder transformer,<br/>GBDT with hand features,<br/>or LLM"]
+    R2 -->|"reads features per candidate"| FS[("Feature lookup<br/>– counters: Murmur<br/>– user features: feature store<br/>– content features: in-doc")]
+```
+
+| Era | Pass 1 | Pass 2 | What changed |
+|---|---|---|---|
+| Pre-2015 | BM25 | Hand-tuned linear / boosted trees | — |
+| 2015–2020 | BM25 + filters | LambdaMART / XGBoost on pointwise features | Better feature engineering |
+| 2020–2024 | BM25 + dense embedding kNN (hybrid retrieval) | Transformer cross-encoder | Vector recall in pass 1, cross-encoder in pass 2 |
+| 2024–present | Hybrid retrieval + learned sparse (SPLADE etc.) | Transformer + sometimes a 3rd LLM pass | LLM-as-final-reranker for top 20–50 |
+
+The **structure** has been stable for a decade. What people argue about is which model goes in which pass, not whether two passes are the right shape.
+
+### Why two passes survive transformers
+
+It's tempting to ask: "why not just run a transformer over the whole corpus?" Two reasons, both fundamental:
+
+1. **Latency.** A modern cross-encoder is roughly 10–100ms per query-doc pair on a serving GPU and 10–50× slower on CPU. Serving search at 30ms p99 over 100M documents means scoring at most a few hundred docs per query on GPU and many fewer on CPU. The candidate set has to be narrowed by *something* before the transformer sees it.
+
+2. **Cost.** A transformer rerank costs roughly $0.0001–$0.001 per (query, doc) pair on managed inference. At 1k QPS × 200 candidates that's $20–$200/sec on rerank alone. The first pass keeps that cost bounded by limiting what reaches the model.
+
+Vector retrieval (kNN over dense embeddings) gave people the option to *replace* BM25 in pass 1 rather than augment it. Most production systems augment — hybrid retrieval (BM25 + vector) returns a richer candidate set than either alone. ColBERT and similar "late interaction" models try to bridge passes 1 and 2 but in practice still need a cheap recall stage in front.
+
+### Where Murmur fits
+
+The pass-2 model takes a candidate (query, doc) and produces a score. The score is a function of:
+
+- **Query features** — query length, query type, language. (Free; computed inline.)
+- **Document features** — text similarity, document age, content embedding. (In the doc / index / pre-computed.)
+- **Counter features** — likes, follower count, view count, recency-weighted activity. (**This is what Murmur is for.**)
+- **User features** — personalization signals, click history. (In a feature store, e.g. Feast / Tecton / internal-build.)
+- **Cross features** — (user, doc) interactions, collaborative-filtering scores. (In a feature store or computed from embeddings.)
+
+Murmur's role is **the counter feature lookup**. The structure is identical to Pattern A's rescore — `GetMany` for the candidate set, batched and coalesced — except the consumer is a model rather than a hand-tuned scoring function.
+
+```go
+// Pattern A with hand-tuned scoring:
+score := bm25 * math.Log10(float64(likes+1))
+
+// Pattern A with ML rerank:
+features := buildFeatures(candidate, query, likes, views, freshness, ...)
+score := mlModel.Predict(features)
+```
+
+Same shape, same Murmur calls, same caching behavior. The only difference is what consumes the counter values.
+
+### Counter freshness as a feature-staleness problem
+
+Feature staleness is well-studied in ML. The recommender-systems community calls the property "**training-serving skew**" when the features at training time don't match features at serving time, and the related property "**point-in-time correctness**" when historical features must reflect what was *actually known at the historical moment*.
+
+For Murmur-as-feature-source, this maps cleanly:
+
+- **Serving freshness** — the value of `likes` at rerank time. Pattern A returns Murmur's current state, which is the merged window value as of the call. Bounded by Murmur's ingest lag (sub-second with `WithBatchWindow` at typical settings).
+- **Point-in-time training data** — historical (query, doc, score) triples used to train the rerank model. Requires the *historical* counter values, not current. This is what `query.GetRange(start, end)` is for: replay log → join Murmur state at the log timestamp via GetRange ending at that timestamp. The bootstrap-mode replay (`pkg/exec/bootstrap`) over an archived event log is the right shape for generating training features over historical data.
+
+Feature stores (Feast, Tecton) usually offer this as "online + offline parity." Murmur isn't a feature store, but it has the right shape to **back** a feature store's "stream-aggregated counter features" path, which is where a meaningful fraction of online features live.
+
+### Where Murmur isn't the answer
+
+- **Per-(user, item) features.** "How many times has *this user* clicked on *this item*" — that's `O(users × items)` keys. Murmur's `KeyByMany` could express it, but the cardinality cost is wrong; you'd produce hundreds of state writes per click. The right tool is collaborative filtering (matrix factorization, two-tower embeddings), not an aggregation framework.
+- **Embedding storage / nearest-neighbor recall.** Murmur is not a vector database. Use OpenSearch's `knn_vector`, Pinecone, Weaviate, or pgvector.
+- **Online learning / model updating.** Murmur aggregates events; it doesn't train models. The model side wants a feature store or an ML platform.
+
+### Concrete shape: hybrid retrieval + cross-encoder rerank with Murmur features
+
+A modern stack looks roughly like:
+
+```mermaid
+flowchart LR
+    Q["Query"] --> Tok["Tokenize / embed"]
+    Tok -->|BM25 query| OS[("OpenSearch<br/>BM25 + filters")]
+    Tok -->|"vector query<br/>(query embedding)"| Vec[("Vector index<br/>OpenSearch knn_vector<br/>or dedicated VDB")]
+    OS -->|top 500 by BM25| Merge["Reciprocal Rank Fusion<br/>or learned merger"]
+    Vec -->|top 500 by ANN| Merge
+    Merge -->|"top 200 candidates"| Rerank["Cross-encoder rerank"]
+    Rerank -->|reads| Mu[("Murmur<br/>counter features<br/>via GetMany / GetWindow")]
+    Rerank -->|reads| FS[("Feature store<br/>user / cross features")]
+    Rerank -->|"top 20"| Out["Result"]
+```
+
+The integration with Murmur from the rerank service is unchanged from Pattern A:
+
+```go
+import (
+    pb "github.com/gallowaysoftware/murmur/proto/gen/murmur/v1"
+)
+
+// candidates from hybrid retrieval (BM25 + vector merger).
+candidates := merge(bm25Top500, vectorTop500)[:200] // top 200 after fusion
+ids := candidateIDs(candidates)
+
+// Batch counter feature lookups against Murmur — the counters become
+// model features. Same singleflight-coalesced, BatchGetItem-backed
+// path as Pattern A's rescore.
+likeResp, _ := murmurLikes.GetMany(ctx, connect.NewRequest(&pb.GetManyRequest{
+    Entities: ids,
+}))
+
+// For windowed features, fan out per-entity (windowed reads aren't
+// batched yet — this is a known gap; see "Open questions"). The
+// singleflight layer collapses concurrent identical queries from
+// adjacent rerank batches.
+viewsByID := fanoutGetWindow(ctx, murmurViews, ids, 24*time.Hour)
+
+// Build feature vectors and call the cross-encoder.
+features := assembleFeatures(query, candidates, likeResp, viewsByID, userFeatures)
+scores := crossEncoder.Predict(ctx, features) // typically batched on GPU
+ranked := topKByScore(candidates, scores, 20)
+```
+
+The Murmur side is unchanged from Pattern A. The model side is where transformer-era complexity lives — embedding pipelines, ANN indexing, batched GPU inference, point-in-time training data. **Murmur is one feature source among many; its job is to serve counter values cheaply, accurately, and with bounded freshness.** That job hasn't changed since BM25.
+
+### LLM as a third stage
+
+Some recent systems add a third pass: an LLM that takes the top 20 candidates and the query, and produces either a final ranking or a synthesized answer (RAG-style). The third pass costs $0.001–$0.01 per query at typical model sizes — affordable when you've narrowed to 20 candidates, prohibitive earlier.
+
+This doesn't change Murmur's role. The LLM consumes the same features the cross-encoder did; one of those features is Murmur's counter values; the lookup shape is identical. Whether the score function is `score = ml(features)` or `score = llm(prompt(features))`, the data flow is unchanged.
+
+### Honest assessment of "is this outdated?"
+
+The two-pass shape isn't going anywhere because the underlying constraint isn't going anywhere: **scoring billions of documents in a query budget costs too much, no matter how good the model is**. Faster models lower the constant factor; they don't change the shape.
+
+What *will* keep changing:
+
+- The first pass will keep getting smarter — learned sparse retrieval (SPLADE, uniCOIL), generative retrieval (DSI, NCI), hybrid query understanding. Murmur is invariant under these changes; it just provides counter features.
+- The second pass will keep getting more expensive but better — bigger transformers, more features, multi-task learning. Murmur is invariant.
+- The third pass (LLM) will become more common where latency budgets allow it. Murmur is invariant.
+- Feature stores will mature. Murmur's relationship to feature stores is "good streaming-aggregation backend for the counter-features subset" — it doesn't replace feature stores, it complements them.
+
+If transformers replace search altogether — every query is "ask the LLM, no retrieval, no ranking" — then Murmur's relevance to search drops to zero. That world doesn't exist yet (cost, hallucination, freshness) and the architectures that move toward it (RAG) still have a retrieval pass. The two-pass pattern is robust.
+
+### Pagination, revisited under ML rerank
+
+ML rerank changes one thing about pagination: **rescore cost goes way up**. The deep-recall-stateless approach from the previous section (recall N=2000, rescore all of them, slice to page) becomes unaffordable when each rescore is a 50ms GPU call.
+
+Practical implication: **search-session caches become non-optional** for ML-reranked search at any meaningful page depth. The first page request pays for the rerank of N=200; cached pages are free. The TTL trade-off shifts toward longer TTLs (15–30 min) because the cost of cache miss is so much higher.
+
+The hybrid `search_after` approach (Pattern B's bucket as a cursor + per-page rescore) also becomes more attractive: rescoring 20 items per page is cheap even at GPU cost; rescoring 2000 items is not.
 
 ## What Murmur provides today
 
@@ -625,6 +878,10 @@ Issues honestly noted, not solved by this document:
 
 6. **Vector recall.** Modern relevance is increasingly vector-based (embedding similarity). All three patterns above generalize — the recall stage is whatever produces a candidate set; the rescore / bucket / delta steps don't care. But the actual integration with vector indices (OpenSearch's `knn_vector`, dedicated vector DBs) deserves its own treatment.
 
+7. **Batched windowed reads.** `QueryService.GetMany` batches single-bucket lookups well. `GetWindow` is per-entity; fetching windowed values for N candidates requires N concurrent calls. The singleflight layer collapses identical concurrent calls, but each *distinct* entity still fans out. A `GetWindowMany` shape that batches multiple entities into one DDB-side merge is the obvious fix and not yet shipped — for ML rerank with windowed counter features over N=200 candidates, this is the bottleneck.
+
+8. **Search-session cache as a first-class Murmur primitive.** The session cache pattern from the pagination section is reimplemented at every search service. A library that handles session creation, TTL, eviction, and the "rerank then cache" shape would save real work. Not a Murmur concern *strictly speaking* — it's downstream of the query API — but a worked example pairing Murmur with a Valkey-backed session cache would strengthen the integration story.
+
 ## Adjacent solutions that aren't in scope
 
 A complete answer should name what this design *isn't* and why:
@@ -665,4 +922,8 @@ Pick the right tool for the query shape:
 
 The two heuristics in the original question (hour-stable lookback, 2-minute debounce) are working solutions to write amplification. Pattern B addresses the same problem with a strictly better operational profile — fewer index writes, no synchronized fan-out, no artificial freshness gaps. Pattern A removes the problem from the index entirely for queries that don't need the counter for filtering.
 
-For most search surfaces in most products, the right architecture is **A everywhere, with B layered onto the few queries that genuinely need filter-by-counter**. Reach for C with eyes open.
+**Pagination** with external rescore is the immediate practical complication. Three viable approaches: deep recall stateless (cheap rescore, shallow pages), search-session cache (the workhorse for product search and social feeds), and `search_after` over a hybrid bucket+BM25 sort key (the shape for infinite feeds). Pick by page-depth distribution, not by aesthetics.
+
+**ML rerank** is Pattern A with a more expensive scoring function. Two-pass retrieval is not outdated — transformers make it more important, not less, because cross-encoder cost forces narrowing earlier. Murmur's role under ML rerank is the **counter feature lookup**, identical in shape to the hand-tuned-rescore case. Search-session caches become non-optional when each rerank costs 50ms+ on GPU.
+
+For most search surfaces in most products, the right architecture is **A everywhere, with B layered onto the few queries that genuinely need filter-by-counter, and a search-session cache for pagination**. Reach for C with eyes open. Hybrid retrieval and cross-encoder rerank are orthogonal model choices; Murmur is invariant under them.
