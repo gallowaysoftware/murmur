@@ -35,11 +35,12 @@ edges callers should plan around.
 | `pkg/exec/lambda/dynamodbstreams` | experimental | DDB Streams Lambda handler; same retry/dedup/BatchItemFailures shape as the Kinesis variant. Decoder takes the whole change record so callers can branch on EventName / inspect OldImage |
 | `pkg/exec/lambda/sqs` | experimental | SQS Lambda handler; same shape as kinesis/dynamodbstreams. Default EventID is "<arn>/<MessageId>"; override via WithEventID for FIFO content-dedup or upstream-key dedup. Uses SQS SentTimestamp for windowed-bucket assignment so delayed deliveries land in the correct bucket |
 | `pkg/query` | mostly stable | `Get` / `GetWindow` / `GetRange` / `LambdaQuery` are likely v1 surface |
-| `pkg/query/grpc` | experimental | generic byte-encoded responses; per-pipeline codegen is roadmap |
+| `pkg/query/grpc` | experimental | generic byte-encoded responses; `cmd/murmur-codegen-typed` emits per-service typed `.proto` + Go server stubs (sum / hll, all-time / windowed) over `pkg/query/typed` clients |
 | `pkg/admin` | experimental | CORS is closed by default; opt in via `WithAllowedOrigins`. No auth middleware yet |
 | `pkg/swap` | mostly stable | small surface; the Terraform module does not yet integrate it |
 | `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
 | `cmd/murmur-ui` | experimental | demo-grade dashboard; not yet a production ops surface |
+| `cmd/murmur-codegen-typed` | experimental | YAML pipeline-spec → typed Connect-RPC `.proto` + Go server stub (delegates to `pkg/query/typed`). Sum + HLL pipelines, `get_all_time` / `get_window` methods. TopK, Bloom, and `get_window_many` are roadmap |
 
 ## Known sharp edges (priority order)
 

@@ -1,0 +1,47 @@
+# Pipeline-spec for the count-core-shaped BotInteractionCountService.
+#
+# Run:
+#   go run ./cmd/murmur-codegen-typed --in examples/typed-rpc-codegen/bot-interactions/pipeline-spec.yaml \
+#                                     --out examples/typed-rpc-codegen/bot-interactions/gen
+#
+# This emits:
+#   gen/bot_interaction_count_service.proto
+#   gen/bot_interaction_count_service_server.go
+#
+# The .proto is the contract — feed it to buf or protoc to get typed
+# Go messages and the connect-go service stub. The _server.go is the
+# typed Connect-RPC handler that delegates to pkg/query/typed.SumClient.
+#
+# After running buf/protoc on the .proto, the _server.go compiles and
+# you wire it into your application's HTTP handler chain via:
+#   handler := botv1connect.NewBotInteractionCountServiceHandler(server)
+
+proto_package: example.bot.v1
+go_package: github.com/example/count-core/gen/bot/v1
+proto_go_package: github.com/example/count-core/gen/bot/v1
+
+service:
+  name: BotInteractionCountService
+  pipeline_name: bot_interactions
+  pipeline_kind: sum
+  methods:
+    - name: GetCount
+      kind: get_all_time
+      key_template: "bot:{bot_id}|user:{user_id}"
+      request:
+        - name: bot_id
+          type: string
+        - name: user_id
+          type: string
+
+    - name: GetCountWindow
+      kind: get_window
+      key_template: "bot:{bot_id}|user:{user_id}"
+      window_duration_field: duration_seconds
+      request:
+        - name: bot_id
+          type: string
+        - name: user_id
+          type: string
+        - name: duration_seconds
+          type: int64

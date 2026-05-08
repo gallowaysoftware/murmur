@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
+	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.57.0
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.43.7
@@ -22,6 +23,7 @@ require (
 	golang.org/x/sync v0.20.0
 	google.golang.org/grpc v1.81.0
 	google.golang.org/protobuf v1.36.11
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -32,7 +34,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.57.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.15 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.11.23 // indirect
