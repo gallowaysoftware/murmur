@@ -30,7 +30,7 @@ edges callers should plan around.
 | `pkg/observability/autoscale` | experimental | Periodic Signal → Emitter loop for publishing scaling-signal metrics. Reference CloudWatch emitter; Signal helpers like `EventsPerSecond` derive rates from the metrics recorder. Closes `doc/architecture.md` open question #2 (worker autoscaling) |
 | `pkg/exec/bootstrap` | experimental | Shares the `pkg/exec/processor` core with streaming + Lambda. Per-record retry via `WithMaxAttempts` / `WithRetryBackoff`; permissive on dead-letter by default (use `WithFailOnError` to abort). Honors `KeyByMany` hierarchical rollups |
 | `pkg/exec/replay` | experimental | Shares the `pkg/exec/processor` core. Same retry / dead-letter / `KeyByMany` semantics as bootstrap. metrics.Recorder fully wired; the historical "metrics integration not yet wired" note is fixed |
-| `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
+| `pkg/exec/batch/sparkconnect` | experimental | own Go submodule (separate `go.mod`) so root `github.com/gallowaysoftware/murmur` doesn't pull `apache/spark-connect-go`. Consumers who DO depend on this submodule must mirror its `replace` line for the `pequalsnp/spark-connect-go` fork in their own `go.mod` |
 | `pkg/exec/lambda/kinesis` | experimental | `NewHandler` returns the Lambda Kinesis handler signature; partial-batch failures via BatchItemFailures; pair with `WithDedup` so adjacent-redelivered records fold idempotently |
 | `pkg/exec/lambda/dynamodbstreams` | experimental | DDB Streams Lambda handler; same retry/dedup/BatchItemFailures shape as the Kinesis variant. Decoder takes the whole change record so callers can branch on EventName / inspect OldImage |
 | `pkg/exec/lambda/sqs` | experimental | SQS Lambda handler; same shape as kinesis/dynamodbstreams. Default EventID is "<arn>/<MessageId>"; override via WithEventID for FIFO content-dedup or upstream-key dedup. Uses SQS SentTimestamp for windowed-bucket assignment so delayed deliveries land in the correct bucket |
@@ -72,10 +72,15 @@ edges callers should plan around.
    over a partially-empty range correctly reports the min of populated
    buckets and `Set: false` if everything was empty.
 
-5. **`go.mod` `replace` directive.** Importing
-   `pkg/exec/batch/sparkconnect` requires consumers to mirror the
-   `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go ...`
-   line. Tracked: upstream the patches or split the package into its own module.
+5. ~~**`go.mod` `replace` directive.**~~ Partially fixed:
+   `pkg/exec/batch/sparkconnect` now carries its own `go.mod` so the root
+   `github.com/gallowaysoftware/murmur` module doesn't depend on
+   `apache/spark-connect-go`. Non-Spark consumers get a clean root `go.mod`.
+   Consumers who DO depend on the sparkconnect submodule must still mirror
+   the `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go …`
+   line in their own `go.mod` (Go doesn't propagate replace directives
+   transitively). Full fix is upstreaming the fork's patches to
+   `apache/spark-connect-go`; tracked separately.
 
 6. ~~**CORS.**~~ Fixed: `pkg/admin.NewServer` now defaults to no CORS headers
    (same-origin only). Open it up to the origins you want via

@@ -7,11 +7,15 @@
 //	docker compose up -d spark-connect dynamodb-local
 //	SPARK_CONNECT_REMOTE=sc://localhost:15002 \
 //	DDB_LOCAL_ENDPOINT=http://localhost:8000 \
-//	  go test ./test/e2e/... -run TestE2E_SparkConnect -v
+//	  go test ./pkg/exec/batch/sparkconnect/... -run TestE2E_SparkConnect -v
 //
-// The test uses inline VALUES rather than reading from S3/MinIO so we exercise the
-// row-iteration + DDB write path independently of any S3-Hadoop classpath setup.
-package e2e_test
+// Lives in the sparkconnect submodule (rather than test/e2e) so the root
+// module doesn't depend on apache/spark-connect-go.
+//
+// The test uses inline VALUES rather than reading from S3/MinIO so we
+// exercise the row-iteration + DDB write path independently of any
+// S3-Hadoop classpath setup.
+package sparkconnect_test
 
 import (
 	"context"
