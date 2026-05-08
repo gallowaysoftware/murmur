@@ -1,27 +1,16 @@
 package pipeline_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
-	"github.com/gallowaysoftware/murmur/pkg/source"
 )
 
 type testEvent struct {
 	PageID string
 }
-
-type fakeSource struct{}
-
-func (fakeSource) Read(ctx context.Context, out chan<- source.Record[testEvent]) error {
-	close(out)
-	return nil
-}
-func (fakeSource) Name() string { return "fake" }
-func (fakeSource) Close() error { return nil }
 
 func TestBuild_RequiredFields(t *testing.T) {
 	// Each missing field should be flagged in turn.

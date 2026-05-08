@@ -269,7 +269,7 @@ func TestEventsPerSecond_ResetsOnRollback(t *testing.T) {
 	// If the cumulative count goes BACKWARDS (recorder restart, etc.),
 	// the rate should be 0, not negative.
 	getter := func() func(context.Context) (uint64, error) {
-		var seq []uint64 = []uint64{100, 50, 200}
+		seq := []uint64{100, 50, 200}
 		i := 0
 		return func(context.Context) (uint64, error) {
 			if i >= len(seq) {

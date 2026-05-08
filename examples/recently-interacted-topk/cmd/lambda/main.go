@@ -35,6 +35,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := example.Config{
 		DDBEndpoint:     os.Getenv("DDB_ENDPOINT"),
 		DDBTable:        envOr("DDB_TABLE", "recently_interacted"),
@@ -48,7 +52,8 @@ func main() {
 	ctx := context.Background()
 	pipe, store, deduper, err := example.Build(ctx, cfg)
 	if err != nil {
-		log.Fatalf("build pipeline: %v", err)
+		log.Printf("build pipeline: %v", err)
+		return 1
 	}
 	defer func() { _ = store.Close() }()
 	if deduper != nil {
@@ -71,9 +76,11 @@ func main() {
 
 	handler, err := mkinesis.NewHandler(pipe, mkinesis.JSONDecoder[example.Interaction](), opts...)
 	if err != nil {
-		log.Fatalf("build kinesis handler: %v", err)
+		log.Printf("build kinesis handler: %v", err)
+		return 1
 	}
 	lambda.Start(handler)
+	return 0
 }
 
 func envOr(key, fallback string) string {

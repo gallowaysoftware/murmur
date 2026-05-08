@@ -131,11 +131,13 @@ func encode(k uint32, items []Item) []byte {
 	sortByCountDesc(out)
 
 	buf := bytes.NewBuffer(make([]byte, 0, 8+len(items)*32))
-	binary.Write(buf, binary.LittleEndian, k)
-	binary.Write(buf, binary.LittleEndian, uint32(len(out)))
+	// binary.Write to a bytes.Buffer never errors (Buffer.Write
+	// always succeeds); the explicit _ = silences errcheck.
+	_ = binary.Write(buf, binary.LittleEndian, k)
+	_ = binary.Write(buf, binary.LittleEndian, uint32(len(out)))
 	for _, it := range out {
-		binary.Write(buf, binary.LittleEndian, it.Count)
-		binary.Write(buf, binary.LittleEndian, uint32(len(it.Key)))
+		_ = binary.Write(buf, binary.LittleEndian, it.Count)
+		_ = binary.Write(buf, binary.LittleEndian, uint32(len(it.Key)))
 		buf.WriteString(it.Key)
 	}
 	return buf.Bytes()

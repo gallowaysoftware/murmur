@@ -27,6 +27,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := pageviews.Config{
 		KafkaBrokers:    envOr("KAFKA_BROKERS", "localhost:9092"),
 		KafkaTopic:      envOr("KAFKA_TOPIC", "page_views"),
@@ -51,7 +55,7 @@ func main() {
 	pipe, store, cache, err := pageviews.Build(ctx, cfg, true)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() {
 		if cache != nil {
@@ -60,7 +64,7 @@ func main() {
 		_ = store.Close()
 	}()
 
-	os.Exit(murmur.RunStreamingWorker(ctx, pipe))
+	return murmur.RunStreamingWorker(ctx, pipe)
 }
 
 func envOr(key, fallback string) string {

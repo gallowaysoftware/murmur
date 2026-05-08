@@ -26,6 +26,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := orderstats.Config{
 		KafkaBrokers:  envOr("KAFKA_BROKERS", "localhost:9092"),
 		KafkaTopic:    envOr("KAFKA_TOPIC", "orders.cdc"),
@@ -42,11 +46,11 @@ func main() {
 	pipe, store, deduper, err := orderstats.BuildLive(ctx, cfg)
 	if err != nil {
 		logger.Error("build", "err", err)
-		os.Exit(2)
+		return 2
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if deduper != nil {
-		defer deduper.Close()
+		defer func() { _ = deduper.Close() }()
 	}
 
 	rec := metrics.NewInMemory()
@@ -59,7 +63,7 @@ func main() {
 		"kafka", cfg.KafkaBrokers, "topic", cfg.KafkaTopic,
 		"ddb_table", cfg.DDBTable, "dedup_table", cfg.DDBDedupTable)
 
-	os.Exit(murmur.RunStreamingWorker(ctx, pipe, opts...))
+	return murmur.RunStreamingWorker(ctx, pipe, opts...)
 }
 
 func envOr(key, fallback string) string {

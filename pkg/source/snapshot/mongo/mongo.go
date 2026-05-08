@@ -107,7 +107,7 @@ func (s *Source[T]) CaptureHandoff(ctx context.Context) (snapshot.HandoffToken, 
 	if err != nil {
 		return nil, fmt.Errorf("mongo Watch: %w", err)
 	}
-	defer cs.Close(ctx)
+	defer func() { _ = cs.Close(ctx) }()
 	tok := cs.ResumeToken()
 	if tok == nil {
 		return nil, errors.New("mongo: change stream returned nil resume token")
@@ -130,7 +130,7 @@ func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error
 	if err != nil {
 		return fmt.Errorf("mongo Find: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	for cursor.Next(ctx) {
 		raw := cursor.Current

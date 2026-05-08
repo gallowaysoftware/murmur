@@ -93,7 +93,7 @@ func (c *openSearchClient) UpdateDoc(ctx context.Context, index, docID string, f
 	if err != nil {
 		return fmt.Errorf("opensearch POST %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("opensearch %s returned %d", url, resp.StatusCode)
 	}

@@ -29,6 +29,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := example.Config{
 		KafkaBrokers:    envOr("KAFKA_BROKERS", "localhost:9092"),
 		KafkaTopic:      envOr("KAFKA_TOPIC", "interactions"),
@@ -55,7 +59,7 @@ func main() {
 	pipe, store, deduper, err := example.Build(ctx, cfg)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = store.Close() }()
 	if deduper != nil {
@@ -65,7 +69,7 @@ func main() {
 	pipe, err = example.AttachKafkaSource(pipe, cfg)
 	if err != nil {
 		logger.Error("attach kafka source", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	rec := metrics.NewInMemory()
@@ -77,7 +81,7 @@ func main() {
 		opts = append(opts, streaming.WithDedup(deduper))
 	}
 
-	os.Exit(murmur.RunStreamingWorker(ctx, pipe, opts...))
+	return murmur.RunStreamingWorker(ctx, pipe, opts...)
 }
 
 func envOr(key, fallback string) string {

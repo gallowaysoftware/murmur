@@ -24,14 +24,14 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
-	allTimeURL := flag.String("likes-alltime-url", os.Getenv("LIKES_ALLTIME_URL"),
+	allTimeURL := flag.String("likes-alltime-url", os.Getenv("LIKES_ALLTIME_URL"), //nolint:misspell // CLI flag + env var name; stable caller-facing API
 		"Murmur QueryService URL for the all-time likes counter (e.g. http://localhost:50051)")
 	windowedURL := flag.String("likes-windowed-url", os.Getenv("LIKES_WINDOWED_URL"),
 		"Murmur QueryService URL for the daily-windowed likes counter")
 	flag.Parse()
 
 	if *allTimeURL == "" {
-		log.Fatal("--likes-alltime-url or LIKES_ALLTIME_URL is required")
+		log.Fatal("--likes-alltime-url or LIKES_ALLTIME_URL is required") //nolint:misspell // CLI flag + env var name; stable caller-facing API
 	}
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
@@ -88,7 +88,7 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("rerank server listening on %s (alltime=%s windowed=%s)",
+	log.Printf("rerank server listening on %s (all-time=%s windowed=%s)",
 		*addr, *allTimeURL, *windowedURL)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

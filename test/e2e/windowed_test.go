@@ -125,10 +125,7 @@ func TestE2E_WindowedCounterPipeline(t *testing.T) {
 	// Wait for processing to converge — for windowed pipelines, "converged" means the
 	// total of all 10 daily buckets equals 55.
 	deadline := time.Now().Add(60 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			break
-		}
+	for time.Now().Before(deadline) {
 		got, err := query.GetWindow(ctx, store, core.Sum[int64](), w, "page-A", 30*24*time.Hour, now)
 		if err == nil && got == 55 {
 			break

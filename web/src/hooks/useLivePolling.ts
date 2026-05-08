@@ -22,7 +22,12 @@ export function useLivePolling<T>(
   const [error, setError] = useState<Error | null>(null)
   const [loading, setLoading] = useState(true)
   const fetcherRef = useRef(fetcher)
-  fetcherRef.current = fetcher
+  // Keep the ref pointing at the latest `fetcher` without writing during
+  // render (react-hooks/refs forbids that). Polling is async-driven, so a
+  // post-render update is fine — the next tick reads the current value.
+  useEffect(() => {
+    fetcherRef.current = fetcher
+  }, [fetcher])
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null

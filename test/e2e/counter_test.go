@@ -122,10 +122,7 @@ func TestE2E_CounterPipeline(t *testing.T) {
 
 	// --- Poll DDB until expected counts land or timeout ---
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			break
-		}
+	for time.Now().Before(deadline) {
 		ok := true
 		for page, expected := range want {
 			v, found, err := store.Get(ctx, state.Key{Entity: page})

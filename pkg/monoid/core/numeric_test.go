@@ -23,7 +23,7 @@ func TestSumAssociativity(t *testing.T) {
 func TestMinMax_Combine(t *testing.T) {
 	mn := Min[int]()
 	mx := Max[int]()
-	b := func(v int) Bounded[int] { return NewBounded(v) }
+	b := NewBounded[int]
 
 	got := mn.Combine(mn.Combine(b(5), b(3)), b(8))
 	if !got.Set || got.Value != 3 {

@@ -12,13 +12,18 @@ export function QueryConsole() {
 
   const [pipelines, setPipelines] = useState<PipelineInfo[]>([])
   const [search, setSearch] = useSearchParams()
+  // Initial mount-time `now` for default ranges. useState with an
+  // initializer keeps this stable across re-renders, so default
+  // start/end don't drift on every render. react-hooks/purity flags
+  // direct Date.now() calls in render.
+  const [nowSec] = useState(() => Math.floor(Date.now() / 1000))
 
   const pipeline = search.get('pipeline') ?? ''
   const mode = (search.get('mode') as Mode) || 'get'
   const entity = search.get('entity') ?? ''
   const durationS = Number(search.get('duration_s') ?? 86400)
-  const startUnix = Number(search.get('start') ?? Math.floor(Date.now() / 1000) - 86400 * 7)
-  const endUnix = Number(search.get('end') ?? Math.floor(Date.now() / 1000))
+  const startUnix = Number(search.get('start') ?? nowSec - 86400 * 7)
+  const endUnix = Number(search.get('end') ?? nowSec)
 
   const [resp, setResp] = useState<StateValue | null>(null)
   const [err, setErr] = useState<string | null>(null)

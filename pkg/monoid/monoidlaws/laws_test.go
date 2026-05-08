@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/compose"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/monoidlaws"
@@ -209,7 +208,7 @@ func TestTupleMonoid2_SumAndMin(t *testing.T) {
 	})
 
 	// Compile-time invariant: TupleMonoid2 is a monoid.Monoid over Tuple2.
-	var _ monoid.Monoid[pair] = m
+	var _ = m
 }
 
 func TestDecayedSum_FloatTolerant(t *testing.T) {

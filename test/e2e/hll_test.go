@@ -114,10 +114,7 @@ func TestE2E_HLLUniqueVisitorsPipeline(t *testing.T) {
 	// Wait for processing to converge, then verify within HLL error bounds.
 	deadline := time.Now().Add(60 * time.Second)
 	tol := 0.05 // 5% — comfortably wide for HLL++ p=14 (~1.6% std error)
-	for {
-		if time.Now().After(deadline) {
-			break
-		}
+	for time.Now().Before(deadline) {
 		ok := true
 		for page, expected := range uniques {
 			b, found, err := store.Get(ctx, state.Key{Entity: page})

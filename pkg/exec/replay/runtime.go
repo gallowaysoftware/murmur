@@ -80,8 +80,8 @@ func WithDedup(d state.Deduper) RunOption {
 	}
 }
 
-// WithFailOnError, when true, surfaces the first dead-lettered record's
-// error to the caller and aborts the replay. Default false: dead-lettered
+// WithFailOnError configures the replay to surface the first dead-lettered
+// record's error to the caller and abort. Default false: dead-lettered
 // records are recorded via the metrics.Recorder and the replay continues.
 //
 // For shadow-table backfills with atomic swap, an aborted replay leaves

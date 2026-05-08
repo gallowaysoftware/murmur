@@ -190,7 +190,7 @@ func (s *Source[T]) scanOne(ctx context.Context, key string, out chan<- source.R
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	reader := io.Reader(body)
 	if strings.HasSuffix(strings.ToLower(key), ".gz") {
@@ -198,7 +198,7 @@ func (s *Source[T]) scanOne(ctx context.Context, key string, out chan<- source.R
 		if err != nil {
 			return fmt.Errorf("gzip open %s: %w", key, err)
 		}
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		reader = gz
 	}
 

@@ -1,5 +1,5 @@
 import { Link, useParams } from 'react-router-dom'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import ReactFlow, {
   Background,
   Controls,
@@ -34,14 +34,24 @@ export function PipelineDetail() {
     return { info, stats }
   }, 2000)
 
-  const seriesRef = useRef<Sample[]>([])
-  if (data) {
-    const last = seriesRef.current.at(-1)
-    const next: Sample = { t: Date.now(), events: Number(data.stats.events_processed) }
-    if (!last || next.t - last.t > 500) {
-      seriesRef.current = [...seriesRef.current, next].slice(-60)
-    }
-  }
+  // Sliding-window of recent samples for the sparkline. We need to
+  // synthesize a *history* (current series ⊕ new data) from external
+  // polling — useLivePolling is the external system. The throttle
+  // (≥500ms gap) returns prev unchanged so cascading renders are bounded
+  // to one per polling tick.
+  const [series, setSeries] = useState<Sample[]>([])
+  useEffect(() => {
+    if (!data) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSeries((prev) => {
+      const last = prev.at(-1)
+      const next: Sample = { t: Date.now(), events: Number(data.stats.events_processed) }
+      if (!last || next.t - last.t > 500) {
+        return [...prev, next].slice(-60)
+      }
+      return prev
+    })
+  }, [data])
 
   return (
     <div className="px-6 sm:px-10 py-8 max-w-6xl">
@@ -98,7 +108,7 @@ export function PipelineDetail() {
           title="Throughput"
           subtitle="Events per second over the last ~2 minutes (rate of change)."
         >
-          <RateSparkline series={seriesRef.current} />
+          <RateSparkline series={series} />
         </Panel>
       </section>
     </div>

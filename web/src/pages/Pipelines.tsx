@@ -211,7 +211,7 @@ function PipelineCard({ row }: { row: Row }) {
             {info.source_type && <Badge>source: {info.source_type}</Badge>}
           </div>
         </div>
-        <StatusDot stats={stats} />
+        <StatusDot stats={stats} now={now} />
       </div>
 
       <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-4 sm:gap-6">
@@ -262,12 +262,15 @@ function useEpsEstimate(stats: PipelineStats | null, now: number): string | null
   }, [stats, now])
 }
 
-function StatusDot({ stats }: { stats: PipelineStats | null }) {
+function StatusDot({ stats, now }: { stats: PipelineStats | null; now: number }) {
   if (!stats) {
     return <span className="text-xs text-fg-faint">no data</span>
   }
+  // `now` is the parent's useNow tick (already pure in render); using it
+  // instead of Date.now() keeps react-hooks/purity happy and tracks the
+  // 2s polling cadence.
   const fresh = stats.last_event_at
-    ? Date.now() - new Date(stats.last_event_at).getTime() < 30_000
+    ? now - new Date(stats.last_event_at).getTime() < 30_000
     : false
   const tone = stats.errors > 0 ? 'warn' : fresh ? 'good' : 'neutral'
   const color = tone === 'good' ? 'bg-good' : tone === 'warn' ? 'bg-warn' : 'bg-fg-faint'
