@@ -161,6 +161,7 @@ Beyond the core pipeline DSL, several packages exist to make Murmur deployable:
 - [`examples/recently-interacted-topk/`](examples/recently-interacted-topk/) — single Top-N pipeline fed by **two sources at once**: Kinesis (consumed via an AWS Lambda trigger) plus Kafka (consumed by a long-running ECS worker). Both binaries write through the same DDB row; the Misra-Gries `Combine` produces a unified ranking across channels.
 - [`examples/search-projector/`](examples/search-projector/) — runnable Pattern B from [`doc/search-integration.md`](doc/search-integration.md): a Lambda that tails Murmur's counter table via DDB Streams and projects bucket transitions into an OpenSearch index, reducing search-side index write rate from per-event to per-order-of-magnitude (~6 reindexes for a 0→1M counter rise vs 1M).
 - [`examples/search-rerank/`](examples/search-rerank/) — runnable Pattern A from the same doc: an HTTP search service that does two-stage retrieval (OpenSearch recall + Murmur counter rerank). Pairs with the search-projector to form the canonical "filter on bucket + rank by live counters" shape.
+- [`examples/typed-wrapper/`](examples/typed-wrapper/) — count-core-shaped reference for the typed-wrapper pattern: how application services expose Murmur counter pipelines through their own typed Connect-RPC API instead of the generic `Value{bytes}` shape. Uses [`pkg/query/typed`](pkg/query/typed/) as the building block.
 
 ## Web UI and admin API
 

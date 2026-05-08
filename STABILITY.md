@@ -15,7 +15,7 @@ edges callers should plan around.
 | `pkg/monoid/compose` | experimental | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1. `state.NewInstrumented` / `state.NewInstrumentedCache` decorate any store/cache with metrics.Recorder hooks (store_get / store_get_many / store_merge_update / cache_get / cache_repopulate latencies + errors) |
-| `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy |
+| `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy. `Int64MaxStore` ships the SetCountIfGreater pattern via DDB `UpdateItem` with conditional expression — out-of-order events with lower values are silently dropped |
 | `pkg/state/valkey` | experimental | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes). No native PFADD path — Valkey-native HLL is incompatible with axiomhq's encoding; bridging is roadmap |
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
@@ -36,6 +36,7 @@ edges callers should plan around.
 | `pkg/exec/lambda/sqs` | experimental | SQS Lambda handler; same shape as kinesis/dynamodbstreams. Default EventID is "<arn>/<MessageId>"; override via WithEventID for FIFO content-dedup or upstream-key dedup. Uses SQS SentTimestamp for windowed-bucket assignment so delayed deliveries land in the correct bucket |
 | `pkg/query` | mostly stable | `Get` / `GetWindow` / `GetRange` / `LambdaQuery` are likely v1 surface |
 | `pkg/query/grpc` | experimental | generic byte-encoded responses; per-pipeline codegen is roadmap |
+| `pkg/query/typed` | experimental | typed-client wrappers over the generic QueryService — `SumClient`, `HLLClient`, `TopKClient`, `BloomClient`. The decoders + typed shape behind application-service typed-wrapper RPCs (see `examples/typed-wrapper`). Building block until per-pipeline codegen lands |
 | `pkg/admin` | experimental | CORS is closed by default; opt in via `WithAllowedOrigins`. No auth middleware yet |
 | `pkg/swap` | mostly stable | small surface; the Terraform module does not yet integrate it |
 | `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
