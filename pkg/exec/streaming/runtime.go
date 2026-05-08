@@ -11,6 +11,7 @@ package streaming
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
@@ -29,6 +30,7 @@ type runConfig struct {
 	deadLetter   func(eventID string, err error)
 	batchWindow  time.Duration
 	maxBatchSize int
+	concurrency  int
 }
 
 // WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
@@ -116,6 +118,44 @@ func WithBatchWindow(window time.Duration, maxBatch int) RunOption {
 	}
 }
 
+// WithConcurrency configures N worker goroutines that drain the source
+// channel concurrently. Default 1 (the historical single-goroutine
+// loop). When n > 1, records are routed by hash(first-emitted-key) to
+// a worker, so SAME-key records always land on the same worker — that
+// preserves per-key order and keeps the aggregator's per-(entity, bucket)
+// lock contention tight.
+//
+// When to raise it:
+//
+//   - The single-goroutine ceiling (~5–10k events/s/worker against
+//     DDB-local; documented in README) is your bottleneck.
+//   - Fan-out via additional Kafka partitions isn't an option (e.g.,
+//     downstream key cardinality demands a single partition).
+//
+// When NOT to raise it:
+//
+//   - Your store is CAS-heavy (BytesStore on a hot key). N workers
+//     pre-routing by key removes cross-worker CAS contention but a
+//     single worker on a hot CAS key is already the bottleneck.
+//   - You're using `WithBatchWindow` aggressively. The aggregator's
+//     per-key lock already serializes hot-key writes; concurrency
+//     adds dispatch overhead without throughput gain on a single hot
+//     key.
+//
+// The router routes by first-key hash. Hierarchical-rollup pipelines
+// (KeyByMany) partition on the FIRST emitted key — so a record's
+// "post:X" delta lands on the same worker as another "post:X" record,
+// even if the records also fan out to "country:Y" / "global" keys
+// that happen to hash differently. This keeps the per-key ordering
+// guarantee meaningful where it matters most.
+func WithConcurrency(n int) RunOption {
+	return func(c *runConfig) {
+		if n >= 1 {
+			c.concurrency = n
+		}
+	}
+}
+
 // WithDedup installs a state.Deduper. Each record's EventID is claimed via
 // MarkSeen before the merge runs; if MarkSeen reports the EventID was
 // already claimed (a duplicate from a worker crash mid-write), the runtime
@@ -192,6 +232,18 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 		}()
 	}
 
+	// Concurrency > 1: route records to N worker goroutines by
+	// hash(first-key). Same-key records always go to the same worker,
+	// preserving per-key order. concurrency = 1 retains the historical
+	// single-goroutine loop.
+	if cfg.concurrency > 1 {
+		err := runConcurrent(ctx, name, records, srcDone, keysFn, valueFn, store, cache, window, agg, &cfg)
+		if agg != nil {
+			<-flushDone
+		}
+		return err
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -220,6 +272,106 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 			}
 		}
 	}
+}
+
+// runConcurrent drains `records` across cfg.concurrency worker
+// goroutines. A small router goroutine reads records, hashes the
+// first-emitted-key, and dispatches to the matching worker channel.
+// Same-key records always land on the same worker.
+//
+// Returns when the source channel closes or ctx cancels. Workers are
+// drained on the way out so no record is dropped mid-flight.
+func runConcurrent[T any, V any](
+	ctx context.Context,
+	name string,
+	records <-chan source.Record[T],
+	srcDone <-chan error,
+	keysFn func(T) []string,
+	valueFn func(T) V,
+	store state.Store[V],
+	cache state.Cache[V],
+	window *windowed.Config,
+	agg *aggregator[T, V],
+	cfg *runConfig,
+) error {
+	n := cfg.concurrency
+	workers := make([]chan source.Record[T], n)
+	for i := range workers {
+		// Per-worker buffer of 256 (1024/4 ~ chunked across N workers
+		// in expectation; absorb short latency spikes without forcing
+		// the router to block).
+		workers[i] = make(chan source.Record[T], 256)
+	}
+
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(ch <-chan source.Record[T]) {
+			defer wg.Done()
+			for rec := range ch {
+				if agg != nil {
+					if dup := agg.accept(ctx, rec); dup && rec.Ack != nil {
+						_ = rec.Ack()
+					}
+				} else {
+					processWithRetry(ctx, name, rec, keysFn, valueFn, store, cache, window, cfg)
+				}
+			}
+		}(workers[i])
+	}
+
+	// Router: route every record to one worker by first-key hash.
+	// Records with no emitted keys (KeysFn returns nil/empty — rare)
+	// route to worker 0; processor.MergeMany handles the empty-keys
+	// case as a no-op.
+	routerDone := make(chan struct{})
+	go func() {
+		defer close(routerDone)
+		defer func() {
+			for _, ch := range workers {
+				close(ch)
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case rec, ok := <-records:
+				if !ok {
+					return
+				}
+				idx := routeKey(keysFn(rec.Value), n)
+				select {
+				case workers[idx] <- rec:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	<-routerDone
+	wg.Wait()
+	return <-srcDone
+}
+
+// routeKey maps the first-emitted key to a worker index. FNV-1a hash
+// over the byte content; cheap and good-enough distribution. No keys
+// → worker 0 (caller's processor.MergeMany no-ops on empty key list).
+func routeKey(keys []string, n int) int {
+	if len(keys) == 0 || n <= 1 {
+		return 0
+	}
+	const (
+		offset uint32 = 2166136261
+		prime  uint32 = 16777619
+	)
+	h := offset
+	for _, c := range []byte(keys[0]) {
+		h ^= uint32(c)
+		h *= prime
+	}
+	return int(h % uint32(n))
 }
 
 func drainAndProcess[T any, V any](
