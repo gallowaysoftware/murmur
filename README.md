@@ -39,7 +39,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 
 ## Limitations to read before adopting
 
-- **`replace` directive in `go.mod`.** Murmur depends on a personal fork of `apache/spark-connect-go` for the batch executor. Anyone importing `pkg/exec/batch/sparkconnect` must mirror the `replace` directive in their own `go.mod`. Tracked: upstream the patches or split that package out.
+- **`replace` directive only for Spark Connect.** The root `github.com/gallowaysoftware/murmur` module no longer depends on `apache/spark-connect-go` — `pkg/exec/batch/sparkconnect` carries its own `go.mod`. Consumers who don't use Spark Connect (95% of users) get a clean `go.mod`. Consumers who DO use the sparkconnect submodule must mirror its `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go …` line in their own `go.mod` — Go does not propagate replace directives transitively.
 - **At-least-once with optional dedup.** Pass `streaming.WithDedup(d)` (where `d` is a `pkg/state/dynamodb.Deduper`) to make replay-after-crash idempotent for any monoid. Without it, the streaming runtime is at-least-once with no per-EventID dedup — fine for idempotent monoids (Set, Min, Max, Bloom) but double-counts non-idempotent ones (Sum, HLL, TopK).
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
 - ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.

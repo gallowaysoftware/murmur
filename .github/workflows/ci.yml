@@ -30,7 +30,14 @@ jobs:
           fi
 
       - name: go vet
-        run: go vet ./...
+        # Workspace mode: go.work composes the root module with
+        # pkg/exec/batch/sparkconnect (its own module so non-Spark
+        # consumers don't have to mirror the spark-connect-go fork-replace).
+        # `go vet ./...` from root only sees the current module; we vet
+        # the submodule separately.
+        run: |
+          go vet ./...
+          (cd pkg/exec/batch/sparkconnect && go vet ./...)
 
       - name: go build
         # The web/ build pipeline isn't run in CI; place a stub so
@@ -39,9 +46,12 @@ jobs:
           mkdir -p pkg/admin/dist
           [ -f pkg/admin/dist/README.md ] || echo placeholder > pkg/admin/dist/README.md
           go build ./...
+          (cd pkg/exec/batch/sparkconnect && go build ./...)
 
       - name: unit tests
-        run: go test -short -race -timeout 120s ./...
+        run: |
+          go test -short -race -timeout 120s ./...
+          (cd pkg/exec/batch/sparkconnect && go test -short -race -timeout 120s ./...)
 
   golangci-lint:
     name: golangci-lint

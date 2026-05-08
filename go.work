@@ -1,0 +1,19 @@
+go 1.26.2
+
+// Multi-module workspace.
+//
+//   .                                    — root murmur module (the bulk of the framework)
+//   ./pkg/exec/batch/sparkconnect        — Spark Connect batch executor; carries its own
+//                                          go.mod so that 95% of Murmur consumers (those who
+//                                          don't use Spark) don't need to mirror the
+//                                          apache/spark-connect-go → pequalsnp/spark-connect-go
+//                                          fork-replace. Users who DO depend on the sparkconnect
+//                                          submodule must still mirror the replace in their
+//                                          own go.mod (Go does not propagate replace directives).
+//
+// In CI and for local development, go.work composes both modules so that
+// `go test ./...` from root exercises both.
+use (
+	.
+	./pkg/exec/batch/sparkconnect
+)

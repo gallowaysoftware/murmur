@@ -29,13 +29,21 @@ help:
 # Go
 # ----------------------------------------------------------------------------
 
+# Submodules: pkg/exec/batch/sparkconnect carries its own go.mod so non-Spark
+# consumers don't need to mirror the spark-connect-go fork-replace.
+# `go vet ./...` / `go build ./...` only see the current module — we run them
+# in each submodule too.
+SUBMODULES := pkg/exec/batch/sparkconnect
+
 .PHONY: build
 build: $(DIST_DIR)/index.html ## Build all Go packages and binaries
 	$(GO) build ./...
+	@for d in $(SUBMODULES); do (cd $$d && $(GO) build ./...) || exit 1; done
 
 .PHONY: vet
 vet: ## go vet ./...
 	$(GO) vet ./...
+	@for d in $(SUBMODULES); do (cd $$d && $(GO) vet ./...) || exit 1; done
 
 .PHONY: fmt
 fmt: ## gofmt -w on the Go tree
@@ -58,6 +66,7 @@ GO_PACKAGES := $(shell $(GO) list ./... 2>/dev/null | grep -v '/web/node_modules
 .PHONY: test-unit
 test-unit: ## Fast unit tests — no docker, no AWS. Skips integration/e2e.
 	$(GO) test -short -timeout 60s $(GO_PACKAGES)
+	@for d in $(SUBMODULES); do (cd $$d && $(GO) test -short -timeout 60s ./...) || exit 1; done
 
 .PHONY: test-integration
 test-integration: compose-up ## Full test suite including E2E. Requires docker-compose stack.
