@@ -137,8 +137,22 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 - HLL pipeline: Kafka → HLL → DDB BytesStore CAS (`hll_test.go`)
 - Windowed counters with `Last1/2/3/7/10/30Days` queries (`windowed_test.go`)
 - Mongo bootstrap with Change Stream resume token (`mongo_bootstrap_test.go`)
+- DDB ParallelScan bootstrap with re-run idempotency under DDB-backed Deduper (`ddb_bootstrap_test.go`)
 - S3 replay into a shadow table (`s3_replay_test.go`)
 - Spark Connect batch SUM aggregation → DDB (`spark_connect_test.go`)
+
+## Production-readiness packages
+
+Beyond the core pipeline DSL, several packages exist to make Murmur deployable:
+
+- [`pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`](pkg/exec/lambda/) — three Lambda runtimes for the AWS-native event sources, all sharing the same retry / dedup / BatchItemFailures contract via [`pkg/exec/processor`](pkg/exec/processor/).
+- [`pkg/source/snapshot/{mongo,dynamodb,jsonl,s3}`](pkg/source/snapshot/) — bootstrap sources for the four common shapes: Mongo collections, DynamoDB ParallelScan, raw JSON Lines, and S3-prefix-scan-of-JSON-Lines for partitioned archives.
+- [`pkg/state/{dynamodb,valkey}`](pkg/state/) — DDB as source-of-truth (Int64SumStore / BytesStore + Deduper), Valkey as cache (Int64Cache / BytesCache + warmup helpers in `pkg/query`).
+- [`pkg/query/grpc`](pkg/query/grpc/) — Connect-RPC server speaking gRPC + gRPC-Web + Connect/HTTP-JSON on one port. Singleflight coalescing + `fresh_read` flag + per-RPC metrics + batched windowed reads (`GetWindowMany` / `GetRangeMany`).
+- [`pkg/projection`](pkg/projection/) — bucket functions (`LogBucket` / `LinearBucket` / `ManualBucket`) + `HysteresisBucket` for change-data-capture into search indices.
+- [`pkg/observability/autoscale`](pkg/observability/autoscale/) — `Signal → Emitter` loop for publishing scaling-signal metrics. Reference CloudWatch emitter for ECS Fargate target tracking on Kafka consumer lag / Kinesis iterator-age / events-per-second.
+- [`pkg/state.NewInstrumented`](pkg/state/instrumented.go) — decorator for any `Store[V]` / `Cache[V]` that adds metrics.Recorder hooks (per-op latency + errors). Zero-overhead when the recorder is nil.
+- [`pkg/murmur`](pkg/murmur/) — facade with the common-case presets (`Counter`, `UniqueCount`, `TopN`, `Trending`) plus `RunStreamingWorker` and the Lambda-side `KinesisHandler` / `DynamoDBStreamsHandler` / `SQSHandler` / `MustHandler` wrappers.
 
 ## Worked examples
 
