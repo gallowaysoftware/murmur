@@ -122,6 +122,15 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 		return false
 	}
 	delta := a.valueFn(rec.Value)
+	// Value-debounce: drop records where (entityKey, value) was already
+	// seen within the value-debounce window. Runs AFTER key-debounce
+	// and EventID dedup so that all three skip metrics are independent.
+	if a.cfg.valueDebouncer != nil {
+		if a.cfg.valueDebouncer.shouldDrop(keys[0], fingerprintValue(delta)) {
+			a.cfg.Recorder.RecordEvent(a.name + ":value_debounce_skip")
+			return true
+		}
+	}
 	eventTime := rec.EventTime
 	if eventTime.IsZero() {
 		eventTime = time.Now()
