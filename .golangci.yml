@@ -1,5 +1,7 @@
-# golangci-lint v1.62+ config for Murmur.
+# golangci-lint v2 config for Murmur.
 # Run locally with `golangci-lint run ./...` or `make lint`.
+
+version: "2"
 
 run:
   timeout: 5m
@@ -30,6 +32,8 @@ linters:
       checks: ["all", "-ST1003"]
 
   exclusions:
+    paths:
+      - web/node_modules
     rules:
       - path: _test\.go
         linters:

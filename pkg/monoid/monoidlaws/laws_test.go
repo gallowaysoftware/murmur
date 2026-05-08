@@ -43,6 +43,15 @@ func TestMax_Int(t *testing.T) {
 	})
 }
 
+func TestMonotonic_Int64(t *testing.T) {
+	// Identity = math.MinInt64 so Combine(Identity, x) == x for all x including
+	// negative values. The runtime contract for Monotonic is the same shape as
+	// Max but over raw V (no Bounded[V] wrapper) — pairs with Int64MaxStore.
+	monoidlaws.TestMonoid(t, core.Monotonic[int64](math.MinInt64), func(i int) int64 {
+		return int64(i*3 - 50)
+	})
+}
+
 func TestSet_String(t *testing.T) {
 	// nil and empty map are both "the empty set" under Set semantics, so use a
 	// length-aware equality rather than DeepEqual.

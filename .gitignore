@@ -18,8 +18,10 @@ coverage.html
 .DS_Store
 *.swp
 
-# Go workspace
-go.work
+# Go workspace — go.work is COMMITTED so the multi-module structure
+# (root + pkg/exec/batch/sparkconnect submodule) composes the same way
+# in CI as in local dev. go.work.sum is the workspace-level cache and
+# stays out of version control.
 go.work.sum
 
 # Local dev

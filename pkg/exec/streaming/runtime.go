@@ -27,10 +27,32 @@ type RunOption func(*runConfig)
 
 type runConfig struct {
 	processor.Config
-	deadLetter   func(eventID string, err error)
-	batchWindow  time.Duration
-	maxBatchSize int
-	concurrency  int
+	deadLetter     func(eventID string, err error)
+	batchWindow    time.Duration
+	maxBatchSize   int
+	concurrency    int
+	keyDebounce    time.Duration
+	keyDebounceMax int
+
+	// debouncer is materialized once in Run when keyDebounce > 0 and
+	// reused across the per-record processing path. Concurrency-safe.
+	debouncer *keyDebouncer
+}
+
+// debounceAllow returns false when a record's first-emitted key was
+// already seen within the debounce window. Caller should Ack-and-skip
+// when this returns false. Returns true (allow) when:
+//   - the debouncer is unconfigured
+//   - keys is empty (the underlying MergeMany no-ops on no keys anyway)
+//   - the first key has not been seen within the window
+func (c *runConfig) debounceAllow(keys []string) bool {
+	if c.debouncer == nil {
+		return true
+	}
+	if len(keys) == 0 {
+		return true
+	}
+	return !c.debouncer.shouldDrop(keys[0])
 }
 
 // WithMetrics installs a metrics.Recorder on the runtime. Defaults to metrics.Noop{}.
@@ -197,6 +219,9 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 	cfg := runConfig{Config: processor.Defaults()}
 	for _, o := range opts {
 		o(&cfg)
+	}
+	if cfg.keyDebounce > 0 {
+		cfg.debouncer = newKeyDebouncer(cfg.keyDebounce, cfg.keyDebounceMax)
 	}
 
 	name := p.Name()
@@ -426,8 +451,18 @@ func processWithRetry[T any, V any](
 	if eventTime.IsZero() {
 		eventTime = time.Now()
 	}
+	keys := keysFn(rec.Value)
+	if !cfg.debounceAllow(keys) {
+		// Duplicate-key record within the debounce window — drop the
+		// processor work but still Ack so the source advances.
+		cfg.Recorder.RecordEvent(name + ":debounce_skip")
+		if rec.Ack != nil {
+			_ = rec.Ack()
+		}
+		return
+	}
 	err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
-		keysFn(rec.Value), valueFn(rec.Value), store, cache, window)
+		keys, valueFn(rec.Value), store, cache, window)
 	if err != nil {
 		// Either context cancellation (just return; the runtime is exiting
 		// anyway) or retry exhaustion. processor.MergeOne already recorded

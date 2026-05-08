@@ -97,6 +97,15 @@ func newAggregator[T any, V any](
 // record's delta into every emitted-key's batch. Returns true if the record
 // was dropped as a duplicate (caller should still Ack to advance the source).
 func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (dup bool) {
+	keys := a.keysFn(rec.Value)
+	// Key-debounce check happens BEFORE EventID dedup (different
+	// concerns — EventID dedup catches at-least-once redeliveries;
+	// key debounce drops noisy duplicate-key cache-fill events).
+	if !a.cfg.debounceAllow(keys) {
+		a.cfg.Recorder.RecordEvent(a.name + ":debounce_skip")
+		return true
+	}
+
 	if a.cfg.Dedup != nil && rec.EventID != "" {
 		first, err := a.cfg.Dedup.MarkSeen(ctx, rec.EventID)
 		if err != nil {
@@ -109,7 +118,6 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 		}
 	}
 
-	keys := a.keysFn(rec.Value)
 	if len(keys) == 0 {
 		return false
 	}
