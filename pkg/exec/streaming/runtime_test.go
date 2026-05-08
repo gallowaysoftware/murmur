@@ -80,7 +80,7 @@ func (*flakyStore) Close() error { return nil }
 func newPipe(src source.Source[int], store state.Store[int64]) *pipeline.Pipeline[int, int64] {
 	return pipeline.NewPipeline[int, int64]("test").
 		From(src).
-		Key(func(i int) string { return fakeEventID(i) }).
+		Key(fakeEventID).
 		Value(func(int) int64 { return 1 }).
 		Aggregate(core.Sum[int64]()).
 		StoreIn(store)

@@ -41,6 +41,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := example.Config{
 		DDBEndpoint:     os.Getenv("DDB_ENDPOINT"),
 		DDBTable:        envOr("DDB_TABLE", "recently_interacted"),
@@ -58,7 +62,7 @@ func main() {
 	_, store, _, err := example.Build(ctx, cfg)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = store.Close() }()
 
@@ -94,9 +98,10 @@ func main() {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http Serve returned", "err", err)
-			os.Exit(1)
+			return 1
 		}
 	}
+	return 0
 }
 
 func envOr(key, fallback string) string {

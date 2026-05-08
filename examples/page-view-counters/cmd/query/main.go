@@ -37,6 +37,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := pageviews.Config{
 		DDBEndpoint:     os.Getenv("DDB_LOCAL_ENDPOINT"),
 		DDBTable:        envOr("DDB_TABLE", "page_views"),
@@ -55,7 +59,7 @@ func main() {
 	_, store, cache, err := pageviews.Build(ctx, cfg, false)
 	if err != nil {
 		logger.Error("build pipeline", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() {
 		if cache != nil {
@@ -99,9 +103,10 @@ func main() {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http Serve returned", "err", err)
-			os.Exit(1)
+			return 1
 		}
 	}
+	return 0
 }
 
 func envOr(key, fallback string) string {

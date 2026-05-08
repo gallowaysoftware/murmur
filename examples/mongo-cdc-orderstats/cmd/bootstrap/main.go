@@ -29,6 +29,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := orderstats.Config{
 		MongoURI:        envOr("MONGO_URI", "mongodb://localhost:27017/?replicaSet=rs0&directConnection=true"),
 		MongoDB:         envOr("MONGO_DB", "shop"),
@@ -44,10 +48,10 @@ func main() {
 	pipe, src, store, err := orderstats.BuildBootstrap(ctx, cfg)
 	if err != nil {
 		logger.Error("build", "err", err)
-		os.Exit(2)
+		return 2
 	}
-	defer src.Close()
-	defer store.Close()
+	defer func() { _ = src.Close() }()
+	defer func() { _ = store.Close() }()
 
 	rec := metrics.NewInMemory()
 
@@ -58,7 +62,7 @@ func main() {
 	token, err := bootstrap.Run(ctx, pipe, src, bootstrap.WithMetrics(rec))
 	if err != nil {
 		logger.Error("bootstrap.Run", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	snap := rec.SnapshotOne("order_totals")
@@ -69,6 +73,7 @@ func main() {
 	// Emit the resume token on stdout in two forms: raw bytes (for piping into
 	// a deployment system) and hex (for humans / CloudWatch logs).
 	fmt.Printf("%s\n", hex.EncodeToString(token))
+	return 0
 }
 
 func envOr(key, fallback string) string {

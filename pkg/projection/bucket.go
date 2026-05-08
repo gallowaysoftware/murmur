@@ -75,7 +75,7 @@ func LogBucket(v int64) int {
 // 0–1000 with bandSize=100 → 10 buckets).
 //
 // Negative values map to negative bucket IDs (truncation toward zero
-// follows Go's integer-divison semantics).
+// follows Go's integer-division semantics).
 func LinearBucket(bandSize int64) BucketFn {
 	if bandSize <= 0 {
 		bandSize = 1

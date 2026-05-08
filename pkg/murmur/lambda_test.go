@@ -94,7 +94,7 @@ func TestDynamoDBStreamsHandler_BuildsAndProcesses(t *testing.T) {
 	pipe := newLambdaPipe(store)
 	handler, err := murmur.DynamoDBStreamsHandler(pipe,
 		func(rec *events.DynamoDBEventRecord) (lambdaEvent, error) {
-			pk, _ := rec.Change.Keys["pk"]
+			pk := rec.Change.Keys["pk"]
 			return lambdaEvent{K: pk.String()}, nil
 		},
 		murmur.LambdaConfig{},

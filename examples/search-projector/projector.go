@@ -199,7 +199,7 @@ func decodeInt64(image map[string]events.DynamoDBAttributeValue, attr string) (i
 	return n, true
 }
 
-// MarshalStats returns a JSON snapshot of the projector counters. Useful
+// MarshalJSON returns a JSON snapshot of the projector counters. Useful
 // for the Lambda warmup path or as a debug endpoint when running locally.
 func (s *Stats) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {

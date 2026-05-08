@@ -124,7 +124,7 @@ func (d *Driver[T]) replayOne(ctx context.Context, key string, out chan<- source
 	if err != nil {
 		return fmt.Errorf("s3 GetObject %s/%s: %w", d.bucket, key, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	scanner := bufio.NewScanner(resp.Body)
 	// Allow large lines; default 64KB is too small for some Firehose buffer sizes.
