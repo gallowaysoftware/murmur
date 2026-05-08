@@ -14,7 +14,7 @@ edges callers should plan around.
 | `pkg/monoid/sketch/{hll,topk,bloom}` | experimental | `Combine` returning the wrong operand on decode error is tracked; cross-runtime encoding portability not yet proven |
 | `pkg/monoid/compose` | experimental | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
-| `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1 |
+| `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1. `state.NewInstrumented` / `state.NewInstrumentedCache` decorate any store/cache with metrics.Recorder hooks (store_get / store_get_many / store_merge_update / cache_get / cache_repopulate latencies + errors) |
 | `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy |
 | `pkg/state/valkey` | experimental | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes). No native PFADD path — Valkey-native HLL is incompatible with axiomhq's encoding; bridging is roadmap |
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
