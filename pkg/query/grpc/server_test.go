@@ -12,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	mgrpc "github.com/gallowaysoftware/murmur/pkg/query/grpc"
@@ -284,6 +285,34 @@ func TestQuery_Get_CoalescesConcurrentReads(t *testing.T) {
 	// where some waiters reach the singleflight after the first resolves.
 	if got := store.gets.Load(); got > 3 {
 		t.Errorf("store.Get calls: got %d, want ~1 (max 3 with scheduling slop)", got)
+	}
+}
+
+func TestQuery_RecorderFiresLatency(t *testing.T) {
+	store := fakeStore{state.Key{Entity: "x"}: 5}
+	rec := metrics.NewInMemory()
+	client, cleanup := startServer(t, mgrpc.Config[int64]{
+		Store:    store,
+		Monoid:   core.Sum[int64](),
+		Encode:   mgrpc.Int64LE(),
+		Recorder: rec,
+		Pipeline: "page_views",
+	})
+	defer cleanup()
+
+	for i := 0; i < 5; i++ {
+		_, err := client.Get(context.Background(), connect.NewRequest(&pb.GetRequest{Entity: "x"}))
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+	}
+	snap := rec.SnapshotOne("page_views")
+	if got := snap.Latencies["query_get"].N; got < 1 {
+		t.Errorf("query_get latency samples: got %d, want >=1", got)
+	}
+	evSnap := rec.SnapshotOne("page_views:query_get")
+	if evSnap.EventsProcessed != 5 {
+		t.Errorf("query_get events: got %d, want 5", evSnap.EventsProcessed)
 	}
 }
 

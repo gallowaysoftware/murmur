@@ -35,6 +35,7 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/query"
@@ -71,11 +72,13 @@ func BytesIdentity() Encoder[[]byte] {
 // underlying store call. The dedup window is the lifetime of the in-flight
 // call — once the future resolves, the next request is fresh.
 type Server[V any] struct {
-	store  state.Store[V]
-	mon    monoid.Monoid[V]
-	window *windowed.Config
-	encode Encoder[V]
-	nowFn  func() time.Time
+	store    state.Store[V]
+	mon      monoid.Monoid[V]
+	window   *windowed.Config
+	encode   Encoder[V]
+	nowFn    func() time.Time
+	recorder metrics.Recorder
+	pipeline string
 
 	// sf coalesces concurrent identical reads. Cheap when traffic is cold
 	// (a no-op fastpath); huge wins on hot keys at feed-render time.
@@ -92,6 +95,21 @@ type Config[V any] struct {
 	// Now, if non-nil, overrides the time.Now used for sliding-window queries. Useful
 	// for tests with deterministic clocks.
 	Now func() time.Time
+
+	// Recorder, if non-nil, receives per-RPC latency, error, and event
+	// metrics. The streaming runtime records "store_merge" / "cache_merge"
+	// latency under the pipeline name; the query side records
+	// "<pipeline>:query_get", "<pipeline>:query_get_many",
+	// "<pipeline>:query_get_window", "<pipeline>:query_get_range",
+	// "<pipeline>:query_get_window_many", "<pipeline>:query_get_range_many".
+	// Use a metrics.InMemory in development; a Prometheus / CloudWatch
+	// adapter in production.
+	Recorder metrics.Recorder
+
+	// Pipeline names this query server's parent pipeline for metrics
+	// labels. Defaults to "query" when unset; set explicitly when one
+	// process serves multiple pipelines.
+	Pipeline string
 }
 
 // NewServer constructs a query Server.
@@ -100,12 +118,22 @@ func NewServer[V any](cfg Config[V]) *Server[V] {
 	if now == nil {
 		now = time.Now
 	}
+	rec := cfg.Recorder
+	if rec == nil {
+		rec = metrics.Noop{}
+	}
+	pipe := cfg.Pipeline
+	if pipe == "" {
+		pipe = "query"
+	}
 	return &Server[V]{
-		store:  cfg.Store,
-		mon:    cfg.Monoid,
-		window: cfg.Window,
-		encode: cfg.Encode,
-		nowFn:  now,
+		store:    cfg.Store,
+		mon:      cfg.Monoid,
+		window:   cfg.Window,
+		encode:   cfg.Encode,
+		nowFn:    now,
+		recorder: rec,
+		pipeline: pipe,
 	}
 }
 
@@ -158,6 +186,12 @@ func (s *Server[V]) Handler() (string, http.Handler) {
 // read — used for read-your-writes ("user just liked this; show their
 // like count").
 func (s *Server[V]) Get(ctx context.Context, req *connect.Request[pb.GetRequest]) (*connect.Response[pb.GetResponse], error) {
+	start := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get", time.Since(start))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get")
+
 	entity := req.Msg.GetEntity()
 	doGet := func() (V, bool, error) { return query.Get(ctx, s.store, entity) }
 
@@ -185,12 +219,19 @@ func (s *Server[V]) Get(ctx context.Context, req *connect.Request[pb.GetRequest]
 // for many entities in one round-trip; the response preserves request order
 // so clients can zip without an extra index map.
 func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetManyRequest]) (*connect.Response[pb.GetManyResponse], error) {
+	start := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get_many", time.Since(start))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get_many")
+
 	keys := make([]state.Key, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
 		keys[i] = state.Key{Entity: e}
 	}
 	vals, oks, err := s.store.GetMany(ctx, keys)
 	if err != nil {
+		s.recorder.RecordError(s.pipeline, err)
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	out := &pb.GetManyResponse{Values: make([]*pb.Value, len(req.Msg.GetEntities()))}
@@ -213,6 +254,12 @@ func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetMany
 // coalesce key includes the bucketed `now` so two requests one second apart
 // can share work, while requests across a bucket boundary do not.
 func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWindowRequest]) (*connect.Response[pb.GetWindowResponse], error) {
+	start := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get_window", time.Since(start))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get_window")
+
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
@@ -254,6 +301,12 @@ func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWi
 // is fully specified by the caller, so identical concurrent ranges share
 // work directly.
 func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRangeRequest]) (*connect.Response[pb.GetRangeResponse], error) {
+	t0 := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get_range", time.Since(t0))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get_range")
+
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
@@ -292,6 +345,12 @@ func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRan
 // fresh_read bypasses singleflight. The default path coalesces concurrent
 // identical requests at the (sorted-entities, duration, bucket) granularity.
 func (s *Server[V]) GetWindowMany(ctx context.Context, req *connect.Request[pb.GetWindowManyRequest]) (*connect.Response[pb.GetWindowManyResponse], error) {
+	t0 := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get_window_many", time.Since(t0))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get_window_many")
+
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use GetMany instead"))
 	}
@@ -332,6 +391,12 @@ func (s *Server[V]) GetWindowMany(ctx context.Context, req *connect.Request[pb.G
 // GetRangeMany implements murmur.v1.QueryService/GetRangeMany. Same shape
 // as GetWindowMany over an absolute [start_unix, end_unix] range.
 func (s *Server[V]) GetRangeMany(ctx context.Context, req *connect.Request[pb.GetRangeManyRequest]) (*connect.Response[pb.GetRangeManyResponse], error) {
+	t0 := time.Now()
+	defer func() {
+		s.recorder.RecordLatency(s.pipeline, "query_get_range_many", time.Since(t0))
+	}()
+	s.recorder.RecordEvent(s.pipeline + ":query_get_range_many")
+
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use GetMany instead"))
 	}
