@@ -146,6 +146,7 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 - [`examples/mongo-cdc-orderstats/`](examples/mongo-cdc-orderstats/) — Mongo collection bootstrap → Kafka CDC live, with upstream-id dedup so re-deliveries fold idempotently.
 - [`examples/recently-interacted-topk/`](examples/recently-interacted-topk/) — single Top-N pipeline fed by **two sources at once**: Kinesis (consumed via an AWS Lambda trigger) plus Kafka (consumed by a long-running ECS worker). Both binaries write through the same DDB row; the Misra-Gries `Combine` produces a unified ranking across channels.
 - [`examples/search-projector/`](examples/search-projector/) — runnable Pattern B from [`doc/search-integration.md`](doc/search-integration.md): a Lambda that tails Murmur's counter table via DDB Streams and projects bucket transitions into an OpenSearch index, reducing search-side index write rate from per-event to per-order-of-magnitude (~6 reindexes for a 0→1M counter rise vs 1M).
+- [`examples/search-rerank/`](examples/search-rerank/) — runnable Pattern A from the same doc: an HTTP search service that does two-stage retrieval (OpenSearch recall + Murmur counter rerank). Pairs with the search-projector to form the canonical "filter on bucket + rank by live counters" shape.
 
 ## Web UI and admin API
 

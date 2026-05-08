@@ -299,6 +299,20 @@ The two interesting cells are the diagonal extremes:
   hot custom-monoid keys, configure a Valkey cache (see Section 7) to
   absorb the RMW storm.
 
+```mermaid
+flowchart TB
+    subgraph DSL["Pipeline DSL"]
+      M["Monoid[V] with Kind()"]
+    end
+    M --> Dispatch{Kind?}
+    Dispatch -->|"Sum / Count<br/>(int64)"| ADD["DDB UpdateItem<br/>ADD :delta<br/>Int64SumStore"]
+    Dispatch -->|"HLL / TopK / Bloom /<br/>Min / Max / Set / ..."| CAS["DDB GetItem +<br/>ConditionalUpdate<br/>BytesStore + retry"]
+    Dispatch -->|"Sum / Count"| INC["Valkey INCRBY<br/>Int64Cache"]
+    Dispatch -->|"sketches"| BC["Valkey GET / SET<br/>BytesCache + RMW"]
+    Dispatch -->|"any well-known"| SQL["Spark SQL UDAF<br/>codegen (Phase 2)"]
+    Dispatch -->|"KindCustom"| Go["Go closure only<br/>BytesStore CAS"]
+```
+
 The dispatch is *static* at pipeline construction time — the Store
 implementation is chosen by the user (`Int64SumStore` for KindSum,
 `BytesStore[V]` with the right monoid for the rest). It's not a runtime
@@ -1176,6 +1190,24 @@ diagram applies: the same `pipeline.Pipeline[T, V]` plugs into
 `streaming.Run` for ECS Fargate or into `lambda/kinesis.NewHandler` for
 Lambda, with no code change beyond the entry point.
 
+```mermaid
+flowchart LR
+    subgraph AWS["AWS event sources"]
+      K[(Kinesis)]
+      D[(DDB Streams)]
+      S[(SQS)]
+    end
+    K -->|"event-source<br/>mapping"| LK["lambda/kinesis<br/>NewHandler"]
+    D -->|"event-source<br/>mapping"| LD["lambda/dynamodbstreams<br/>NewHandler"]
+    S -->|"event-source<br/>mapping"| LS["lambda/sqs<br/>NewHandler"]
+    LK -->|"Decoder[T]"| Proc["processor.MergeMany<br/>retry / dedup / metrics"]
+    LD -->|"Decoder[T]"| Proc
+    LS -->|"Decoder[T]"| Proc
+    Proc -->|"MergeUpdate"| Store[(DDB state)]
+    Proc -->|"MarkSeen"| Dedup[(DDB dedup)]
+    Proc -->|"on retry exhaust"| BIF["BatchItemFailures<br/>response"]
+```
+
 ### 6.2 What the Lambda variants share
 
 All three variants share the per-record contract from Section 5.3:
@@ -1653,6 +1685,23 @@ addition):
    pipeline's TTL. Fire-and-forget; failures log but don't fail the
    read.
 
+```mermaid
+flowchart TB
+    subgraph Write["Write path"]
+      W[Streaming runtime]
+      W -->|"1: MergeUpdate<br/>(must succeed)"| DDB[(DDB Store<br/>source of truth)]
+      W -->|"2: MergeUpdate<br/>(best effort)"| VK[(Valkey Cache<br/>accelerator)]
+    end
+    subgraph Read["Read path"]
+      R[Query runtime]
+      R -->|"1: Get<br/>(try cache)"| VK2[(Valkey Cache)]
+      VK2 -->|"hit"| Result[Return value]
+      VK2 -->|"miss"| DDB2[(DDB Store)]
+      DDB2 -->|"3: Repopulate<br/>(fire and forget)"| VK2
+      DDB2 -->|"value"| Result
+    end
+```
+
 The asymmetry — cache writes are write-through, cache reads have a
 fall-through — is the right shape for "DDB is truth, Valkey
 accelerates." A misconfigured cache is a perf problem, not a
@@ -1765,6 +1814,29 @@ bucket; 720 buckets means 720 sketch merges in process. The
 singleflight coalescing layer absorbs concurrent identical queries
 into one underlying fold; sustained high cardinality of distinct
 queries is when the cost surfaces.
+
+```mermaid
+flowchart LR
+    subgraph Q["Six query RPCs"]
+      G[Get]
+      GM[GetMany]
+      GW[GetWindow]
+      GR[GetRange]
+      GWM[GetWindowMany]
+      GRM[GetRangeMany]
+    end
+    Q --> SF["singleflight.Group<br/>coalesce duplicates"]
+    SF --> Compute{"Bucket math"}
+    Compute -->|"all-time<br/>(Get / GetMany)"| K["Key{Entity, Bucket=0}"]
+    Compute -->|"sliding window"| KS["Key{Entity, Bucket=lo..hi}<br/>via windowed.LastN"]
+    Compute -->|"absolute range"| KR["Key{Entity, Bucket=lo..hi}<br/>via windowed.BucketRange"]
+    K --> SG["Store.Get / GetMany"]
+    KS --> SG
+    KR --> SG
+    SG --> Fold["Fold via monoid<br/>Combine"]
+    Fold --> Encode["Encoder[V]<br/>(Int64LE / BytesIdentity / ...)"]
+    Encode --> Wire["Value{present, data}"]
+```
 
 ### 8.3 Singleflight coalescing
 
@@ -2285,4 +2357,625 @@ The generic shape is what Phase 1 ships; the typed shape is the
 roadmap. Today, decoders live client-side; tomorrow, they'll be
 generated from the pipeline definition.
 
-<!-- next-section -->
+## 13. Operational shape
+
+Murmur is AWS-shaped. The Terraform modules in
+`deploy/terraform/modules/pipeline-counter/` provision the canonical
+deployment: ECS Fargate streaming worker, DDB state table, optional
+Valkey ElastiCache cluster, ALB-fronted query service, IAM roles, and
+CloudWatch dashboards. This section walks the deployment posture
+without re-stating the architecture doc's full Terraform inventory.
+
+### 13.1 The streaming-worker shape
+
+The default deployment is a streaming worker on ECS Fargate.
+Configuration is environment-variable driven:
+
+- `MURMUR_PIPELINE_NAME` — the pipeline name (must match the binary's
+  hard-coded pipeline definition).
+- `MURMUR_KAFKA_BROKERS` / `MURMUR_KAFKA_TOPIC` /
+  `MURMUR_KAFKA_GROUP` — for Kafka-backed pipelines.
+- `MURMUR_DDB_TABLE` — the alias name (resolves through the swap
+  pointer to the active version).
+- `MURMUR_DEDUP_TABLE` — the dedup table (optional but strongly
+  recommended for non-idempotent monoids).
+- `MURMUR_VALKEY_ADDR` — for cache-accelerated pipelines.
+
+The worker binary is single-purpose — one Murmur pipeline per binary,
+because the pipeline definition is compiled in. Multi-pipeline workers
+are supported (one process can host multiple `streaming.Run`
+goroutines, sharing the source if compatible) but are not the default
+shape; the per-pipeline binary is operationally cleaner.
+
+ECS Fargate task sizing: the workload is mostly network-bound (DDB
+calls). 0.25 vCPU / 0.5 GB is fine for moderate pipelines; 1 vCPU /
+2 GB handles 10k+ events/sec/worker. Memory pressure shows up only
+when `WithBatchWindow` is configured with high concurrency — the
+in-flight delta accumulator can grow to maxBatch × concurrent-keys
+records.
+
+### 13.2 The Lambda-trigger shape
+
+Lambda variants deploy as standard Lambda functions with event-source
+mappings:
+
+- **Kinesis trigger**: event-source-mapping from the Kinesis stream
+  with `StartingPosition=LATEST`, `BatchSize=100`,
+  `FunctionResponseTypes=["ReportBatchItemFailures"]`,
+  `MaximumBatchingWindowInSeconds=5`.
+- **DDB Streams trigger**: same shape against the DDB stream with
+  `StreamViewType=NEW_AND_OLD_IMAGES` (both images required for
+  CDC and projector use cases).
+- **SQS trigger**: standard SQS event-source mapping with
+  `BatchSize=100`,
+  `FunctionResponseTypes=["ReportBatchItemFailures"]`,
+  `MaximumBatchingWindowInSeconds=20` (tuneable per workload).
+
+The Lambda function's IAM role needs DDB read/write on the state
+table and dedup table, plus the source-specific read permission
+(Kinesis GetRecords, DDB Streams GetRecords, SQS ReceiveMessage).
+
+The terraform module for Lambda-shaped deployments is sketched in
+the architecture doc as a planned addition; today, the deploy is
+manual or via a sibling module specific to the user's stack.
+
+### 13.3 The query service shape
+
+The query service (`pkg/query/grpc.NewServer`) is an HTTP server
+mounted on a single port. Deployment options:
+
+- **ALB + ECS Fargate**: the Terraform default. The ALB terminates
+  TLS; ECS hosts the query binary. Autoscale on request-count or
+  CPU.
+- **API Gateway + Lambda**: for low-volume pipelines. The query
+  binary runs as a Lambda function behind API Gateway; same
+  Connect-RPC routes work over the API Gateway HTTP integration.
+- **Standalone**: bare process on an EC2 instance or VM. Fine for
+  development; not the production posture.
+
+The query service is stateless except for its in-memory
+`metrics.InMemory` recorder (which the admin UI consumes). Multiple
+replicas are independent; load-balance any way that's convenient.
+
+### 13.4 Multi-pipeline deployments
+
+A single Murmur deployment can host many pipelines. The shape:
+
+- One DDB table per pipeline (or per pipeline-group with disjoint
+  key prefixes; see `KeyByMany`).
+- One dedup table shared across pipelines (the dedup-table partition
+  key includes the pipeline name to avoid cross-pipeline collisions).
+- One Valkey cluster shared across pipelines (with disjoint
+  `keyPrefix` configuration).
+- One streaming-worker binary per pipeline (one ECS Fargate service
+  per pipeline; or one Lambda function per pipeline).
+- One query service per pipeline-group (a single
+  `grpc.NewServer` can mount handlers for multiple pipelines on
+  shared routes; the Phase 2 codegen will make this typed-per-pipeline).
+
+The cost shape scales linearly with pipeline count for the worker
+side and sublinearly for the storage / cache side (shared
+infrastructure with per-pipeline namespacing). For platform teams
+running 50+ pipelines, the cost model is "one shared cluster, many
+small workers." For product teams running 1-3 pipelines, the model
+is "self-contained per pipeline."
+
+### 13.5 Configuration and secrets
+
+The framework doesn't ship a configuration system. Pipeline
+definitions are Go code, compiled into the worker binary. Runtime
+configuration (broker URLs, table names, Kafka group IDs) is
+environment-variable driven, sourced from AWS Systems Manager
+Parameter Store or AWS Secrets Manager via the deployment shape.
+
+The Connect-RPC services are unauthenticated by default. Both the
+admin and query services expose their full surface to whoever can
+reach the port. Production deployments should put auth in front: an
+ALB with mTLS, an API Gateway with IAM authorizers, or a sidecar
+proxy that handles auth before forwarding. The admin service has a
+`WithAllowedOrigins` CORS toggle but no auth middleware
+(`STABILITY.md:34`); this is a known gap.
+
+## 14. Failure model
+
+Murmur is a distributed system and every component can fail. The
+framework's design is deliberate about which failures are
+*correctness-affecting* (must be caught, must be tested) and which
+are *availability-affecting* (degrade gracefully, surface clearly).
+This section walks each subsystem's failure modes.
+
+```mermaid
+flowchart TB
+    subgraph Sources["Source failures"]
+      SD["Source disconnects<br/>(Kafka / Kinesis / Lambda)"]
+      SD --> Reconnect["Auto-reconnect<br/>+ resume from last commit"]
+      Reconnect --> Dedup1["Dedup catches<br/>re-deliveries"]
+    end
+    subgraph Workers["Worker failures"]
+      WC["Worker crashes"]
+      WC --> NoAck["In-flight records not Ack'd"]
+      NoAck --> Replay["Source replays on restart"]
+      Replay --> Dedup2["Dedup catches duplicates"]
+    end
+    subgraph Storage["Storage failures"]
+      DDBT["DDB throttle / unavailable"]
+      DDBT --> Retry["Processor retry loop<br/>(8 attempts, jittered)"]
+      Retry -->|"exhausted"| DLQ["Dead-letter callback<br/>+ metrics.RecordError"]
+      VKL["Valkey lost"]
+      VKL --> Degrade["Cache miss → DDB fall-through<br/>p99 doubles temporarily"]
+      Degrade --> Warmup["WarmupKeys<br/>or organic refill"]
+    end
+```
+
+### 14.1 The streaming worker dies
+
+A worker crash mid-batch:
+
+- Records that were processed and Ack'd before the crash: persisted
+  in DDB, no replay.
+- Records in the source's in-flight buffer: redelivered on restart,
+  caught by dedup if configured.
+- Records in the `WithBatchWindow` accumulator: lost from the
+  accumulator, but redelivered by the source (since they weren't
+  Ack'd), and re-aggregated on restart. Dedup catches the first
+  redelivery; the second is the real apply.
+
+The result: at-least-once with no data loss, modulo the edge case
+where dedup is disabled for a non-idempotent monoid (then crashes
+double-count by the in-flight buffer's worth of records).
+
+### 14.2 DDB throttles or is unavailable
+
+- DDB throttling: surfaces as `ProvisionedThroughputExceededException`.
+  The processor's retry loop catches it; with default 8-attempt
+  exponential backoff, sustained throttling causes per-record
+  failures (visible in the `:retry` and `:dead_letter` metrics).
+  Mitigation: increase DDB capacity, or enable `WithBatchWindow` to
+  collapse hot-key writes.
+- DDB unavailable (AZ failure): the SDK retries automatically across
+  AZs; the framework sees this as latency, not failure. A whole-region
+  DDB failure surfaces as sustained errors; the worker's retry
+  budget exhausts and records dead-letter.
+
+The query layer behaves identically: read failures surface as RPC
+errors (Connect's `unavailable` code); singleflight collapses
+concurrent retries.
+
+### 14.3 Valkey is lost
+
+The framework's invariant is that DDB is the source of truth; Valkey
+is a cache. Loss of Valkey degrades performance but not correctness:
+
+- Streaming-side: cache MergeUpdate failures are logged and
+  ignored; the Store write already succeeded.
+- Query-side: cache fall-through to DDB on miss. p99 read latency
+  doubles temporarily (DDB direct reads are slower than cache
+  hits); throughput unchanged.
+
+Recovery: Valkey nodes restart, the cache is cold, fall-through
+fills it organically. `pkg/query.WarmupKeys` accelerates the
+recovery for known-popular keys.
+
+### 14.4 The source disconnects
+
+- Kafka: franz-go reconnects automatically with exponential
+  backoff. Consumer-group rebalance reassigns partitions; the
+  worker picks up from the last committed offset.
+- Kinesis (Phase 1, single-instance): reconnects per-shard; lag
+  accumulates during the disconnect and is bounded by the
+  stream's retention horizon.
+- DDB Streams (Lambda): Lambda's runtime handles reconnection;
+  the Murmur handler is invoked per batch, so disconnects are
+  invisible to the framework code.
+- SQS (Lambda): same as DDB Streams.
+
+In all cases, dedup catches re-deliveries that arrive during the
+reconnect window.
+
+### 14.5 The handoff token is lost or corrupted
+
+If the handoff token from bootstrap is lost (operator deletes it,
+the persistence layer fails), the live source can't resume from
+the right point. Two recovery options:
+
+1. **Re-run bootstrap.** The collection scan is idempotent (with
+   dedup); a fresh scan + fresh handoff token works. The cost is
+   the scan time and the dedup-table write rate during the scan.
+2. **Start live from `LATEST`.** Skip the bootstrap-time gap;
+   accept the data loss for events written between bootstrap-end
+   and live-start.
+
+The framework doesn't choose for the operator; the choice depends
+on whether the gap matters. For "page view counts," it usually
+doesn't (some hours of low-fidelity counts is fine). For "order
+totals," it does (every order must be counted).
+
+### 14.6 The swap regresses
+
+`swap.Manager.SetActive` is conditional on `ver > current_ver`.
+Concurrent swap attempts can't downgrade the version. The risk shape
+is "live writers continue writing to the old version after the swap":
+
+- Mitigation 1: workers reload the alias on a deploy. The deploy
+  cadence is the bound on stale-write duration.
+- Mitigation 2: a grace period during which the old version is
+  still readable. Readers might see slightly stale data, but the
+  underlying writes aren't lost.
+- Mitigation 3 (Phase 2): an admin RPC that triggers an alias
+  reload across all live workers.
+
+The Phase 1 shape is "operator-managed grace period." The Phase 2
+shape is "framework-managed reload via admin RPC." Today, plan for
+the operator-managed version.
+
+### 14.7 The Spark Connect endpoint is down
+
+The sparkconnect executor errors immediately on connection failure.
+The orchestration layer (Step Functions, Airflow) retries the
+backfill. The state table the backfill was writing to remains in
+place — it's a fresh shadow table, so partial writes don't affect
+the live alias. On retry, the backfill either resumes (if the SQL
+is idempotent under partial commit, which most aggregation SQL is)
+or starts over.
+
+The Phase 1 advice: don't run very long backfills (multi-hour) with
+no checkpointing. Either chunk them by date range (so each chunk is
+a separate job) or wait for Phase 2's resume support.
+
+### 14.8 An adversarial input arrives
+
+Three adversarial-input cases the framework handles:
+
+1. **Malformed source records.** The decoder errors; the record is
+   counted as a poison pill, surfaced via `WithDecodeErrorCallback`,
+   and skipped. No `BatchItemFailures` entry (Lambda would loop);
+   no Ack-failure (streaming sources Ack past the poison record).
+2. **Records that pass decode but fail merge.** The processor
+   retries; if every retry fails, the record dead-letters. The
+   monoid's Combine is supposed to be total (no inputs cause it to
+   fail), so a sustained merge failure is usually a bug — caught
+   by the dead-letter callback and surfaced via metrics.
+3. **Records that are syntactically valid but semantically invalid.**
+   "An order with negative total." The monoid doesn't reject this;
+   it dutifully sums the negative number. The pipeline's value
+   extractor is the place to filter (return 0 for invalid records).
+
+The framework's job is to handle the first two cases without
+crashing. The third case is the user's logic concern.
+
+## 15. Performance characteristics
+
+This section is honest about throughput, latency, and where the
+bottlenecks are. Numbers are from the docker-compose integration
+suite (`test/e2e/`) and from production-shape micro-benchmarks against
+DDB-local. Production at scale will look different; treat these as
+order-of-magnitude estimates.
+
+### 15.1 Throughput
+
+**Streaming worker, KindSum on Int64SumStore, single goroutine:**
+
+- Atomic ADD path: ~5,000-10,000 events/sec/worker against
+  DDB-local with 1ms typical latency. Scales horizontally with
+  Kafka partitions.
+- With `WithBatchWindow(1s, 1024)`: throughput is bounded by
+  source read rate, not DDB. Hot-key pipelines see effective
+  throughput of 50,000+ events/sec/worker because the DDB write
+  rate is decoupled from the event rate.
+
+**Streaming worker, sketch on BytesStore:**
+
+- CAS path on cold keys (no contention): ~1,500-2,500 events/sec/worker.
+  The 4-5x slowdown vs. atomic ADD is the GetItem + ConditionalUpdate
+  vs. the single UpdateExpression cost.
+- CAS path on hot keys (sustained contention on a single row):
+  retries dominate; effective throughput drops to <100 events/sec
+  before `ErrMaxRetriesExceeded` surfaces. Mitigation is a Valkey
+  cache (Section 7.8).
+
+**Lambda runtimes:**
+
+- Kinesis: bounded by Lambda's per-invocation overhead and the
+  batch size. At BatchSize=100, ~5k-15k events/sec/Lambda function.
+- DDB Streams: bounded by the stream's shard count. At 10
+  shards × ~100 records/sec/shard, ~1k records/sec/Lambda.
+- SQS: bounded by SQS's batch-receive rate. At BatchSize=100, ~5k
+  records/sec/Lambda function.
+
+### 15.2 Latency
+
+**End-to-end ingest lag** (event written to source → visible in
+`Get` response):
+
+- Streaming Kafka → DDB → Get: ~50-200ms p99. Dominated by
+  franz-go's fetch batching and the DDB write+read roundtrip.
+- With `WithBatchWindow(window=1s)`: ingest lag is bounded by
+  `window`; expect ~1-1.5s p99.
+- Lambda Kinesis → DDB → Get: ~500ms-2s p99 (Lambda
+  invocation latency dominates).
+
+**Query latency:**
+
+- `Get` on cold cache: ~3-10ms p99 (single DDB GetItem).
+- `Get` on warm cache: <1ms p99 (Valkey GET).
+- `GetMany(N=200)` on cold cache: ~10-30ms p99 (2x BatchGetItem,
+  each capped at 100 keys).
+- `GetWindow(last_30_days)` on cold cache, daily granularity:
+  ~15-40ms p99 (1 BatchGetItem of 30 keys + 30-element fold).
+- `GetWindow(last_7_days)` on cold cache, hourly granularity:
+  ~30-80ms p99 (2 BatchGetItem + 168-element fold).
+- `GetWindow(last_7_days)` on cold cache, minute granularity:
+  ~300-800ms p99. *This is the bad case — 10080 buckets, ~6
+  BatchGetItem calls, plus the fold cost.* Avoid minute granularity
+  for long-window queries; use hierarchical roll-ups instead.
+
+The singleflight coalescing layer collapses concurrent identical
+queries; under high concurrency on the same key, the cost is amortized
+across requests.
+
+### 15.3 The bottlenecks in priority order
+
+1. **DDB write throughput on hot keys.** Atomic ADD scales to DDB's
+   per-partition limit (~1k writes/sec/partition); past that,
+   `WithBatchWindow` is required. CAS contention on hot keys is
+   worse — `ErrMaxRetriesExceeded` surfaces before the partition
+   limit is reached.
+2. **Query fold cost on fine-grained windowed sketches.** "Last 7
+   days minute-by-minute" on an HLL pipeline is 10080 sketch merges
+   per query. Mitigation: hierarchical roll-up (daily HLL fed from
+   the same source as minute HLL) or pre-merged window cache (Phase 2).
+3. **Single-goroutine streaming runtime.** ~10k events/sec/worker
+   ceiling against DDB-local; production DDB will be slightly
+   different. Scale horizontally with Kafka partitions; per-partition
+   parallelism is Phase 2.
+4. **Source-side decode cost.** A 1KB JSON record decodes in
+   ~10-50µs on modern hardware; for sustained 100k+ events/sec
+   pipelines this becomes meaningful. The decoder is user-supplied;
+   for hot paths, use protobuf or msgpack instead of JSON.
+
+### 15.4 What's NOT a bottleneck
+
+- The monoid Combine itself (sub-microsecond for Sum, ~5µs for
+  HLL merge, ~1µs for TopK update).
+- The metrics recorder (Noop is zero-cost; InMemory is ~100ns per
+  event).
+- The processor's retry / dedup logic (sub-microsecond when no
+  retry / no dedup is configured).
+- The pipeline DSL (validated once at Build, free at runtime).
+
+## 16. Testing philosophy
+
+The framework's testing posture has three layers, in priority order:
+
+### 16.1 Monoid laws in CI
+
+`pkg/monoid/monoidlaws.TestMonoid` is the framework's most-load-bearing
+test. It verifies associativity and identity for every built-in monoid
+in CI; users adding custom monoids drop into the same harness.
+
+Why this matters: associativity is the property the framework's
+correctness depends on. A monoid that violates it produces wrong
+answers in *every* execution mode silently. The laws test catches
+this in CI rather than in production.
+
+The harness uses sample-based fuzzing: a generator function produces
+sample values, the test verifies the laws hold for all triples.
+Default 32 samples; cubic in samples for the associativity check
+(N×N×N triples).
+
+### 16.2 Integration tests via docker-compose
+
+`test/e2e/` exercises the full stack against open-source containers:
+
+- `amazon/dynamodb-local` for DDB.
+- `confluentinc/cp-kafka` for Kafka.
+- `valkey/valkey` for Valkey.
+- `mongo:7` for Mongo.
+- `minio/minio` for S3-compatible.
+- `apache/spark:4.0.1` for Spark Connect.
+
+The tests cover:
+
+- Counter pipeline: Kafka → Sum → DDB (`counter_test.go`).
+- HLL pipeline: Kafka → HLL → DDB BytesStore CAS (`hll_test.go`).
+- Windowed counters with `Last1/2/3/7/10/30Days` queries
+  (`windowed_test.go`).
+- Mongo bootstrap with Change Stream resume token
+  (`mongo_bootstrap_test.go`).
+- S3 replay into a shadow table (`s3_replay_test.go`).
+- Spark Connect batch SUM aggregation → DDB
+  (`spark_connect_test.go`).
+
+The tests are slow (multi-second per test) but high-fidelity. The CI
+runs them on every PR; local development can run them via
+`make test-integration`.
+
+### 16.3 Unit tests for the small things
+
+`pkg/state/dynamodb/dedup_test.go` is the canonical example: 16-way
+race against dynamodb-local verifies "exactly one MarkSeen wins"
+under concurrent contention. This is the kind of test that catches
+the bugs that lose data silently.
+
+Other unit tests cover:
+
+- Bucket math (`pkg/monoid/windowed/`).
+- Encoder round-trips (`pkg/query/grpc/server_test.go`).
+- Singleflight coalescing
+  (`pkg/query/grpc/server_test.go`).
+- Swap protocol (`pkg/swap/swap_test.go`).
+- Bucket / projector logic (`pkg/projection/bucket_test.go`).
+- Each lambda handler's BatchItemFailures behavior.
+
+The unit tests are fast and exhaustive on their narrow concerns. The
+integration tests are slow and exhaustive on the cross-component
+interactions. The monoid laws are foundational. Together they cover
+the framework's correctness surface.
+
+### 16.4 What's missing
+
+- **Property-based fuzzing of the streaming runtime.** The processor
+  has retry, dedup, batch-window, and metrics paths; a property-fuzz
+  harness against synthetic source streams would catch ordering bugs
+  faster than unit tests do.
+- **Chaos tests for source / state failures.** Today the integration
+  tests verify happy-path correctness; the failure-injection tests
+  the architecture doc's verification plan calls for are not yet
+  implemented.
+- **Cross-runtime sketch portability.** HLL bytes from axiomhq vs.
+  Valkey-native PFADD encoding aren't tested for interoperability,
+  because they're known-incompatible (Section 2.5). When the
+  conversion path lands, this needs tests.
+
+These are gaps, not blockers. The Phase 1 testing posture is sufficient
+for the framework's current claims; Phase 2 will tighten it.
+
+## 17. Frontiers
+
+This section is the honest accounting of what's deliberately out of
+scope, what's queued for Phase 2, and what's deferred indefinitely.
+`STABILITY.md` is the running inventory; this section is the design
+narrative around the choices.
+
+### 17.1 Deliberately out of scope
+
+- **A stream-processing engine.** Murmur doesn't replace Flink. If
+  your problem needs joins, watermarks, or exactly-once across stages,
+  you want Flink (or Managed Service for Apache Flink). The architecture
+  doc says this; this doc makes it permanent.
+- **Cross-monoid query rewrites.** Summingbird's "decompose Top-K
+  into sketch + tail" planner is not Murmur's problem. Pick the
+  right monoid; Murmur runs it.
+- **A unified non-AWS deployment story.** The Terraform modules
+  target AWS. Cloud-agnosticism is a different framework's
+  problem.
+- **A vector store.** Use OpenSearch's `knn_vector`, Pinecone, or
+  pgvector. Murmur is for counter-class aggregations, not embeddings.
+- **A feature store.** Murmur can BACK a feature store's
+  stream-aggregated-counter-features path (per
+  `doc/search-integration.md`'s ML rerank section), but isn't itself
+  a feature store. Use Feast or Tecton for the full feature-store
+  shape.
+- **Per-(user, item) feature aggregation at scale.** `KeyByMany`
+  with `O(users × items)` keys is the wrong shape. Use collaborative
+  filtering or two-tower embeddings.
+
+### 17.2 Phase 2 work, prioritized
+
+1. **Per-pipeline gRPC codegen.** The Phase 1 generic `Value{bytes}`
+   shape is correct but ergonomically rough. Phase 2 generates
+   per-pipeline typed responses (`CounterResponse{value int64}`,
+   `HLLResponse{cardinality int64}`) so clients consume typed data.
+2. **Spark SQL codegen from structural monoids.** Phase 1's
+   sparkconnect executor takes user-supplied SQL. Phase 2 generates
+   the SQL from the monoid kind + windowing config, so users don't
+   write Spark SQL directly for canonical shapes.
+3. **Valkey-native sketch acceleration.** PFADD/PFCOUNT/PFMERGE for
+   HLL pipelines, native Bloom for Bloom pipelines. Requires the
+   conversion path between axiomhq encoding and Valkey-native
+   encoding; non-trivial but well-bounded.
+4. **KCL v3 Kinesis source.** Multi-instance leasing,
+   checkpointing, reshard handling. Replaces the Phase 1
+   single-instance shard fanout.
+5. **Per-partition parallelism in the streaming runtime.** When
+   horizontal scaling isn't enough, in-process parallelism is the
+   next lever. Carefully scoped to preserve the at-least-once contract.
+6. **Lambda runtime cache integration.** Today the cache is wired
+   only in the streaming runtime; Lambda variants are cache-blind.
+   Phase 2 wires it.
+7. **Pre-rolled window rollups.** "Last 7 days" / "Last 30 days"
+   pre-merged buckets maintained alongside the daily buckets, to
+   make windowed sketch queries cheap. The hierarchical roll-up
+   pattern users implement manually today, formalized as a builder
+   option.
+8. **CDK constructs.** Parallel to the Terraform modules, for
+   shops on CDK rather than Terraform.
+
+### 17.3 Phase 3+ work, deferred
+
+- **Multi-region deployments.** DDB Global Tables work; the
+  conflict resolution corner cases on the projector / cache side
+  need design. Today, Murmur is single-region.
+- **EKS / Kubernetes deployment backend.** ECS Fargate is the
+  Phase 1 / 2 default; EKS is a Phase 3+ alternative if real demand
+  appears.
+- **Postgres / ScyllaDB Stores.** DDB is the Phase 1 / 2 source of
+  truth. Other backends are Phase 3+ work gated on real demand.
+- **AWS MemoryDB Store.** A durable in-memory alternative to DDB +
+  Valkey. Phase 3+; the architecture doc covers the shape.
+- **Watermark support and event-time windowing semantics.** Today
+  the bucket assignment is a single-timestamp-per-record shape
+  (Section 5.5). Watermark-based event-time semantics — late-arriving
+  data, lateness budgets, watermark advancement — are a Phase 3+
+  addition that would significantly expand the framework's surface.
+  Whether to add them depends on whether real users need them; for
+  counter aggregations, the simple shape is usually enough.
+
+### 17.4 The "what would you build differently?" honest list
+
+A short list of choices that would benefit from a re-think:
+
+- **The DSL's two-layer split.** `pkg/pipeline` and `pkg/murmur`
+  serve different audiences; the duplication is real (`Counter`
+  reimplements parts of `NewPipeline`). A cleaner shape might unify
+  them with type-level configuration ("if value type is `int64`,
+  the monoid defaults to Sum; if value type is `[]byte`, the user
+  must specify"). Go's generics can almost express this; the syntax
+  cost is high.
+- **The `Source` / `SourceFromToken` split for bootstrap handoff.**
+  The contract today is "each source has its own constructor that
+  takes a token-equivalent parameter." A formal interface
+  (`SourceFromToken[T]`) would make the bootstrap-to-live
+  composition typed-safe rather than convention-safe.
+- **The `Encoder[V]` parameter on `grpc.Server`.** Phase 1's
+  bytes-on-the-wire shape requires every server to be configured
+  with the right encoder. The Phase 2 codegen will eliminate this.
+- **The `replace` directive on spark-connect-go.** Section 11.2 is
+  honest about it; the fix is to upstream the patches or split the
+  package into its own module.
+
+Each of these is a known cost; each has a planned fix. The framework
+ships in this shape because the alternatives are higher-cost
+work that would delay Phase 1 without commensurate benefit.
+
+### 17.5 What v1.0 will look like
+
+`STABILITY.md` says: "v1.0.0 will ship after PR 1–4 land and the
+framework has been exercised against real (non-`local`) AWS for at
+least one full quarter."
+
+The PR 1-4 set covers:
+
+1. The silent error paths sweep (recorder wired into bootstrap /
+   replay / sources; poison-pill callbacks on every source).
+2. The monoid laws fix (done — `Bounded[V]` for Min/Max,
+   `Decayed.Set` for the decay monoid, `monoidlaws` harness).
+3. At-least-once dedup contract (done — `state.Deduper`,
+   `dynamodb.NewDeduper`).
+4. Min/Max under empty/missing buckets (done — `Bounded[V]`).
+
+The v1 surface is the "experimental" ones in `STABILITY.md` that
+have stabilized over a quarter of real AWS use. The "mostly stable"
+tier (state interfaces, monoid core, swap, metrics) is the v1 floor
+already; v1.0 will lift more of the experimental tier into stable.
+
+The framework is meant to be useful before v1; the v0.x churn is
+honest about the cost. Read `STABILITY.md` before adopting; treat
+the API surface as movable until v1.0.
+
+---
+
+That's the design. The keystone is structural monoids (Section 2);
+everything else falls out of getting that one abstraction right.
+The execution model (Section 5), the state stores (Section 7), the
+query layer (Section 8), and the operational shape (Section 13) are
+mechanical applications of "we have an associative monoid; here's
+where to apply it." Sections 10 and 14 are where the subtlety hides
+— the bootstrap-to-live handoff and the failure-mode catalog. Read
+those carefully if you're adopting Murmur for a non-trivial
+deployment.
+
+For the parts of the framework that aren't yet stable, `STABILITY.md`
+is the authoritative inventory. For the parts that are, this document
+is.
+
