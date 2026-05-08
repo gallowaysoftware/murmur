@@ -107,13 +107,6 @@ func (d *keyDebouncer) shouldDrop(key string) bool {
 	return false
 }
 
-// stats returns the current map size for tests / monitoring.
-func (d *keyDebouncer) size() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.seen)
-}
-
 // WithKeyDebounce drops records whose first-emitted key was already
 // seen within `window`. The dropped record's Ack still fires (so the
 // source advances) but no processor work is done — same shape as the
