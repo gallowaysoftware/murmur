@@ -20,7 +20,11 @@ import (
 func TestGenerate_BotInteractions(t *testing.T) {
 	tmp := t.TempDir()
 	specPath := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "pipeline-spec.yaml")
-	expectedDir := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "expected")
+	// _expected/ is underscore-prefixed so Go tooling (`go build`,
+	// `go mod tidy`) skips it — the checked-in *_server.go file
+	// imports the user's buf-generated proto package which doesn't
+	// exist outside the user's repo.
+	expectedDir := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "_expected")
 
 	if err := generate(specPath, tmp); err != nil {
 		t.Fatalf("generate: %v", err)

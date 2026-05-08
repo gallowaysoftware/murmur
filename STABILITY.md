@@ -10,13 +10,13 @@ edges callers should plan around.
 |---|---|---|
 | `pkg/pipeline` | experimental | DSL surface is likely to gain `Validate()` (renamed from `Build()`) and per-stage type narrowing |
 | `pkg/murmur` | experimental | Builder presets are the recommended entry point; expect renames before v1 |
-| `pkg/monoid/core` | mostly stable | `Min` / `Max` now use `Bounded[V]` for a proper Identity; lift inputs via `core.NewBounded(v)` |
+| `pkg/monoid/core` | mostly stable | `Min` / `Max` use `Bounded[V]` for a proper Identity; lift inputs via `core.NewBounded(v)`. `Monotonic[V](identity)` is the raw-V counterpart that pairs with conditional-update stores like `pkg/state/dynamodb.Int64MaxStore` for the SetCountIfGreater pattern (out-of-order absolute-value safety) |
 | `pkg/monoid/sketch/{hll,topk,bloom}` | experimental | `Combine` returning the wrong operand on decode error is tracked; cross-runtime encoding portability not yet proven |
 | `pkg/monoid/compose` | experimental | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1. `state.NewInstrumented` / `state.NewInstrumentedCache` decorate any store/cache with metrics.Recorder hooks (store_get / store_get_many / store_merge_update / cache_get / cache_repopulate latencies + errors) |
-| `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy |
-| `pkg/state/valkey` | experimental | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes). No native PFADD path — Valkey-native HLL is incompatible with axiomhq's encoding; bridging is roadmap |
+| `pkg/state/dynamodb` | experimental | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy. `Int64MaxStore` ships the SetCountIfGreater pattern via DDB `UpdateItem` with conditional expression — out-of-order events with lower values are silently dropped |
+| `pkg/state/valkey` | experimental | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes) + `HLLCache` (Valkey-native PFADD/PFCOUNT/PFMERGE accelerator; side-by-side with the BytesStore-authoritative axiomhq HLL — the two are independent estimators of the same set, both within HLL's ~1.6% error bound). No portable axiomhq↔HYLL byte conversion: on Valkey loss the accelerator can only be repopulated by re-feeding events |
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
@@ -30,12 +30,13 @@ edges callers should plan around.
 | `pkg/observability/autoscale` | experimental | Periodic Signal → Emitter loop for publishing scaling-signal metrics. Reference CloudWatch emitter; Signal helpers like `EventsPerSecond` derive rates from the metrics recorder. Closes `doc/architecture.md` open question #2 (worker autoscaling) |
 | `pkg/exec/bootstrap` | experimental | Shares the `pkg/exec/processor` core with streaming + Lambda. Per-record retry via `WithMaxAttempts` / `WithRetryBackoff`; permissive on dead-letter by default (use `WithFailOnError` to abort). Honors `KeyByMany` hierarchical rollups |
 | `pkg/exec/replay` | experimental | Shares the `pkg/exec/processor` core. Same retry / dead-letter / `KeyByMany` semantics as bootstrap. metrics.Recorder fully wired; the historical "metrics integration not yet wired" note is fixed |
-| `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
+| `pkg/exec/batch/sparkconnect` | experimental | own Go submodule (separate `go.mod`) so root `github.com/gallowaysoftware/murmur` doesn't pull `apache/spark-connect-go`. Consumers who DO depend on this submodule must mirror its `replace` line for the `pequalsnp/spark-connect-go` fork in their own `go.mod` |
 | `pkg/exec/lambda/kinesis` | experimental | `NewHandler` returns the Lambda Kinesis handler signature; partial-batch failures via BatchItemFailures; pair with `WithDedup` so adjacent-redelivered records fold idempotently |
 | `pkg/exec/lambda/dynamodbstreams` | experimental | DDB Streams Lambda handler; same retry/dedup/BatchItemFailures shape as the Kinesis variant. Decoder takes the whole change record so callers can branch on EventName / inspect OldImage |
 | `pkg/exec/lambda/sqs` | experimental | SQS Lambda handler; same shape as kinesis/dynamodbstreams. Default EventID is "<arn>/<MessageId>"; override via WithEventID for FIFO content-dedup or upstream-key dedup. Uses SQS SentTimestamp for windowed-bucket assignment so delayed deliveries land in the correct bucket |
 | `pkg/query` | mostly stable | `Get` / `GetWindow` / `GetRange` / `LambdaQuery` are likely v1 surface |
 | `pkg/query/grpc` | experimental | generic byte-encoded responses; `cmd/murmur-codegen-typed` emits per-service typed `.proto` + Go server stubs (sum / hll, all-time / windowed) over `pkg/query/typed` clients |
+| `pkg/query/typed` | experimental | typed-client wrappers over the generic QueryService — `SumClient`, `HLLClient`, `TopKClient`, `BloomClient`. The decoders + typed shape behind application-service typed-wrapper RPCs (see `examples/typed-wrapper`). Building block under `cmd/murmur-codegen-typed` |
 | `pkg/admin` | experimental | CORS is closed by default; opt in via `WithAllowedOrigins`. No auth middleware yet |
 | `pkg/swap` | mostly stable | small surface; the Terraform module does not yet integrate it |
 | `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
@@ -72,10 +73,15 @@ edges callers should plan around.
    over a partially-empty range correctly reports the min of populated
    buckets and `Set: false` if everything was empty.
 
-5. **`go.mod` `replace` directive.** Importing
-   `pkg/exec/batch/sparkconnect` requires consumers to mirror the
-   `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go ...`
-   line. Tracked: upstream the patches or split the package into its own module.
+5. ~~**`go.mod` `replace` directive.**~~ Partially fixed:
+   `pkg/exec/batch/sparkconnect` now carries its own `go.mod` so the root
+   `github.com/gallowaysoftware/murmur` module doesn't depend on
+   `apache/spark-connect-go`. Non-Spark consumers get a clean root `go.mod`.
+   Consumers who DO depend on the sparkconnect submodule must still mirror
+   the `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go …`
+   line in their own `go.mod` (Go doesn't propagate replace directives
+   transitively). Full fix is upstreaming the fork's patches to
+   `apache/spark-connect-go`; tracked separately.
 
 6. ~~**CORS.**~~ Fixed: `pkg/admin.NewServer` now defaults to no CORS headers
    (same-origin only). Open it up to the origins you want via

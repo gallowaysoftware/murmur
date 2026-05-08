@@ -32,7 +32,9 @@ go build ./...                                  # _server.go now compiles
 ```
 bot-interactions/
 ├── pipeline-spec.yaml          # input
-└── expected/                   # checked-in expected output (used by golden tests)
+└── _expected/                  # checked-in golden output (underscore prefix
+                                 # so Go tooling skips it — the *_server.go
+                                 # imports the user's buf-generated proto)
     ├── bot_interaction_count_service.proto
     └── bot_interaction_count_service_server.go
 ```
@@ -48,11 +50,11 @@ Run:
 ```
 go run ./cmd/murmur-codegen-typed \
     --in examples/typed-rpc-codegen/bot-interactions/pipeline-spec.yaml \
-    --out examples/typed-rpc-codegen/bot-interactions/expected/
+    --out examples/typed-rpc-codegen/bot-interactions/_expected/
 ```
 
 (Re-running with the same `--out` regenerates the expected files; the
-checked-in copies under `expected/` are what
+checked-in copies under `_expected/` are what
 `cmd/murmur-codegen-typed/codegen_test.go` golden-compares against.)
 
 ## Spec schema
