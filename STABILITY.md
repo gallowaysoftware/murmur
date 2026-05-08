@@ -24,8 +24,8 @@ edges callers should plan around.
 | `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window |
 | `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |
 | `pkg/projection` | experimental | bucket functions (Log/Linear/Manual) and hysteresis-band transition detection for projector-style change-data-capture into search indices. The pkg-level building block for doc/search-integration.md Pattern B |
-| `pkg/exec/bootstrap` | experimental | `WithMetrics` and `WithDedup` parallel to streaming.Run; rerunning bootstrap is idempotent when a Deduper is configured |
-| `pkg/exec/replay` | experimental | metrics integration not yet wired |
+| `pkg/exec/bootstrap` | experimental | Shares the `pkg/exec/processor` core with streaming + Lambda. Per-record retry via `WithMaxAttempts` / `WithRetryBackoff`; permissive on dead-letter by default (use `WithFailOnError` to abort). Honors `KeyByMany` hierarchical rollups |
+| `pkg/exec/replay` | experimental | Shares the `pkg/exec/processor` core. Same retry / dead-letter / `KeyByMany` semantics as bootstrap. metrics.Recorder fully wired; the historical "metrics integration not yet wired" note is fixed |
 | `pkg/exec/batch/sparkconnect` | experimental | depends on a `replace`d fork of `apache/spark-connect-go` |
 | `pkg/exec/lambda/kinesis` | experimental | `NewHandler` returns the Lambda Kinesis handler signature; partial-batch failures via BatchItemFailures; pair with `WithDedup` so adjacent-redelivered records fold idempotently |
 | `pkg/exec/lambda/dynamodbstreams` | experimental | DDB Streams Lambda handler; same retry/dedup/BatchItemFailures shape as the Kinesis variant. Decoder takes the whole change record so callers can branch on EventName / inspect OldImage |
@@ -39,9 +39,12 @@ edges callers should plan around.
 
 ## Known sharp edges (priority order)
 
-1. **Silent error paths.** Many `_ = err` sites across sources, caches, and sketch
-   `Combine` swallow real failures. Tracked: PR-2 wires `metrics.Recorder` into
-   bootstrap / replay / source layers and exposes poison-pill callbacks.
+1. **Silent error paths.** ~~Many `_ = err` sites across sources, caches, and sketch
+   `Combine` swallow real failures.~~ Closed by the `pkg/exec/processor` consolidation
+   (streaming, bootstrap, replay, and every Lambda handler now share one
+   retry/dedup/metrics core) plus per-source `OnDecodeError` and `OnFetchError`
+   callbacks for poison-pill routing. The remaining `_ = err` sites are documented
+   non-fatal cleanup paths (e.g. franz-go `CommitMarkedOffsets` during Close).
 
 2. ~~**Monoid laws.**~~ Fixed in PR-3: `Min` / `Max` now use `core.Bounded[V]`
    so Identity is the unset wrapper rather than the zero value of `V`. `Decayed`

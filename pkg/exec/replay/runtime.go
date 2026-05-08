@@ -13,12 +13,13 @@
 package replay
 
 import (
-	"context"
 	"fmt"
 	"time"
 
+	"context"
+
+	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
-	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/replay"
 	"github.com/gallowaysoftware/murmur/pkg/source"
@@ -29,20 +30,73 @@ import (
 type RunOption func(*runConfig)
 
 type runConfig struct {
-	recorder metrics.Recorder
+	processor.Config
+	failOnError bool
 }
 
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
 func WithMetrics(r metrics.Recorder) RunOption {
 	return func(c *runConfig) {
 		if r != nil {
-			c.recorder = r
+			c.Recorder = r
 		}
 	}
 }
 
+// WithMaxAttempts sets the per-record retry budget for transient store
+// failures. Defaults to 3. Replay over a multi-day archive needs
+// retries to absorb intermittent backpressure — without them, a single
+// throttled DDB write fails the whole replay.
+func WithMaxAttempts(n int) RunOption {
+	return func(c *runConfig) {
+		if n >= 1 {
+			c.MaxAttempts = n
+		}
+	}
+}
+
+// WithRetryBackoff configures the per-attempt sleep schedule. Doubles
+// after each failure starting from base, capped at max, with full jitter.
+// Defaults to 50 ms / 5 s.
+func WithRetryBackoff(base, max time.Duration) RunOption {
+	return func(c *runConfig) {
+		if base > 0 {
+			c.BackoffBase = base
+		}
+		if max > 0 {
+			c.BackoffMax = max
+		}
+	}
+}
+
+// WithDedup installs a state.Deduper. The replay driver typically emits
+// stable per-event IDs (S3 archive line position, Kafka offset), so a
+// re-run of the same archive folds idempotently when a Deduper is wired.
+func WithDedup(d state.Deduper) RunOption {
+	return func(c *runConfig) {
+		if d != nil {
+			c.Dedup = d
+		}
+	}
+}
+
+// WithFailOnError, when true, surfaces the first dead-lettered record's
+// error to the caller and aborts the replay. Default false: dead-lettered
+// records are recorded via the metrics.Recorder and the replay continues.
+//
+// For shadow-table backfills with atomic swap, an aborted replay leaves
+// the shadow incomplete and the swap blocked — usually the right
+// behavior, but expensive when the failure is one bad row in a 30-day
+// archive. Pick per workload.
+func WithFailOnError(v bool) RunOption {
+	return func(c *runConfig) {
+		c.failOnError = v
+	}
+}
+
 // Run drives the replay to completion. Returns nil when the driver exhausts its source
-// and all records have been processed; non-nil on a fatal error.
+// and all records have been processed; non-nil on a fatal error (or any dead-lettered
+// record when WithFailOnError(true)).
 func Run[T any, V any](
 	ctx context.Context,
 	p *pipeline.Pipeline[T, V],
@@ -55,13 +109,13 @@ func Run[T any, V any](
 	if drv == nil {
 		return fmt.Errorf("replay.Run: driver is nil")
 	}
-	cfg := runConfig{recorder: metrics.Noop{}}
+	cfg := runConfig{Config: processor.Defaults()}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	name := p.Name()
-	keyFn := p.KeyFn()
+	keysFn := p.KeysFn()
 	valueFn := p.ValueFn()
 	store := p.Store()
 	cache := p.CacheStore()
@@ -75,61 +129,27 @@ func Run[T any, V any](
 	}()
 
 	for rec := range records {
-		if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
-			cfg.recorder.RecordError(name, err)
-			return err
+		eventTime := rec.EventTime
+		if eventTime.IsZero() {
+			eventTime = time.Now()
+		}
+		err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
+			keysFn(rec.Value), valueFn(rec.Value), store, cache, window)
+		if err != nil {
+			if cfg.failOnError {
+				return err
+			}
+			// Continue: the dead-letter event was recorded by processor.MergeMany.
+		}
+		if rec.Ack != nil {
+			if err := rec.Ack(); err != nil {
+				cfg.Recorder.RecordError(name, fmt.Errorf("replay ack: %w", err))
+			}
 		}
 	}
 	if err := <-driverErr; err != nil {
-		cfg.recorder.RecordError(name, fmt.Errorf("replay driver: %w", err))
+		cfg.Recorder.RecordError(name, fmt.Errorf("replay driver: %w", err))
 		return fmt.Errorf("replay driver: %w", err)
 	}
-	return nil
-}
-
-func processOne[T any, V any](
-	ctx context.Context,
-	name string,
-	rec source.Record[T],
-	keyFn func(T) string,
-	valueFn func(T) V,
-	store state.Store[V],
-	cache state.Cache[V],
-	window *windowed.Config,
-	rec_ metrics.Recorder,
-) error {
-	entity := keyFn(rec.Value)
-	delta := valueFn(rec.Value)
-
-	sk := state.Key{Entity: entity}
-	var ttl time.Duration
-	if window != nil {
-		t := rec.EventTime
-		if t.IsZero() {
-			t = time.Now()
-		}
-		sk.Bucket = window.BucketID(t)
-		ttl = window.Retention
-	}
-
-	storeStart := time.Now()
-	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-		return fmt.Errorf("pipeline %q entity %q bucket %d: store MergeUpdate: %w", name, sk.Entity, sk.Bucket, err)
-	}
-	rec_.RecordLatency(name, "store_merge", time.Since(storeStart))
-
-	if cache != nil {
-		cacheStart := time.Now()
-		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-			rec_.RecordError(name, fmt.Errorf("cache MergeUpdate %q/%d: %w", sk.Entity, sk.Bucket, err))
-		}
-		rec_.RecordLatency(name, "cache_merge", time.Since(cacheStart))
-	}
-	if rec.Ack != nil {
-		if err := rec.Ack(); err != nil {
-			rec_.RecordError(name, fmt.Errorf("replay ack: %w", err))
-		}
-	}
-	rec_.RecordEvent(name)
 	return nil
 }

@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
-	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/source"
 	"github.com/gallowaysoftware/murmur/pkg/source/snapshot"
@@ -33,15 +33,47 @@ import (
 type RunOption func(*runConfig)
 
 type runConfig struct {
-	recorder metrics.Recorder
-	dedup    state.Deduper
+	processor.Config
+	// failOnError, when true, surfaces the first dead-lettered record's
+	// error to the caller and aborts the bootstrap. Default false: dead-
+	// lettered records are recorded via the metrics.Recorder and the
+	// bootstrap continues — a single poison row in a Mongo collection
+	// shouldn't fail the whole snapshot, especially for retry-driven
+	// re-runs.
+	failOnError bool
 }
 
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
 func WithMetrics(r metrics.Recorder) RunOption {
 	return func(c *runConfig) {
 		if r != nil {
-			c.recorder = r
+			c.Recorder = r
+		}
+	}
+}
+
+// WithMaxAttempts sets the per-record retry budget for transient store
+// failures. Defaults to 3. A bootstrap that fails-fast on the first
+// throttled DDB write is unfit for snapshotting a large collection — a
+// 30-minute scan needs retries to absorb intermittent backpressure.
+func WithMaxAttempts(n int) RunOption {
+	return func(c *runConfig) {
+		if n >= 1 {
+			c.MaxAttempts = n
+		}
+	}
+}
+
+// WithRetryBackoff configures the per-attempt sleep schedule. Doubles
+// after each failure starting from base, capped at max, with full jitter.
+// Defaults to 50 ms / 5 s — same as the streaming runtime.
+func WithRetryBackoff(base, max time.Duration) RunOption {
+	return func(c *runConfig) {
+		if base > 0 {
+			c.BackoffBase = base
+		}
+		if max > 0 {
+			c.BackoffMax = max
 		}
 	}
 }
@@ -55,8 +87,21 @@ func WithMetrics(r metrics.Recorder) RunOption {
 func WithDedup(d state.Deduper) RunOption {
 	return func(c *runConfig) {
 		if d != nil {
-			c.dedup = d
+			c.Dedup = d
 		}
+	}
+}
+
+// WithFailOnError configures whether the bootstrap aborts on the first
+// dead-lettered record (after retries exhausted). Default false — the
+// runtime records the error via metrics.Recorder and continues. Set true
+// when the snapshot must complete fully or not at all (e.g., a one-shot
+// migration where a missing entity is a correctness bug, not a tolerable
+// blip). The streaming runtime never aborts on poison records; bootstrap
+// is permissive by default for the same reason.
+func WithFailOnError(v bool) RunOption {
+	return func(c *runConfig) {
+		c.failOnError = v
 	}
 }
 
@@ -74,19 +119,19 @@ func Run[T any, V any](
 	if src == nil {
 		return nil, fmt.Errorf("bootstrap.Run: snapshot source is nil")
 	}
-	cfg := runConfig{recorder: metrics.Noop{}}
+	cfg := runConfig{Config: processor.Defaults()}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	token, err := src.CaptureHandoff(ctx)
 	if err != nil {
-		cfg.recorder.RecordError(p.Name(), fmt.Errorf("capture handoff: %w", err))
+		cfg.Recorder.RecordError(p.Name(), fmt.Errorf("capture handoff: %w", err))
 		return nil, fmt.Errorf("capture handoff: %w", err)
 	}
 
 	name := p.Name()
-	keyFn := p.KeyFn()
+	keysFn := p.KeysFn() // multi-key aware; falls back to wrapping KeyFn in a 1-element slice
 	valueFn := p.ValueFn()
 	store := p.Store()
 	cache := p.CacheStore()
@@ -100,77 +145,33 @@ func Run[T any, V any](
 	}()
 
 	for rec := range records {
-		// Dedup, if configured: skip records whose EventID was already claimed
-		// by a prior bootstrap run. Backend errors fall through to processing
-		// (better to double-count than to silently drop on a flaky dedup).
-		if cfg.dedup != nil && rec.EventID != "" {
-			first, err := cfg.dedup.MarkSeen(ctx, rec.EventID)
-			if err != nil {
-				cfg.recorder.RecordError(name, fmt.Errorf("dedup MarkSeen %q: %w", rec.EventID, err))
-			} else if !first {
-				cfg.recorder.RecordEvent(name + ":dedup_skip")
-				if rec.Ack != nil {
-					_ = rec.Ack()
-				}
-				continue
-			}
+		eventTime := rec.EventTime
+		if eventTime.IsZero() {
+			eventTime = time.Now()
 		}
-		if err := processOne(ctx, name, rec, keyFn, valueFn, store, cache, window, cfg.recorder); err != nil {
-			cfg.recorder.RecordError(name, err)
-			return nil, err
+		err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
+			keysFn(rec.Value), valueFn(rec.Value), store, cache, window)
+		if err != nil {
+			// Either context cancellation or retry exhaustion. Either way,
+			// the record is dead-lettered (processor.MergeMany already
+			// recorded the metric). Decide between abort and continue
+			// per the failOnError flag.
+			if cfg.failOnError {
+				return nil, err
+			}
+			// Continue: the metrics surface carries the dead-letter event,
+			// the operator sees the count, and the bootstrap finishes.
+		}
+		if rec.Ack != nil {
+			if err := rec.Ack(); err != nil {
+				cfg.Recorder.RecordError(name, fmt.Errorf("snapshot ack: %w", err))
+			}
 		}
 	}
 	if err := <-scanErr; err != nil {
-		cfg.recorder.RecordError(name, fmt.Errorf("snapshot scan: %w", err))
+		cfg.Recorder.RecordError(name, fmt.Errorf("snapshot scan: %w", err))
 		return nil, fmt.Errorf("snapshot scan: %w", err)
 	}
 
 	return token, nil
-}
-
-func processOne[T any, V any](
-	ctx context.Context,
-	name string,
-	rec source.Record[T],
-	keyFn func(T) string,
-	valueFn func(T) V,
-	store state.Store[V],
-	cache state.Cache[V],
-	window *windowed.Config,
-	rec_ metrics.Recorder,
-) error {
-	entity := keyFn(rec.Value)
-	delta := valueFn(rec.Value)
-
-	sk := state.Key{Entity: entity}
-	var ttl time.Duration
-	if window != nil {
-		t := rec.EventTime
-		if t.IsZero() {
-			t = time.Now()
-		}
-		sk.Bucket = window.BucketID(t)
-		ttl = window.Retention
-	}
-
-	storeStart := time.Now()
-	if err := store.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-		return fmt.Errorf("pipeline %q entity %q bucket %d: store MergeUpdate: %w", name, sk.Entity, sk.Bucket, err)
-	}
-	rec_.RecordLatency(name, "store_merge", time.Since(storeStart))
-
-	if cache != nil {
-		cacheStart := time.Now()
-		if err := cache.MergeUpdate(ctx, sk, delta, ttl); err != nil {
-			rec_.RecordError(name, fmt.Errorf("cache MergeUpdate %q/%d: %w", sk.Entity, sk.Bucket, err))
-		}
-		rec_.RecordLatency(name, "cache_merge", time.Since(cacheStart))
-	}
-	if rec.Ack != nil {
-		if err := rec.Ack(); err != nil {
-			rec_.RecordError(name, fmt.Errorf("snapshot ack: %w", err))
-		}
-	}
-	rec_.RecordEvent(name)
-	return nil
 }
