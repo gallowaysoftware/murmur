@@ -20,6 +20,7 @@ edges callers should plan around.
 | `pkg/source/kafka` | experimental | poison pills are silently dropped (no DLQ hook yet); no per-partition parallelism |
 | `pkg/source/kinesis` | experimental, single-instance | NO checkpointing, NO multi-instance leasing; KCL v3 upgrade is roadmap |
 | `pkg/source/snapshot/mongo` | experimental | `extractID` is brittle for non-`_id` types beyond ObjectID/string/int |
+| `pkg/source/snapshot/dynamodb` | experimental | DDB ParallelScan bootstrap source. CaptureHandoff captures a Streams shard timestamp for gap-and-duplicate-free bootstrap → live transition. Resume restarts from the beginning rather than per-segment LastEvaluatedKey checkpointing — at-least-once dedup absorbs the duplicates |
 | `pkg/replay/s3` | experimental | JSON Lines only; Parquet is roadmap |
 | `pkg/exec/streaming` | experimental | single-goroutine; per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window |
 | `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |

@@ -1136,4 +1136,1153 @@ The diagram is the model the runtimes implement. Section 10 walks
 the bootstrap handoff in detail; Section 11 walks the Spark Connect
 backfill; Section 13 walks the operational shape.
 
+## 6. Lambda runtimes
+
+The streaming runtime is the canonical "long-lived ECS Fargate worker"
+shape. Lambda runtimes are the alternative: short-lived, AWS-driven,
+event-source-mapping-fed handlers that host the *same* pipeline logic
+behind an entirely different lifecycle. Three Lambda variants ship
+today: Kinesis, DDB Streams, and SQS
+(`pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`).
+
+This section walks why Lambda is a first-class option, what the three
+variants share, and where they diverge.
+
+### 6.1 Why Lambda runtimes exist
+
+Two reasons:
+
+**Operational footprint for low-volume pipelines.** A pipeline
+processing 100 events/sec doesn't justify a long-running ECS Fargate
+worker. The fixed monthly cost of a Fargate task — even at the
+smallest 0.25 vCPU / 0.5 GB shape — is roughly $10/month, plus the
+networking and ALB cost if a query service is attached. A Lambda
+function with a Kinesis trigger has no fixed cost; it pays per
+invocation. For a long-tail of small pipelines (per-tenant counter
+shards, infrequent dashboards), the Lambda variant is the right cost
+profile.
+
+**Event-source-driven pipelines that don't fit the streaming model.**
+DDB Streams is the canonical case: change-data-capture from a DDB
+table is naturally a Lambda trigger, not a long-poll consumer. SQS is
+similar — visibility timeout + Lambda's batched-receive protocol map
+cleanly to a handler shape and would be awkward to express as a
+long-running consumer. Even Kinesis, which has a long-running consumer
+shape (the streaming runtime supports it), is often cheaper to host
+behind a Lambda trigger for moderate-rate streams.
+
+The pipeline is invariant under runtime choice. Section 5.8's mode
+diagram applies: the same `pipeline.Pipeline[T, V]` plugs into
+`streaming.Run` for ECS Fargate or into `lambda/kinesis.NewHandler` for
+Lambda, with no code change beyond the entry point.
+
+### 6.2 What the Lambda variants share
+
+All three variants share the per-record contract from Section 5.3:
+delegate to `processor.MergeMany`, retry on transient error, dedup
+when configured, fold to `BatchItemFailures` when out of retries.
+They also share three structural choices:
+
+**1. The Decoder pattern.** Each Lambda variant takes a
+`Decoder[T] func(awsRecord) (T, error)` callback. The decoder maps the
+AWS event shape (Kinesis record, DDB change record, SQS message) to
+the pipeline's record type. This is the runtime's escape hatch for
+source-specific interpretation:
+
+- The Kinesis decoder takes raw bytes, typically `JSONDecoder[T]`.
+- The DDB Streams decoder takes the whole change record, so the
+  caller can branch on `EventName` (INSERT/MODIFY/REMOVE) and read
+  `NewImage` / `OldImage` for the field projections.
+- The SQS decoder takes the SQS message and returns `T`. The default
+  EventID is `<arn>/<MessageId>`, but the decoder can override it
+  (FIFO content-dedup, upstream-correlation-key dedup).
+
+A decoder returning `ErrSkipRecord` is treated as "process succeeded,
+no merge needed." A decoder returning any other error is a poison
+pill: counted via `metrics.RecordError`, surfaced via
+`WithDecodeErrorCallback`, the record is skipped (no
+`BatchItemFailures` entry — Lambda would just redeliver, looping). The
+poison-pill semantics are uniform across all three Lambda variants.
+
+**2. BatchItemFailures partial-batch failure.** When configured (via
+`FunctionResponseTypes=["ReportBatchItemFailures"]` on the
+event-source mapping), Lambda redelivers only the failed records, not
+the whole batch. The Murmur Lambda handlers populate the
+`BatchItemFailures` slice with the EventIDs of records that exhausted
+their retry budget; Lambda redelivers those on the next invocation.
+This is the single most operationally important detail of the Lambda
+runtime — without it, one bad record retries the entire batch
+indefinitely. With it, one bad record is dead-lettered and the batch
+proceeds.
+
+The `ItemIdentifier` for `BatchItemFailures` differs by source:
+Kinesis uses the record `SequenceNumber`, DDB Streams uses
+`EventID`, SQS uses `MessageId`. The handlers fill the right shape
+for each.
+
+**3. Dedup-friendly EventID shapes.** Each variant produces an
+EventID format suitable for `Deduper.MarkSeen`:
+
+- Kinesis: `<stream>/<shard>/<sequenceNumber>` — globally unique
+  across the stream's lifetime.
+- DDB Streams: the stream record's `EventID` field — unique per
+  stream record, ordering preserved within a shard.
+- SQS: `<arn>/<MessageId>` by default, override-able.
+
+The dedup contract is the same across all three: pass
+`WithDedup(deduper)` to the handler constructor; the handler claims
+the EventID before applying the merge. Re-deliveries (which happen
+under `BatchItemFailures` partial-failure replay) are caught and
+counted, not re-applied.
+
+### 6.3 Kinesis Lambda
+
+`pkg/exec/lambda/kinesis.NewHandler` is the simplest of the three.
+It takes a pipeline, a `Decoder[T]`, and options (dedup, metrics,
+retry, dead-letter), and returns the AWS Lambda Go SDK handler
+signature for `KinesisEvent`:
+
+```go
+func(ctx context.Context, evt events.KinesisEvent) (events.KinesisEventResponse, error)
+```
+
+The handler iterates `evt.Records`, decodes each, runs through the
+processor, and returns the response with `BatchItemFailures` populated
+for any records that exhausted retries.
+
+The pairing with `WithDedup` is deliberate. Lambda's
+`BatchItemFailures` semantics mean that a partial-batch failure causes
+the *successful* records before the failure to also be redelivered (in
+parallel-trigger mode) or replayed from the failure forward (in
+shard-order mode). Without dedup, those redeliveries double-count for
+non-idempotent monoids. With dedup, they're absorbed cleanly.
+
+The Phase 2 plan calls for a Kinesis-source-specific helper that takes
+a configured Deduper and a pipeline and produces a ready-to-use
+handler in fewer lines. Today, the wiring is explicit:
+
+```go
+handler, err := kinesis.NewHandler(pipe,
+    decodeRecord,
+    kinesis.WithDedup(deduper),
+    kinesis.WithMetrics(rec),
+    kinesis.WithMaxAttempts(5),
+)
+if err != nil { log.Fatal(err) }
+lambda.Start(handler)
+```
+
+### 6.4 DDB Streams Lambda
+
+`pkg/exec/lambda/dynamodbstreams.NewHandler` is the symmetric peer of
+the Kinesis variant, with one structural difference: the decoder takes
+the *whole* change record, not just bytes. The reason is that DDB
+Streams records carry no raw byte payload — they carry a typed
+`Change` with `NewImage`, `OldImage`, and `Keys` as
+`map[string]events.DynamoDBAttributeValue`.
+
+This shape is the right one for CDC pipelines. A typical decoder:
+
+```go
+func(rec *events.DynamoDBEventRecord) (Order, error) {
+    if rec.EventName == "REMOVE" {
+        return Order{}, dynamodbstreams.ErrSkipRecord
+    }
+    return decodeOrder(rec.Change.NewImage)
+}
+```
+
+The decoder branches on `EventName` to ignore deletes, reads
+`NewImage` for the canonical post-write state, and returns
+`ErrSkipRecord` (a sentinel) for records that shouldn't aggregate.
+The handler treats `ErrSkipRecord` as success — the record is
+counted as processed but doesn't reach the monoid.
+
+This is also the runtime that hosts `doc/search-integration.md`'s
+Pattern B projector. The projector's "decode old + new images, apply
+bucket function, decide to reindex" logic fits the decoder shape
+naturally — though for the projector specifically, the simpler
+"plain Lambda handler with no Murmur pipeline" shape is what gets
+deployed in practice (the projector's Store is OpenSearch, not
+Murmur's state, so the Murmur pipeline shape doesn't quite fit).
+
+### 6.5 SQS Lambda
+
+`pkg/exec/lambda/sqs.NewHandler` is the third variant. SQS is
+different from the streaming sources in two ways:
+
+**1. SQS has a native `SentTimestamp` per message.** The handler uses
+this for windowed-bucket assignment, so delayed deliveries (visibility
+timeout, requeue) land in the bucket of the original send time, not
+the receive time. This matters: a message delayed by 2 hours under a
+visibility-timeout retry shouldn't shift its contribution to a
+different bucket.
+
+**2. SQS has a `ContentDeduplicationId` for FIFO queues.** When the
+upstream uses content-dedup (or has its own correlation ID), the SQS
+EventID — `<arn>/<MessageId>` by default — is *not* the right dedup
+key, because retries from the upstream system arrive as different
+SQS messages with the same content-dedup ID. The
+`WithEventID(fn func(sqs.Message) string)` option overrides the
+default and pulls the upstream-stable ID out, so dedup catches
+re-sends from the upstream.
+
+These two SQS-specific concerns are why the SQS variant exists as a
+distinct package rather than a config flag on the Kinesis variant.
+The shapes are similar; the source-specific semantics are different
+enough to deserve their own home.
+
+### 6.6 Shared retry / metrics / dead-letter knobs
+
+All three Lambda variants take the same option set as the streaming
+runtime, applied to the underlying processor:
+
+- `WithDedup(state.Deduper)` — claims EventIDs, short-circuits
+  redeliveries.
+- `WithMetrics(metrics.Recorder)` — wires events / errors /
+  latencies under the pipeline name.
+- `WithMaxAttempts(int)` — caps per-record retries (default 3).
+- `WithRetryBackoff(base, max time.Duration)` — exponential backoff
+  with full jitter.
+- `WithDeadLetter(func(eventID, err))` — invoked when retries
+  exhaust. The Lambda variants invoke this AND populate
+  `BatchItemFailures`; users typically wire it to a structured-log
+  sink for forensics.
+
+The uniformity is the point. A pipeline that runs as a streaming
+worker with `streaming.WithDedup(d)` deploys to a Lambda variant
+with the same `lambda/kinesis.WithDedup(d)`; the underlying
+processor.Config is the same, the dedup table is the same, the
+metrics shape is the same. The runtime layer is thin glue around the
+processor's contract.
+
+### 6.7 When NOT to use the Lambda variants
+
+The Lambda runtimes are not the right shape for every pipeline:
+
+- **Sustained high throughput.** A pipeline with sustained
+  >5k events/sec/partition is cheaper on a long-running ECS Fargate
+  worker than on Lambda — Lambda's per-invocation overhead and
+  per-request pricing dominate. The crossover varies with batch
+  size and average record cost; benchmark before committing.
+- **Heavy batching needs.** `WithBatchWindow` requires a long-lived
+  process to accumulate deltas. Lambda's per-invocation lifecycle
+  doesn't preserve in-flight state across invocations (warm-start
+  notwithstanding); the batching context is gone the moment the
+  function returns. For hot-key pipelines, the streaming runtime
+  is the right shape.
+- **Pipelines that need a `Cache`.** Today the cache is configured on
+  the pipeline and the streaming runtime wires it. The Lambda
+  variants don't currently invoke the cache — this is a gap and a
+  Phase 2 task. For pipelines where Valkey acceleration matters,
+  use the streaming runtime.
+
+The decision matrix:
+
+| Workload | Runtime |
+|---|---|
+| Long-tail low-volume pipeline (<500 events/sec) | Lambda |
+| CDC from a DDB table | Lambda (DDB Streams variant) |
+| FIFO SQS queue with upstream dedup | Lambda (SQS variant) |
+| Pipeline needing `WithBatchWindow` for hot keys | streaming.Run |
+| Pipeline needing a Valkey cache today | streaming.Run |
+| Sustained high-rate Kinesis stream | streaming.Run (Phase 1, single-instance) or Lambda+KCL3 (Phase 2) |
+| Bootstrap from a Mongo/DDB snapshot | bootstrap.Run |
+| Backfill from S3 archive | replay.Run or sparkconnect |
+
+## 7. State stores
+
+DDB is source of truth. Valkey is a cache. The framework's central
+invariant is that no system state is unrecoverable from DDB; if Valkey
+is lost tomorrow, every pipeline can rebuild its accelerator state
+from DDB. This invariant cascades through the design of both stores
+and is the reason the Cache interface is structurally different from
+the Store interface.
+
+### 7.1 The Store contract
+
+`pkg/state.Store[V]` is a four-method interface
+(`pkg/state/state.go:21`):
+
+```go
+type Store[V any] interface {
+    Get(ctx context.Context, k Key) (val V, ok bool, err error)
+    GetMany(ctx context.Context, ks []Key) (vals []V, ok []bool, err error)
+    MergeUpdate(ctx context.Context, k Key, delta V, ttl time.Duration) error
+    Close() error
+}
+```
+
+`Key` is `(Entity string, Bucket int64)`. Bucket 0 means "no
+windowing"; non-zero buckets are the windowed-aggregation case.
+`MergeUpdate` is the atomic Combine: the store implementation chooses
+how to apply the delta — atomic ADD, conditional CAS, decode-merge-encode
+— but the result is always the monoid Combine of the existing value
+with the delta.
+
+`Get` and `GetMany` are reads. The `ok` flag distinguishes "key
+missing" (the monoid Identity is the right answer) from "key found
+with zero value." This matters for monoids whose value space includes
+zero — Sum's `0` is a real observation, not "missing" — and the
+windowed query layer relies on the distinction to decide whether to
+fold a missing bucket as Identity or to error.
+
+`Close` is for resource cleanup. Stores that hold connections (DDB
+client, Valkey client) close them on Close; stores that don't are
+no-op closers.
+
+The interface is intentionally narrow. Things deliberately not in the
+Store contract:
+
+- **Range / prefix scans.** Murmur's read patterns are point reads
+  (`Get`, `GetMany`) and bucket-range reads (handled by the query
+  layer composing multiple `Get` calls, not by a store-level scan).
+  A `Scan` method on the store would push us toward DDB Query
+  semantics, which differ across backends.
+- **Transactions.** Per-record Combine is atomic at the store-level
+  (atomic ADD, CAS); cross-record transactions are out of scope.
+- **Versioning / multi-version concurrency.** The CAS path uses a
+  version attribute internally but doesn't expose multi-version reads.
+- **Subscriptions / change feeds.** DDB Streams is a separate AWS
+  primitive consumed via the Lambda runtime; the Store doesn't
+  expose its own change feed.
+
+This narrowness is the reason swapping backends is mechanically
+straightforward. A Postgres-backed Store, a ScyllaDB-backed Store, a
+FoundationDB-backed Store all sit on the same four methods.
+`STABILITY.md` flags Postgres and ScyllaDB as Phase 3 work gated on
+real demand.
+
+### 7.2 DynamoDB: the source of truth
+
+Two DDB-backed Stores ship today:
+
+- **`pkg/state/dynamodb.Int64SumStore`**: specialized for `KindSum`
+  with `int64` values. MergeUpdate uses `UpdateItem ADD :delta`. No
+  read in the path; no application-side race resolution; no CAS retry.
+- **`pkg/state/dynamodb.BytesStore`**: generic CAS-backed Store for
+  `[]byte` values. MergeUpdate is read-modify-write under a
+  conditional write on a version attribute. Retries up to MaxRetries
+  on conflict.
+
+The split exists because the cost difference between the two paths is
+order-of-magnitude. `Int64SumStore.MergeUpdate` is one DDB write call;
+`BytesStore.MergeUpdate` is one read + one conditional write, plus
+retry budget for contention. For high-rate counter pipelines, the
+specialization is the difference between "DDB keeps up" and "DDB
+becomes the bottleneck."
+
+The schema is documented at `pkg/state/dynamodb/store.go:13`:
+
+```text
+PK pk (S)  — entity key
+SK sk (N)  — bucket ID (0 for non-windowed)
+   v  (N or B) — the value (NUMBER for sums, BYTES for sketches)
+   ttl (N) — optional Unix-epoch-seconds TTL
+   ver (N) — optimistic-concurrency version (CAS path only)
+```
+
+The `(pk, sk)` composite key encodes both the entity dimension and
+the bucket dimension. Non-windowed pipelines use `sk = 0` for every
+record; windowed pipelines use `sk = bucketID`. This means the
+windowed pipelines' DDB rows are partitioned by entity (so all
+buckets for one entity share a partition) and sorted by bucket-ID
+within the partition (so bucket-range queries are efficient).
+
+The `ttl` attribute is set on every windowed write to
+`now + retention`. DDB's native TTL feature evicts rows whose TTL has
+elapsed; eviction is asynchronous (DDB documents up to 48h delay) but
+free. This is the only mechanism Murmur uses to expire data; there's
+no application-side sweep job.
+
+The `ver` attribute is the version counter for the CAS path. Each
+successful CAS write increments it; the next read returns
+`(value, version)` and the next write conditional-checks `ver ==
+expected`. On `ConditionalCheckFailedException`, the store retries
+from the read with backoff. The retry budget defaults to 8 attempts
+with exponential backoff; under sustained CAS contention, the
+retries surface as `ErrMaxRetriesExceeded` (`pkg/state/dynamodb/bytesstore.go:48`).
+
+### 7.3 BatchGetItem and UnprocessedKeys
+
+`Int64SumStore.GetMany` and `BytesStore.GetMany` use DDB's
+`BatchGetItem` for read efficiency. The implementation is honest about
+the DDB-side constraint: BatchGetItem can return *partial* results
+when the response would exceed 16 MB, dropping some keys into
+`UnprocessedKeys`. The store's job is to retry the unprocessed keys
+with backoff until either everything is fetched or the retry budget
+exhausts.
+
+The retry loop is in `pkg/state/dynamodb/store.go`. It chunks 100
+keys per BatchGetItem (the DDB hard limit), uses jittered exponential
+backoff (50ms base, 5s cap), and gives up after `maxBatchAttempts = 8`
+attempts (~32s of patience). On give-up, the unfetched keys are
+returned with `ok = false` — same shape as "key missing" — and the
+caller sees a clean partial response.
+
+This matters for the query layer's `GetMany` shape and for the
+windowed `GetWindow` / `GetRange` calls (which under the hood are a
+single `GetMany` over the bucket range). The retry loop absorbs DDB's
+transient hiccups; the caller sees either a complete response or a
+clean degradation.
+
+### 7.4 Deduper: a cousin of Store
+
+`pkg/state/dynamodb.Deduper` (`pkg/state/dynamodb/dedup.go`) implements
+`state.Deduper`:
+
+```go
+type Deduper interface {
+    MarkSeen(ctx context.Context, eventID string) (firstSeen bool, err error)
+}
+```
+
+It's not a `Store[V]` because the contract is structurally different
+(a one-shot atomic claim, not an associative merge). The
+implementation is a dedicated DDB table whose only job is to claim
+EventIDs:
+
+```text
+pk  (S) — the EventID
+ttl (N) — Unix-epoch seconds when the entry should be evicted
+```
+
+`MarkSeen` issues `PutItem` with `ConditionExpression
+"attribute_not_exists(pk)"`. Concurrent claims by two workers race;
+exactly one's PutItem succeeds (returns `firstSeen=true`); the other
+gets `ConditionalCheckFailedException` (returns `firstSeen=false`).
+DDB's atomic conditional write is doing the work — no application-side
+locking, no fencing tokens.
+
+The TTL is what makes the dedup table sustainable. Without TTL, the
+table grows monotonically with the event stream; with TTL, entries
+evict after a configurable horizon (default 24h). The horizon must be
+greater than the source's max delivery latency — a source that can
+delay a record by 36h needs a 36h dedup horizon.
+
+The 16-way race test (`pkg/state/dynamodb/dedup_test.go`) verifies the
+"exactly one MarkSeen wins" property under concurrent contention. This
+is the test the framework regression-guards against — getting dedup
+wrong produces silent data corruption.
+
+### 7.5 Valkey: the cache
+
+`pkg/state.Cache[V]` is a different interface from `Store[V]`
+(`pkg/state/state.go:38`):
+
+```go
+type Cache[V any] interface {
+    Get(ctx context.Context, k Key) (V, bool, error)
+    GetMany(ctx context.Context, ks []Key) ([]V, []bool, error)
+    MergeUpdate(ctx context.Context, k Key, delta V, ttl time.Duration) error
+    Repopulate(ctx context.Context, k Key, val V, ttl time.Duration) error
+    Close() error
+}
+```
+
+The shape is similar — the same four methods plus `Repopulate` — but
+the semantic role is different. A Cache:
+
+- **Is allowed to lose data.** If a Valkey node restarts and loses
+  state, the framework recovers from DDB. Caches MUST tolerate
+  data loss without correctness violation.
+- **Is consulted on read with a fall-through.** When the cache
+  returns `ok=false` for a key, the caller falls back to the
+  underlying Store. The `Repopulate` method exists so the caller
+  can fill the cache from the Store's authoritative value after
+  a fall-through.
+- **Receives every MergeUpdate the Store does.** This is the
+  write-through contract: the streaming runtime applies each
+  MergeUpdate to the Store first (must succeed), then mirrors it
+  to the Cache (allowed to fail, recorded as a warning).
+
+Two Valkey-backed caches ship today:
+
+- **`Int64Cache`**: `Cache[int64]` for KindSum / KindCount pipelines.
+  MergeUpdate uses Valkey's atomic INCRBY; reads use GET / MGET.
+  Cache key encodes `(entity, bucket)` as
+  `"<keyPrefix>:<entity>:<bucket>"`.
+- **`BytesCache`**: `Cache[[]byte]` for sketches and any other
+  byte-encoded monoid. MergeUpdate is RMW with the caller-supplied
+  byte-monoid; the implementation reads the current value, runs the
+  monoid's Combine in-process, writes back. No native Valkey
+  PFADD/PFCOUNT acceleration today (per `STABILITY.md:18`); the
+  axiomhq HLL encoding doesn't match Valkey's PFADD format.
+
+The `keyPrefix` namespace is per-pipeline. Valkey's keyspace is flat,
+and multiple pipelines sharing a Valkey cluster need disjoint
+prefixes. The pipeline name is the natural choice; the framework
+doesn't enforce uniqueness because Valkey doesn't, but a typo here
+will cross-contaminate two pipelines' caches.
+
+### 7.6 Why Valkey, not Redis
+
+The architecture doc settles this: Valkey is the BSD-licensed Linux
+Foundation fork. Redis OSS went AGPL, which makes it incompatible with
+the Apache 2.0 license Murmur targets. Valkey is wire-compatible with
+Redis (the Valkey-go client speaks both protocols), supports the
+Valkey 8 Bloom-filter primitive natively, and has an actively-maintained
+Linux Foundation governance model. There's no reason to ship with
+Redis as the default.
+
+The `valkey-io/valkey-go` client is the import; its API is similar to
+the popular Redis Go clients. The framework doesn't expose
+client-specific features, so swapping to a Redis-protocol client (if
+some user has a hard requirement) is mechanical.
+
+### 7.7 Cache write-through and read fall-through
+
+The streaming runtime's flow with a configured cache is:
+
+1. **MergeUpdate to the Store** (must succeed). This is the durability
+   barrier — once the Store has the write, the cache can lag or fail
+   and the framework still returns correct values.
+2. **MergeUpdate to the Cache** (best-effort). Failures are logged via
+   `metrics.RecordError` but don't fail the record. The cache will
+   converge eventually via subsequent updates or via Repopulate on
+   read fall-through.
+
+The query layer's flow with a configured cache (when wired — Phase 1
+ships the Store-only path; cache-aware reads are an in-progress
+addition):
+
+1. **Read the cache.** If `ok=true`, return.
+2. **Fall through to the Store.** If the cache missed, read the
+   authoritative value.
+3. **Repopulate the cache** with the Store's value and the
+   pipeline's TTL. Fire-and-forget; failures log but don't fail the
+   read.
+
+The asymmetry — cache writes are write-through, cache reads have a
+fall-through — is the right shape for "DDB is truth, Valkey
+accelerates." A misconfigured cache is a perf problem, not a
+correctness problem; the system degrades gracefully to DDB-direct
+reads when the cache is cold or unavailable.
+
+### 7.8 The CAS retry budget and contention shape
+
+`BytesStore`'s CAS path is the only place sustained contention can
+fail to make progress. The shape:
+
+```mermaid
+flowchart TD
+    Start[MergeUpdate]
+    Start --> Read[GetItem<br/>read v + ver]
+    Read --> Combine[Monoid.Combine<br/>v ⊕ delta]
+    Combine --> Write[ConditionalUpdate<br/>ver == expected]
+    Write -->|"success"| Done[Increment ver, return nil]
+    Write -->|"CCF (conflict)"| Backoff[Sleep with jitter]
+    Backoff -->|"retries left"| Read
+    Backoff -->|"out of retries"| Err[ErrMaxRetriesExceeded]
+```
+
+Under sustained high contention on a single key (e.g., a hot HLL row
+with 10k+ writes/sec), CAS will fail to make progress and
+`ErrMaxRetriesExceeded` will surface. The Phase 1 mitigation is the
+Valkey cache: configure a `BytesCache` for the same monoid, and the
+in-memory RMW absorbs the contention. Periodic snapshot back to DDB
+keeps DDB's view eventually-consistent with the cache's. Phase 2 will
+add native Valkey-backed sketch acceleration; Phase 3 may add a
+DDB-side serialization primitive (a partition-key shard suffix to
+spread contention). Today's recommendation is "if you have hot CAS
+rows, configure a cache."
+
+The mitigation shape — cache-absorbs-contention, periodic
+snapshot-to-truth — is the standard pattern from production systems
+(Twitter's pre-Manhattan stack used it heavily, Riak / DynamoDB
+applications use it commonly). The cost is that the cache is now in
+the durability path; if it goes down between snapshots, recent writes
+to that hot key are lost. The tradeoff is acceptable for the
+problem class — an HLL with 10k+ writes/sec for unique users is a
+high-tolerance-for-imprecision domain — but should be documented in
+the deployment.
+
+## 8. Query layer
+
+The query layer is the framework's read side. The architecture doc
+calls it "the layer nobody else has built" and means it: every other
+streaming-aggregation framework leaves the read API as the user's
+problem. Murmur ships a generic Connect-RPC service with six RPCs that
+cover the canonical query shapes. This section walks them.
+
+### 8.1 The six RPCs
+
+The shape is defined in `proto/murmur/v1/query.proto` and served by
+`pkg/query/grpc.Server`:
+
+- **`Get(entity)`** — single-entity, all-time value (or current
+  windowed value). Returns one `Value{present, data}`.
+- **`GetMany(entities)`** — batched single-entity reads. Returns one
+  `Value` per requested entity, in input order.
+- **`GetWindow(entity, duration)`** — sliding-window value: merge of
+  the most recent `duration`-worth of buckets ending at `now`.
+- **`GetRange(entity, start, end)`** — absolute range value: merge of
+  buckets covering `[start, end]`.
+- **`GetWindowMany(entities, duration)`** — batched per-entity sliding
+  windows. The shape `doc/search-integration.md` calls out as
+  bottleneck-relevant for ML rerank with windowed counter features.
+- **`GetRangeMany(entities, start, end)`** — batched per-entity
+  absolute ranges. Symmetric peer of GetWindowMany.
+
+The four primitives — point-vs-batch × all-time-vs-windowed — cover
+every read shape Murmur's known users have hit. The `GetMany`
+specializations of the windowed variants land the read-amplification
+where it should: in one batched DDB request rather than N concurrent
+ones.
+
+### 8.2 The bucket-merge math
+
+A windowed query on a daily-bucketed pipeline reads N buckets and
+folds them via the monoid Combine. The implementation is in
+`pkg/query.GetWindow` (`pkg/query/window.go`):
+
+1. Compute `(lo, hi) = windowed.LastN(now, duration)` — the inclusive
+   bucket-ID range covering the window.
+2. Build the `[]state.Key` for `(entity, lo)` through `(entity, hi)`.
+3. `Store.GetMany(ctx, keys)` — one batched fetch.
+4. Fold via the monoid: starting from `monoid.Identity()`, Combine
+   each fetched value (treating missing buckets as Identity).
+5. Return the final folded value.
+
+The fold is in stable order (bucket-ID ascending). Order doesn't
+matter for the result (Combine is associative) but does matter for
+debuggability and test reproducibility.
+
+`GetRange` is the same shape with `(lo, hi) =
+windowed.BucketRange(start, end)`. `GetWindowMany` and `GetRangeMany`
+are the per-entity loop wrapped around one combined `GetMany` over
+all entity-bucket pairs.
+
+The cost shape: a "last 30 days" query on a daily-bucketed pipeline is
+30 buckets × 1 GetMany. A "last 7 days" query on an hourly-bucketed
+pipeline is 168 buckets × 1 GetMany. A "last 7 days" query on a
+minute-bucketed pipeline is 10080 buckets × ~6 GetManys (DDB's
+BatchGetItem caps at 100 keys per request).
+
+For Sum monoids the per-bucket merge cost is negligible. For sketches
+(HLL, TopK, Bloom) the merge is a decode-merge-encode roundtrip per
+bucket; 720 buckets means 720 sketch merges in process. The
+singleflight coalescing layer absorbs concurrent identical queries
+into one underlying fold; sustained high cardinality of distinct
+queries is when the cost surfaces.
+
+### 8.3 Singleflight coalescing
+
+`pkg/query/grpc.Server` wraps the four read methods in
+`golang.org/x/sync/singleflight`. The keying is the request shape: for
+`Get` it's `"get:" + entity`; for `GetWindow` it's `"window:" + entity
++ ":" + duration`; for `GetRange` it's `"range:" + entity + ":" +
+start + ":" + end`.
+
+Concurrent requests for the same key resolve through one underlying
+fold. A thousand simultaneous feed renders asking for the same hot
+counter become one DDB read and one merge; the rest get the cached
+future's result. The dedup window is the lifetime of the in-flight
+call — once it resolves, the next request is fresh.
+
+This is the canonical "thundering herd" defense for read-heavy
+workloads. Without it, a viral post's counter row can serve 10k+ qps
+to DDB; with it, the same load resolves at <1 underlying read per
+call, regardless of fanout. The cost is bounded memory for the
+in-flight singleflight.Group state, which is per-request and freed
+on resolution.
+
+### 8.4 `fresh_read`: the read-your-writes flag
+
+Every read RPC carries a `fresh_read bool` flag. When true, the
+singleflight coalescing is bypassed for that call — every fresh_read
+request results in an underlying store read. Use it sparingly; it's
+the read-your-writes escape hatch for cases like "the user just
+liked the post and is about to see their own action reflected."
+
+The flag does NOT bypass any future cache layer (the `Cache.Get`
+fall-through). It only bypasses the in-flight singleflight. The
+distinction matters: `fresh_read` is "give me an actual store
+roundtrip"; cache configuration is "where to read from." A
+fresh_read query against a Cache-configured pipeline still goes
+through the cache; cache miss falls through to DDB, cache hit
+returns the cached value (which is sub-second-stale by the cache's
+write-through semantics).
+
+The flag is request-side only. There's no `fresh_write`; every
+MergeUpdate is fresh by construction.
+
+### 8.5 The Encoder pattern and Phase 1's bytes-on-the-wire
+
+Phase 1's gRPC service exposes a generic `Value{present bool, data
+bytes}` shape. Every read RPC returns one or more of these; clients
+decode `data` per the pipeline's monoid kind. The Encoder is
+configured server-side via `grpc.Int64LE()`, `grpc.BytesIdentity()`,
+or a user-supplied function:
+
+- **`Int64LE`** — 8-byte little-endian for int64 sums.
+- **`BytesIdentity`** — pass-through for sketches whose marshaled
+  form is already the desired wire format.
+- **Custom** — for user-defined types.
+
+The clients-decode-by-kind shape is the Phase 1 simplification.
+Pipeline-typed responses (a `CounterResponse` with a typed `int64
+value`, an `HLLResponse` with a typed cardinality) require codegen
+from the pipeline definition, which is the Phase 2 task. Today,
+clients decode bytes; tomorrow, clients consume typed responses.
+
+The cost of the Phase 1 shape: every client must mirror the
+encoder's format. The `Int64LE` encoder's 8-byte little-endian is
+straightforward; the sketch encodings are not, because they depend
+on the underlying library's binary layout. This is honest about the
+tradeoff — the Phase 1 query layer is generic, not ergonomic. The
+Phase 2 codegen will close the gap.
+
+### 8.6 The per-RPC response wrappers
+
+Each RPC has its own response shape:
+
+- `GetResponse{value Value, query QueryStats}`
+- `GetManyResponse{values []Value, query QueryStats}`
+- `GetWindowResponse{value Value, bucket_count int, query QueryStats}`
+- `GetRangeResponse{value Value, bucket_count int, query QueryStats}`
+- `GetWindowManyResponse{values []Value, bucket_counts []int, query QueryStats}`
+- `GetRangeManyResponse{values []Value, bucket_counts []int, query QueryStats}`
+
+The `bucket_count` field is the merge-cost signal: how many buckets
+the fold visited. For "last 30 days daily" it's 30; for "last 7 days
+minutely" it's 10080. Clients can use this to detect query-shape
+issues (too-fine-grained reads on too-long windows).
+
+`QueryStats` carries timing: total RPC duration, fold duration, store
+duration. Useful for debugging slow reads; cheap to populate; passed
+through to the InMemory recorder for the admin UI's "slowest queries"
+view.
+
+### 8.7 Lambda mode: `pkg/query.LambdaQuery`
+
+Murmur's lambda-architecture deployment shape lives in
+`pkg/query/lambda.go`. The shape is two stores and one monoid:
+
+```go
+type LambdaQuery[V any] struct {
+    View   state.Store[V]    // the precomputed batch view
+    Delta  state.Store[V]    // the streaming accumulator since last batch
+    Monoid monoid.Monoid[V]
+}
+```
+
+`Get` reads both stores and returns `view ⊕ delta` (or whichever
+half is present, falling back to identity otherwise). `GetWindow`
+and `GetRange` do the same per-bucket fold across both stores.
+
+The architecture doc calls this "lambda-architecture-as-deployment-mode."
+The pipeline isn't aware that a batch view exists; the query layer
+combines the two stores at read time via the same monoid. The
+streaming runtime writes only to the delta store; the periodic batch
+job overwrites the view store and resets the delta to identity at
+swap time.
+
+This shape is the cleanest expression of Summingbird's lambda
+mode: the same monoid's Combine is doing both the batch fold (Spark
+SUM) and the read-side merge (`Combine(view, delta)`). Correctness
+is invariant; only the deployment posture changes.
+
+### 8.8 Warmup
+
+`pkg/query.WarmupKeys(ctx, store, keys)` is a one-shot cache primer.
+It issues GetMany for the supplied keys, populates a configured cache
+via Repopulate, and returns. The use case is post-restart cache
+warming: after a Valkey node restart, the cache is cold; the first
+N requests for popular keys eat the DDB fall-through cost. Warmup
+fronts a known-popular-keys list at deploy time.
+
+The warmup primitive is small (~50 lines) but operationally
+important. Without it, cold-cache p99 doubles for the duration of
+the warmup-by-traffic period (5-15 minutes for typical workloads).
+With it, warm-up is bounded by the keys list size and explicit.
+
+The keys list is user-supplied — a snapshot of "popular entities" or
+the result of a top-K Murmur pipeline run on past traffic. The
+framework doesn't generate the list itself; producing it is a
+deployment-time concern.
+
+## 9. Observability
+
+`pkg/metrics.Recorder` is the per-event observability surface:
+
+```go
+type Recorder interface {
+    RecordEvent(pipeline string)
+    RecordError(pipeline string, err error)
+    RecordLatency(pipeline string, op string, d time.Duration)
+}
+```
+
+Three implementations:
+
+- **`Noop{}`** — discards everything. Default when no recorder is
+  configured. Zero-allocation, compiler-inlinable.
+- **`InMemory{}`** — keeps per-pipeline counters and bounded latency
+  histograms in RAM. Powers the admin REST API and the web UI's
+  "live metrics" cards. Suitable for single-process workers; for
+  multi-replica deployments, aggregate via Prometheus / OpenTelemetry.
+- **User-supplied** — typically a Prometheus-backed recorder or a
+  CloudWatch EMF emitter. Murmur doesn't ship one, deliberately —
+  the choice of metrics backend is an organizational concern, not a
+  framework one.
+
+The recorder is wired today in `streaming.Run` only
+(`STABILITY.md:36`: "only `streaming.Run` is wired today; bootstrap /
+replay / sources are not"). Bootstrap and replay record their own
+events via the processor's metrics integration when a recorder is
+passed via `WithMetrics`, but the source-side metrics (Kafka fetch
+latency, Kinesis GetRecords latency, S3 archive read throughput) are
+not wired. This is a known gap and the priority-1 sharp edge in
+`STABILITY.md`.
+
+The latency operations the runtime fires today are `store_merge`,
+`cache_merge`, and `ack`. These are the three bottleneck candidates
+for the streaming hot path; histograms expose p50/p95/p99 for each.
+The query layer fires `query_get`, `query_get_many`, `query_window`,
+`query_range` plus a per-RPC `fold_duration` for the merge cost.
+
+The pipeline name is the metric label. For pipelines that fan out
+across multiple workers, the recorder side aggregates by name; the
+admin server's Pipeline List view groups by name and sums.
+
+## 10. Bootstrap to live handoff
+
+This is the section that's most subtle and where most of the
+framework's "subtle correctness" budget gets spent. The handoff
+problem is straightforward to state and surprisingly hard to solve
+correctly.
+
+### 10.1 The problem
+
+You have a Mongo collection that's the source of truth for an
+application. You want to maintain a counter aggregation over events
+on that collection — every order placed, every comment written. The
+events are visible in two places:
+
+- **The collection itself** (snapshot semantics). A scan of the
+  collection at time T returns every document that exists at T.
+- **The Mongo Change Stream** (CDC semantics). A change stream
+  started at time T emits every insert/update/delete from T forward.
+
+To populate Murmur's state, you do both: scan the collection
+(bootstrap) and then start consuming the change stream (live
+streaming). The hard part is making sure no event is missed *and* no
+event is double-counted across the boundary.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Mongo as Mongo
+    participant Boot as bootstrap.Run
+    participant Live as streaming.Run
+    participant State as DDB state
+
+    App->>Mongo: writes A, B (before bootstrap)
+    Boot->>Mongo: CaptureHandoff()<br/>open change stream<br/>read resume token T0
+    Note over Boot: T0 captured<br/>(start of stream)
+    App->>Mongo: writes C, D (during bootstrap)
+    Boot->>Mongo: Scan collection<br/>finds A, B, C, D
+    Boot->>State: merge A, B, C, D
+    Boot-->>Live: hand off T0
+    Live->>Mongo: open change stream<br/>resume from T0
+    Note over Live: replays C, D<br/>(also any during-bootstrap writes)
+    App->>Mongo: writes E, F
+    Live->>State: merge C, D, E, F<br/>(C, D dedup-skipped)
+    Live->>Mongo: ack stream
+```
+
+### 10.2 Why the simple shape doesn't work
+
+The naive sequence — "scan, then start the stream" — has a window
+where events written between scan-end and stream-start are lost.
+Reverse it — "start the stream, then scan" — and you have the
+opposite problem: events written between stream-start and scan-end
+are double-counted (once by the stream, once by the scan).
+
+The Debezium-style solution is what Murmur uses: capture the change
+stream's resume token *before* the scan starts, scan the collection,
+then start the live stream from the captured token. This guarantees:
+
+- **No missed events**: the captured token is from a point before
+  any during-bootstrap writes. When live picks up from that token,
+  every event from that point forward is delivered.
+- **Bounded double-counting**: events written between capture and
+  scan-end appear in *both* the scan (as part of the collection) and
+  the resumed stream (as change events). At-least-once dedup at the
+  state-store boundary catches the duplicates.
+
+The dedup is what makes this work safely. Without dedup, every
+during-bootstrap event is double-counted for non-idempotent monoids
+(Sum, HLL, TopK). With dedup keyed on the document's `_id` (for
+bootstrap) and the stream's event ID (for live), the dedup table has
+both forms and treats them as the same logical event.
+
+The "logical event" mapping is the non-obvious part. The bootstrap
+EventID is `doc._id` — stable across re-runs of bootstrap, stable
+across collection scans. The live EventID is the change stream's
+event ID — also `doc._id` for inserts, with collision-free uniqueness
+for updates. The two share `doc._id` for the canonical case, which is
+what makes dedup work cleanly. For pipelines aggregating updates as
+well as inserts, the EventID shape needs to incorporate the change
+ID; this is where `extractID` (`pkg/source/snapshot/mongo/mongo.go`)
+gets brittle for non-`_id` types beyond ObjectID/string/int.
+
+### 10.3 The handoff token: an opaque blob
+
+The handoff token is `[]byte` from the framework's perspective. The
+Mongo source returns the encoded resume token; future sources (DDB
+Streams, JDBC change tables) will return their own tokens. The
+bootstrap runtime treats the token as opaque — it's the live source's
+job to know how to interpret it.
+
+The shape of the contract:
+
+```go
+type Source[T any] interface {
+    Read(ctx context.Context, out chan<- Record[T]) error
+    Name() string
+    Close() error
+}
+
+type SourceFromToken[T any] interface {
+    NewFromToken(ctx context.Context, token []byte) (Source[T], error)
+}
+```
+
+The second interface (or its equivalent) is what the deployment
+glue uses to construct a live source from a bootstrap-captured
+token. The shape doesn't formally exist as a Go interface today —
+each source has its own constructor that takes a token-equivalent
+parameter — but the *contract* is uniform across sources.
+
+For Mongo: the token is the BSON-encoded change stream resume token.
+The live source's constructor takes a `Watch` aggregation pipeline
+config that accepts a `ResumeAfter` option; the token plugs in.
+
+For DDB Streams: the token is the shard iterator position. The live
+source's constructor takes `StartingPosition.AT_SEQUENCE_NUMBER` with
+the captured sequence number.
+
+For Kinesis: the token would be the per-shard sequence number, but
+the Phase 1 Kinesis source doesn't support starting from a specific
+sequence number per shard (it's `LATEST` or `TRIM_HORIZON` only). KCL
+v3 will fix this; today, Kinesis sources are bootstrap-incompatible.
+
+### 10.4 Atomic state-table swap
+
+The other side of bootstrap is "replay backfill into a fresh table,
+swap atomically when complete." `pkg/swap.Manager` is the swap
+primitive (`pkg/swap/swap.go`).
+
+The swap protocol:
+
+1. Live pipeline writes to `<alias>_v<N>` (e.g. `page_views_v3`).
+2. Replay or bootstrap job runs into `<alias>_v<N+1>` (the shadow
+   table). Live keeps writing to v<N>; the shadow is independent.
+3. When the replay completes, operator (or automation) calls
+   `swap.Manager.SetActive(alias, N+1)`.
+4. Future query requests resolve the alias to v<N+1> and read from
+   there.
+5. Live writers reload the alias on a deploy or via a
+   reload-on-config-change hook (TBD; today it's a deploy).
+6. v<N> is dropped after a grace period.
+
+The swap is atomic at the alias-table level: a single conditional
+UpdateExpression advances the version pointer, and concurrent swap
+attempts can't regress (only `ver > current_ver` is accepted).
+
+The non-atomic concern is the live-writer reload. Between the swap
+and the writer reload, live writers continue writing to v<N>; those
+writes are lost when v<N> is dropped (or worse, if v<N+1> doesn't
+get those writes via a side path). The mitigation is the reload
+hook plus a grace period: keep v<N> alive for long enough that
+readers and writers have all picked up the new version. Today the
+grace is operator-managed; Phase 2 work is to formalize the reload
+contract via an admin RPC.
+
+The atomic swap is what makes the lambda-architecture deploy mode
+work. The batch view is rebuilt every day (or every week, or every
+hour); each rebuild lands as a v-bumped shadow table; the swap
+promotes the new view atomically. Readers get a consistent view
+boundary — either the old view or the new one, never a half-merged
+mix.
+
+## 11. Backfill via Spark Connect
+
+`pkg/exec/batch/sparkconnect` is the framework's "scale-out batch
+backfill" path. It dispatches user-supplied SQL aggregations against
+a persistent Spark cluster via Spark Connect, and writes the resulting
+DataFrame back into a Murmur state table.
+
+This section is short because the package itself is small (one
+executor, one entry function for int64 sums) and because the
+operational shape is honest about its rough edges.
+
+### 11.1 What the executor does
+
+`sparkconnect.RunInt64Sum(ctx, cfg, store, ttl)` does four things:
+
+1. Connects to a Spark Connect endpoint (`cfg.Remote`, e.g.
+   `sc://emr-master.internal:15002`).
+2. Runs the user-supplied SQL aggregation that produces `(pk,
+   v)` rows.
+3. Streams the resulting DataFrame back into the Go process via
+   the Spark Connect Go client.
+4. Calls `store.MergeUpdate(ctx, k, v, ttl)` for each row.
+
+The user-supplied SQL is a string. There's no monoid-to-SQL codegen;
+the user writes the SQL that produces the correct aggregation. For
+KindSum on int64, the SQL is a `GROUP BY pk, SUM(...)`; the executor
+trusts that and writes the rows into DDB.
+
+This is honest about the Phase 1 scope. Murmur doesn't yet codegen
+Spark SQL from structural monoids; that's the Phase 2 task. Today,
+the user owns the SQL.
+
+### 11.2 The fork dependency
+
+The executor depends on `github.com/apache/spark-connect-go`, which
+has a `replace` directive in `go.mod` pointing to
+`github.com/pequalsnp/spark-connect-go`. This is Kyle's fork,
+production-validated at GSS, and is the support contract.
+
+The cost: anyone importing `pkg/exec/batch/sparkconnect` must mirror
+the `replace` directive in their own `go.mod`. This is documented
+prominently in the README and in `STABILITY.md`. The Phase 2 plan is
+to upstream the patches or split sparkconnect into its own module
+that consumers opt into separately.
+
+This is the framework's most-honest-named limitation. The fork
+exists because upstream has gaps that GSS hit in production; the
+fork is unblocked here but not yet upstreamed. Track the upstream
+PRs to know when the `replace` becomes optional.
+
+### 11.3 Where the backfill plugs into the pipeline
+
+The shape is:
+
+1. Live pipeline runs as usual, writing to `<alias>_v<N>`.
+2. Operator (or scheduled job) creates `<alias>_v<N+1>`.
+3. `sparkconnect.RunInt64Sum` runs into `<alias>_v<N+1>` from S3
+   archive (the SQL is `SELECT pk, SUM(...) FROM events ... GROUP
+   BY pk`).
+4. When complete, `swap.Manager.SetActive` advances the alias.
+
+The "user-supplied SQL" shape means the SQL must match the
+pipeline's monoid semantics. For Sum it's straightforward; for HLL
+or TopK, the user must supply the right Spark UDAF (Phase 2 will
+codegen these). For windowed pipelines, the SQL must produce
+`(pk, sk, v)` triples and the loop must write each as a windowed
+record; today `RunInt64Sum` handles non-windowed only, with
+windowed-aware variants pending.
+
+### 11.4 Where the seams are
+
+Three places this is fragile:
+
+1. **Spark Connect endpoint availability.** If the EMR cluster is
+   down, the executor errors immediately. There's no retry or
+   multi-endpoint failover. For scheduled backfills, wrap the
+   executor call in retries at the orchestration layer (Step
+   Functions, Airflow).
+2. **DataFrame streaming progress.** A long-running aggregation
+   (90 days × multi-TB of events) takes minutes to produce its
+   first row and may time out the Spark Connect session. Tune the
+   `cfg.SessionTimeout` if needed; the executor doesn't checkpoint
+   mid-stream.
+3. **Schema mismatch.** The SQL's output schema must produce
+   `(pk string, v bigint)` for `RunInt64Sum`. Other shapes error at
+   the row-streaming step. The executor's error messages are
+   reasonable but the "schema doesn't match" cases are common
+   enough during pipeline development that the user should test the
+   SQL via the Spark Connect REPL first.
+
+These are all "the user's problem" today; Phase 2 work is to push
+some of them into the framework.
+
+## 12. Wire contracts
+
+Murmur exposes two RPC surfaces — the data-plane query service and
+the control-plane admin service — both built on Connect-RPC. The
+choice of Connect over plain gRPC was deliberate; this section walks
+why.
+
+### 12.1 Connect-RPC: three protocols on one port
+
+`pkg/query/grpc.Server` and `pkg/admin.Server` both serve via
+Connect-RPC. The header note in `pkg/query/grpc/server.go:1-15`
+captures it:
+
+> A single mount-point speaks THREE protocols simultaneously:
+> - gRPC for Go / JVM / Rust / Python clients
+> - gRPC-Web for browsers without a sidecar proxy
+> - Connect (HTTP + JSON) for browsers and curl
+
+The wire contract is defined in proto
+(`proto/murmur/v1/query.proto`, `proto/murmur/admin/v1/admin.proto`).
+Connect generates the server interfaces and client stubs; the same
+handler implementation serves all three protocols. The choice of
+protocol is per-call, picked by the client's `Content-Type` header.
+
+The cost: Connect introduces a small per-RPC overhead (the protocol
+multiplexer) compared to bare gRPC. Measured cost: <50µs per call,
+which is invisible against any DDB-backed read.
+
+The benefit: zero-config browser access. The `cmd/murmur-ui` web app
+talks to the admin service via the Connect/HTTP+JSON protocol with
+no sidecar, no transcoder, no gRPC-Web proxy. `curl` works for
+debugging without a special client. Cross-language clients (Java,
+Python, Rust) generate their own stubs from the .proto via `buf
+generate` and use whichever protocol is convenient.
+
+### 12.2 Cross-language client gen
+
+The proto contracts are first-class. The Buf workspace
+(`buf.yaml`, `buf.gen.yaml`) generates Go bindings into
+`proto/gen/`; users can add additional generators (Java, Python,
+TypeScript, Rust) by editing `buf.gen.yaml` and re-running
+`buf generate`.
+
+This is the cross-language story: Murmur's Go server doesn't care
+what language the client is in. A Java application reading a
+counter does so via the standard grpc-java client against the
+gRPC protocol; a TypeScript UI does so via `@connectrpc/connect-web`
+against the Connect protocol; a curl-driven debug session does so
+via plain HTTP+JSON. All three hit the same routes on the same Go
+server.
+
+The framework's own `pkg/admin/dist` web UI is bundled as embedded
+assets (`pkg/admin/embed.go`) and served from the same admin port.
+The UI consumes the admin service via Connect+JSON, so there's no
+build-time codegen split between the server and the UI; the .proto
+is the single source of truth.
+
+### 12.3 What the .proto contracts pin
+
+The .proto is the API contract. Pinning it means:
+
+- **Server upgrades are wire-stable.** A new Murmur version that
+  adds a new RPC doesn't break old clients; old RPCs keep their
+  shape.
+- **Cross-version client compatibility.** A 6-month-old client can
+  call a current server because the .proto's backward compatibility
+  rules (don't remove fields, don't renumber, etc.) are enforced.
+- **Protocol independence.** Switching from gRPC to Connect+JSON
+  for a particular client is a Content-Type change; no code change.
+
+Phase 2 work is per-pipeline typed responses — codegen specific
+proto messages for each pipeline (a `CounterResponse` for Sum
+pipelines, an `HLLCardinalityResponse` for HLL pipelines), so
+clients consume typed values rather than decoding bytes. The .proto
+contract today is generic (the `Value{present, data bytes}` shape
+from Section 8.5); Phase 2 makes it pipeline-specific. The
+mechanism for this is a generator that takes the pipeline
+definition and emits a per-pipeline .proto, which is compiled into
+the server's mount.
+
+The generic shape is what Phase 1 ships; the typed shape is the
+roadmap. Today, decoders live client-side; tomorrow, they'll be
+generated from the pipeline definition.
+
 <!-- next-section -->
