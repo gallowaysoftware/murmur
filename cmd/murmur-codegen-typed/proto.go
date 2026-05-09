@@ -10,20 +10,22 @@ import (
 
 // renderProto emits the .proto file for the given Spec.
 //
-// Layout: one request and one response message per method, then
-// the service definition. Field numbers for request fields follow
-// declaration order; response is { value(int64) | cardinality(int64),
-// present bool }.
+// Response message shape varies by pipeline kind:
 //
-// We deliberately do NOT use the proto-generator framework or
-// protobuf.proto descriptors — text/template emits cleaner output
-// and the schema is small enough that template churn is fine.
+//	sum   → { int64 value, bool present }
+//	hll   → { int64 value, bool present } (value is the cardinality)
+//	topk  → { repeated TopKItem items, bool present }
+//	bloom → { int64 capacity_bits, int32 hash_functions, int64 approx_size, bool present }
+//
+// TopK pipelines emit a `TopKItem` message at the top of the proto so
+// the response can reference it.
 func renderProto(s *Spec) ([]byte, error) {
 	t, err := template.New("proto").Funcs(template.FuncMap{
 		"protoFieldType": protoFieldType,
 		"plus1":          func(i int) int { return i + 1 },
-		"responseField":  responseFieldName,
+		"responseBody":   responseBody,
 		"goPackageShort": goPackageShort,
+		"isTopK":         func(k PipelineKind) bool { return k == PipelineTopK },
 	}).Parse(protoTemplate)
 	if err != nil {
 		return nil, err
@@ -44,15 +46,20 @@ package {{.ProtoPackage}};
 
 option go_package = "{{.ProtoGoPackage}};{{goPackageShort .ProtoGoPackage}}";
 
+{{if isTopK .Service.PipelineKind}}
+// TopKItem is one (key, count) pair from a Misra-Gries Top-K summary.
+message TopKItem {
+  string key = 1;
+  int64 count = 2;
+}
+{{end}}
 {{range .Service.Methods}}
 message {{.Name}}Request {
 {{range $i, $f := .Request}}  {{protoFieldType $f.Type}} {{$f.Name}} = {{plus1 $i}};
 {{end}}}
 
 message {{.Name}}Response {
-  {{responseField $.Service.PipelineKind}} value = 1;
-  bool present = 2;
-}
+{{responseBody $.Service.PipelineKind}}}
 {{end}}
 service {{.Service.Name}} {
 {{range .Service.Methods}}  rpc {{.Name}}({{.Name}}Request) returns ({{.Name}}Response);
@@ -73,18 +80,20 @@ func protoFieldType(t string) string {
 	}
 }
 
-// responseFieldName returns the name of the value field for the
-// given pipeline kind. Sum pipelines return int64; HLL pipelines
-// return int64 (cardinality). Both shapes use field number 1 with
-// the type baked in.
-func responseFieldName(k PipelineKind) string {
+// responseBody returns the proto-field block for a Response message,
+// per pipeline kind. The block is indented and includes the trailing
+// newline before the closing brace; the template wraps it with
+// `message Foo { ... }`.
+func responseBody(k PipelineKind) string {
 	switch k {
-	case PipelineSum:
-		return "int64"
-	case PipelineHLL:
-		return "int64"
+	case PipelineSum, PipelineHLL:
+		return "  int64 value = 1;\n  bool present = 2;\n"
+	case PipelineTopK:
+		return "  repeated TopKItem items = 1;\n  bool present = 2;\n"
+	case PipelineBloom:
+		return "  int64 capacity_bits = 1;\n  int32 hash_functions = 2;\n  int64 approx_size = 3;\n  bool present = 4;\n"
 	default:
-		return "int64"
+		return "  // unsupported pipeline kind\n  bool present = 1;\n"
 	}
 }
 
@@ -95,7 +104,6 @@ func goPackageShort(p string) string {
 		return "pb"
 	}
 	last := path.Base(p)
-	// Strip leading dots and special chars.
 	last = strings.TrimLeft(last, ".")
 	if last == "" {
 		return "pb"

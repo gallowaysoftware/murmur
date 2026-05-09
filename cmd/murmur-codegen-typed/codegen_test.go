@@ -9,31 +9,54 @@ import (
 )
 
 // TestGenerate_BotInteractions exercises the codegen end-to-end against
-// the worked example in examples/typed-rpc-codegen/bot-interactions.
-// Compares output to the checked-in expected/ files.
+// the Sum-pipeline example in examples/typed-rpc-codegen/bot-interactions.
+// Compares output to the checked-in _expected/ files.
 //
 // To regenerate the expected files after intentional template changes:
 //
 //	go run ./cmd/murmur-codegen-typed \
 //	   --in examples/typed-rpc-codegen/bot-interactions/pipeline-spec.yaml \
-//	   --out examples/typed-rpc-codegen/bot-interactions/expected/
+//	   --out examples/typed-rpc-codegen/bot-interactions/_expected/
 func TestGenerate_BotInteractions(t *testing.T) {
+	runGoldenTest(t, "bot-interactions", []string{
+		"bot_interaction_count_service.proto",
+		"bot_interaction_count_service_server.go",
+	})
+}
+
+// TestGenerate_TopProducts exercises the TopK pipeline kind. The generated
+// proto carries a TopKItem message and a `repeated TopKItem items` response.
+func TestGenerate_TopProducts(t *testing.T) {
+	runGoldenTest(t, "top-products", []string{
+		"top_products_service.proto",
+		"top_products_service_server.go",
+	})
+}
+
+// TestGenerate_RecentVisitors exercises the Bloom pipeline kind. The
+// generated response carries the filter's structural metadata
+// (capacity_bits, hash_functions, approx_size) rather than a single value.
+func TestGenerate_RecentVisitors(t *testing.T) {
+	runGoldenTest(t, "recent-visitors", []string{
+		"recent_visitors_service.proto",
+		"recent_visitors_service_server.go",
+	})
+}
+
+// runGoldenTest is the shared shape: read pipeline-spec.yaml from
+// examples/typed-rpc-codegen/<example>/, generate into a temp dir,
+// compare each named file byte-for-byte against _expected/.
+func runGoldenTest(t *testing.T, example string, files []string) {
+	t.Helper()
 	tmp := t.TempDir()
-	specPath := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "pipeline-spec.yaml")
-	// _expected/ is underscore-prefixed so Go tooling (`go build`,
-	// `go mod tidy`) skips it — the checked-in *_server.go file
-	// imports the user's buf-generated proto package which doesn't
-	// exist outside the user's repo.
-	expectedDir := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "_expected")
+	specPath := filepath.Join("..", "..", "examples", "typed-rpc-codegen", example, "pipeline-spec.yaml")
+	expectedDir := filepath.Join("..", "..", "examples", "typed-rpc-codegen", example, "_expected")
 
 	if err := generate(specPath, tmp); err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 
-	for _, name := range []string{
-		"bot_interaction_count_service.proto",
-		"bot_interaction_count_service_server.go",
-	} {
+	for _, name := range files {
 		got, err := os.ReadFile(filepath.Join(tmp, name))
 		if err != nil {
 			t.Errorf("%s: read got: %v", name, err)
@@ -52,22 +75,34 @@ func TestGenerate_BotInteractions(t *testing.T) {
 }
 
 // TestGenerate_GoStubCompiles verifies that the generated Go server stub
-// is at least gofmt-clean and would survive `go/format.Source`. We can't
-// compile-link it without the buf-generated proto types, but `format.Source`
-// catches structural issues like missing imports, syntax errors, or
-// mismatched braces.
+// is at least gofmt-clean and would survive `go/format.Source` for every
+// pipeline kind. We can't compile-link without the user's buf-generated
+// proto types, but `format.Source` catches structural issues like
+// missing imports, syntax errors, or mismatched braces.
 func TestGenerate_GoStubCompiles(t *testing.T) {
-	tmp := t.TempDir()
-	specPath := filepath.Join("..", "..", "examples", "typed-rpc-codegen", "bot-interactions", "pipeline-spec.yaml")
-	if err := generate(specPath, tmp); err != nil {
-		t.Fatalf("generate: %v", err)
+	cases := []struct {
+		example string
+		stub    string
+	}{
+		{"bot-interactions", "bot_interaction_count_service_server.go"},
+		{"top-products", "top_products_service_server.go"},
+		{"recent-visitors", "recent_visitors_service_server.go"},
 	}
-	src, err := os.ReadFile(filepath.Join(tmp, "bot_interaction_count_service_server.go"))
-	if err != nil {
-		t.Fatalf("read server stub: %v", err)
-	}
-	if _, err := format.Source(src); err != nil {
-		t.Fatalf("format.Source on generated stub: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.example, func(t *testing.T) {
+			tmp := t.TempDir()
+			specPath := filepath.Join("..", "..", "examples", "typed-rpc-codegen", tc.example, "pipeline-spec.yaml")
+			if err := generate(specPath, tmp); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			src, err := os.ReadFile(filepath.Join(tmp, tc.stub))
+			if err != nil {
+				t.Fatalf("read server stub: %v", err)
+			}
+			if _, err := format.Source(src); err != nil {
+				t.Fatalf("format.Source on generated stub: %v", err)
+			}
+		})
 	}
 }
 

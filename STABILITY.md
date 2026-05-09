@@ -41,7 +41,7 @@ edges callers should plan around.
 | `pkg/swap` | mostly stable | small surface; the Terraform module does not yet integrate it |
 | `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
 | `cmd/murmur-ui` | experimental | demo-grade dashboard; not yet a production ops surface |
-| `cmd/murmur-codegen-typed` | experimental | YAML pipeline-spec → typed Connect-RPC `.proto` + Go server stub (delegates to `pkg/query/typed`). Sum + HLL pipelines, `get_all_time` / `get_window` methods. TopK, Bloom, and `get_window_many` are roadmap |
+| `cmd/murmur-codegen-typed` | experimental | YAML pipeline-spec → typed Connect-RPC `.proto` + Go server stub (delegates to `pkg/query/typed`). Sum / HLL / TopK / Bloom pipelines, `get_all_time` / `get_window` methods. TopK emits a `TopKItem { string key; int64 count; }` message; Bloom emits a `(capacity_bits, hash_functions, approx_size, present)` shape. `get_window_many` is roadmap |
 
 ## Known sharp edges (priority order)
 

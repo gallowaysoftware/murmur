@@ -8,6 +8,7 @@ package example.bot.v1;
 option go_package = "github.com/example/count-core/gen/bot/v1;v1";
 
 
+
 message GetCountRequest {
   string bot_id = 1;
   string user_id = 2;

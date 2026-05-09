@@ -1,0 +1,30 @@
+# Pipeline-spec for a recent-visitors-membership service backed by a Bloom filter.
+#
+# Run:
+#   go run ./cmd/murmur-codegen-typed --in examples/typed-rpc-codegen/recent-visitors/pipeline-spec.yaml \
+#                                     --out examples/typed-rpc-codegen/recent-visitors/_expected
+#
+# Emits:
+#   _expected/recent_visitors_service.proto         — Bloom-shape response
+#   _expected/recent_visitors_service_server.go     — delegates to typed.BloomClient
+#
+# The response carries the filter's structural metadata (capacity bits,
+# hash count, approximate populated size). The boolean MIGHT-CONTAIN
+# probe is server-internal; the typed wrapper exposes shape only —
+# callers wanting per-element membership ride a follow-up RPC pattern
+# (TBD; not yet covered by the codegen).
+
+proto_package: example.visitors.v1
+go_package: github.com/example/marketing/gen/visitors/v1
+
+service:
+  name: RecentVisitorsService
+  pipeline_name: visitors_bloom
+  pipeline_kind: bloom
+  methods:
+    - name: GetFilterShape
+      kind: get_all_time
+      key_template: "campaign:{campaign_id}"
+      request:
+        - name: campaign_id
+          type: string
