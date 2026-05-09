@@ -27,16 +27,23 @@ type RunOption func(*runConfig)
 
 type runConfig struct {
 	processor.Config
-	deadLetter     func(eventID string, err error)
-	batchWindow    time.Duration
-	maxBatchSize   int
-	concurrency    int
-	keyDebounce    time.Duration
-	keyDebounceMax int
+	deadLetter       func(eventID string, err error)
+	batchWindow      time.Duration
+	maxBatchSize     int
+	concurrency      int
+	keyDebounce      time.Duration
+	keyDebounceMax   int
+	valueDebounce    time.Duration
+	valueDebounceMax int
 
 	// debouncer is materialized once in Run when keyDebounce > 0 and
 	// reused across the per-record processing path. Concurrency-safe.
 	debouncer *keyDebouncer
+
+	// valueDebouncer is materialized once in Run when
+	// valueDebounce > 0; same shape as debouncer but keyed by
+	// (entityKey, fingerprintedValue).
+	valueDebouncer *valueDebouncer
 }
 
 // debounceAllow returns false when a record's first-emitted key was
@@ -222,6 +229,9 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 	}
 	if cfg.keyDebounce > 0 {
 		cfg.debouncer = newKeyDebouncer(cfg.keyDebounce, cfg.keyDebounceMax)
+	}
+	if cfg.valueDebounce > 0 {
+		cfg.valueDebouncer = newValueDebouncer(cfg.valueDebounce, cfg.valueDebounceMax)
 	}
 
 	name := p.Name()
@@ -461,8 +471,20 @@ func processWithRetry[T any, V any](
 		}
 		return
 	}
+	v := valueFn(rec.Value)
+	if cfg.valueDebouncer != nil && len(keys) > 0 {
+		// Same (entity, value) seen within the value-debounce window —
+		// drop without processor work, but Ack so the source advances.
+		if cfg.valueDebouncer.shouldDrop(keys[0], fingerprintValue(v)) {
+			cfg.Recorder.RecordEvent(name + ":value_debounce_skip")
+			if rec.Ack != nil {
+				_ = rec.Ack()
+			}
+			return
+		}
+	}
 	err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
-		keys, valueFn(rec.Value), store, cache, window)
+		keys, v, store, cache, window)
 	if err != nil {
 		// Either context cancellation (just return; the runtime is exiting
 		// anyway) or retry exhaustion. processor.MergeOne already recorded
