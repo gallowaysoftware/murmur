@@ -66,23 +66,31 @@ checked-in copies under `_expected/` are what
 | `proto_go_package` | no | Go import path for the buf-generated proto types; defaults to `go_package` |
 | `service.name` | yes | Service name in the generated proto (UpperCamelCase) |
 | `service.pipeline_name` | yes | Murmur pipeline name (used by typed-clients to route to the right gRPC endpoint) |
-| `service.pipeline_kind` | yes | `sum` or `hll` |
+| `service.pipeline_kind` | yes | `sum`, `hll`, `topk`, or `bloom` |
 | `service.methods[].name` | yes | RPC method name (UpperCamelCase) |
 | `service.methods[].kind` | yes | `get_all_time` or `get_window` |
 | `service.methods[].request` | yes | Field list (name + type). Supported types: `string`, `int64` |
 | `service.methods[].key_template` | yes | Printf-style template with `{field}` references; emits `fmt.Sprintf("...")` over request fields |
 | `service.methods[].window_duration_field` | for `get_window` | Name of the int64 request field carrying the window duration in seconds |
 
+## Response-message shape per pipeline kind
+
+| Kind | Response fields |
+|---|---|
+| `sum` | `int64 value`, `bool present` |
+| `hll` | `int64 value` (cardinality), `bool present` |
+| `topk` | `repeated TopKItem items`, `bool present` — proto also defines `TopKItem { string key; int64 count; }` |
+| `bloom` | `int64 capacity_bits`, `int32 hash_functions`, `int64 approx_size`, `bool present` |
+
+## More examples
+
+- **`bot-interactions/`** (Sum pipeline) — `BotInteractionCountService` with all-time and windowed RPCs over a `Sum[int64]` aggregator.
+- **`top-products/`** (TopK pipeline) — `TopProductsService` returning ranked Misra-Gries items per category, all-time and windowed.
+- **`recent-visitors/`** (Bloom pipeline) — `RecentVisitorsService` exposing a Bloom filter's structural metadata per campaign.
+
 ## What this does NOT cover
 
-- **TopK / Bloom pipelines** — write the wrapper by hand against
-  `pkg/query/typed.TopKClient` / `BloomClient`. Their response shapes
-  are richer (ranked items, filter metadata) and not yet templated.
-- **`get_window_many` (multi-key window)** — the typed-client
-  surface supports it; the codegen currently does not. Hand-write
-  these methods alongside the generated ones if you need them.
-- **`buf` / `protoc` invocation** — run those yourself with whichever
-  plugin versions you've pinned.
+- **`get_window_many` (multi-key window)** — `pkg/query/typed.SumClient` supports it via `GetWindowMany`; the codegen does not yet template it. Hand-write that one method alongside the generated ones if you need it. (Adding it to the codegen requires the typed clients for HLL / TopK / Bloom to gain the same method; tracked.)
+- **`buf` / `protoc` invocation** — run those yourself with whichever plugin versions you've pinned.
 
-These are roadmap gaps, not architectural ones; lift them off
-`cmd/murmur-codegen-typed/server.go` template when needed.
+These are roadmap gaps, not architectural ones; lift them off `cmd/murmur-codegen-typed/server.go` template when needed.

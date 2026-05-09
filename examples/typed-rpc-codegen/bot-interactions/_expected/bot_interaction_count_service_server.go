@@ -63,12 +63,12 @@ func (s *BotInteractionCountServiceServer) GetCountWindow(ctx context.Context, r
 	}
 	key := fmt.Sprintf("bot:%s|user:%s", msg.BotId, msg.UserId)
 	duration := time.Duration(msg.DurationSeconds) * time.Second
-	val, present, err := s.client.GetWindow(ctx, key, duration)
+	val, err := s.client.GetWindow(ctx, key, duration)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&pb.GetCountWindowResponse{
 		Value:   val,
-		Present: present,
+		Present: true,
 	}), nil
 }

@@ -52,13 +52,21 @@ type Service struct {
 	Methods []Method `yaml:"methods"`
 }
 
-// PipelineKind tags which typed-client (Sum or HLL) the codegen
-// will use in the generated server stub.
+// PipelineKind tags which typed-client (Sum, HLL, TopK, Bloom) the
+// codegen will use in the generated server stub. Each kind drives a
+// different response-message shape:
+//
+//   - sum   → { value int64, present bool }
+//   - hll   → { value int64, present bool } (cardinality)
+//   - topk  → { items repeated TopKItem, present bool }
+//   - bloom → { capacity_bits int64, hash_functions int32, approx_size int64, present bool }
 type PipelineKind string
 
 const (
-	PipelineSum PipelineKind = "sum"
-	PipelineHLL PipelineKind = "hll"
+	PipelineSum   PipelineKind = "sum"
+	PipelineHLL   PipelineKind = "hll"
+	PipelineTopK  PipelineKind = "topk"
+	PipelineBloom PipelineKind = "bloom"
 )
 
 // Method is one RPC.
@@ -142,9 +150,9 @@ func (s *Spec) validate() error {
 		return errors.New("service.pipeline_name is required")
 	}
 	switch s.Service.PipelineKind {
-	case PipelineSum, PipelineHLL:
+	case PipelineSum, PipelineHLL, PipelineTopK, PipelineBloom:
 	default:
-		return fmt.Errorf("service.pipeline_kind: unsupported %q (want sum or hll)", s.Service.PipelineKind)
+		return fmt.Errorf("service.pipeline_kind: unsupported %q (want sum, hll, topk, or bloom)", s.Service.PipelineKind)
 	}
 	if len(s.Service.Methods) == 0 {
 		return errors.New("service.methods is empty")

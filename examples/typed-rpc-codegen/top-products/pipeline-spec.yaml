@@ -1,0 +1,37 @@
+# Pipeline-spec for a Top-K products service backed by a Misra-Gries sketch.
+#
+# Run:
+#   go run ./cmd/murmur-codegen-typed --in examples/typed-rpc-codegen/top-products/pipeline-spec.yaml \
+#                                     --out examples/typed-rpc-codegen/top-products/_expected
+#
+# Emits:
+#   _expected/top_products_service.proto         — ranked-items response shape
+#   _expected/top_products_service_server.go     — delegates to typed.TopKClient
+#
+# The proto includes a `TopKItem { string key; int64 count; }` message and
+# the response is a `repeated TopKItem items`.
+
+proto_package: example.products.v1
+go_package: github.com/example/storefront/gen/products/v1
+
+service:
+  name: TopProductsService
+  pipeline_name: products_topk
+  pipeline_kind: topk
+  methods:
+    - name: GetTop
+      kind: get_all_time
+      key_template: "category:{category_id}"
+      request:
+        - name: category_id
+          type: string
+
+    - name: GetTopWindow
+      kind: get_window
+      key_template: "category:{category_id}"
+      window_duration_field: duration_seconds
+      request:
+        - name: category_id
+          type: string
+        - name: duration_seconds
+          type: int64

@@ -8,18 +8,27 @@ import (
 	"text/template"
 )
 
-// renderServer emits the Go server stub for the given Spec. The output
-// imports the buf-generated proto types from Spec.ProtoGoPackage; the
+// renderServer emits the Go server stub for the given Spec.
+//
+// Imports the buf-generated proto types from Spec.ProtoGoPackage; the
 // user must run buf (or protoc) before the stub will compile.
+//
+// Per-kind response assembly:
+//   - sum   → response.Value = val
+//   - hll   → response.Value = int64(val.Cardinality)
+//   - topk  → response.Items built from []typed.TopKItem
+//   - bloom → response fields populated from typed.BloomValue
 func renderServer(s *Spec) ([]byte, error) {
 	t, err := template.New("server").Funcs(template.FuncMap{
-		"goFieldName":      goFieldName,
-		"renderKey":        renderKeyTemplate,
-		"clientType":       clientType,
-		"clientCtor":       clientCtor,
-		"valueFieldOnResp": valueFieldOnResp,
-		"goPkgName":        goPkgName,
-		"protoPkgAlias":    protoPkgAlias,
+		"goFieldName":     goFieldName,
+		"renderKey":       renderKeyTemplate,
+		"clientType":      clientType,
+		"clientCtor":      clientCtor,
+		"buildResponse":   buildResponse,
+		"goPkgName":       goPkgName,
+		"protoPkgAlias":   protoPkgAlias,
+		"isTopK":          func(k PipelineKind) bool { return k == PipelineTopK },
+		"emitTopKImports": func(k PipelineKind) bool { return k == PipelineTopK },
 	}).Parse(serverTemplate)
 	if err != nil {
 		return nil, err
@@ -82,27 +91,25 @@ func (s *{{$.Service.Name}}Server) {{$m.Name}}(ctx context.Context, req *connect
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.{{$m.Name}}Response{
-		Value:   {{valueFieldOnResp $.Service.PipelineKind "val"}},
-		Present: present,
-	}), nil
+{{buildResponse $.Service.PipelineKind $m.Name "val" "present"}}
 {{- else if eq $m.Kind "get_window"}}
 	duration := time.Duration(msg.{{goFieldName $m.WindowDurationField}}) * time.Second
-	val, present, err := s.client.GetWindow(ctx, key, duration)
+{{- if or (eq $.Service.PipelineKind "sum") (eq $.Service.PipelineKind "hll")}}
+	val, err := s.client.GetWindow(ctx, key, duration)
+{{- else}}
+	val, err := s.client.GetWindow(ctx, key, duration)
+{{- end}}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.{{$m.Name}}Response{
-		Value:   {{valueFieldOnResp $.Service.PipelineKind "val"}},
-		Present: present,
-	}), nil
+{{buildResponse $.Service.PipelineKind $m.Name "val" "true"}}
 {{- end}}
 }
 {{end}}
 `
 
-// goFieldName converts snake_case to CamelCase as protoc-go-go does
-// for field names (bot_id → BotId, duration_seconds → DurationSeconds).
+// goFieldName converts snake_case to CamelCase as protoc-go does for
+// field names (bot_id → BotId, duration_seconds → DurationSeconds).
 func goFieldName(s string) string {
 	parts := strings.Split(s, "_")
 	for i, p := range parts {
@@ -119,7 +126,6 @@ func goFieldName(s string) string {
 // "bot:{bot_id}|user:{user_id}" → fmt.Sprintf("bot:%s|user:%s", msg.BotId, msg.UserId).
 func renderKeyTemplate(m Method) string {
 	refs := templateRefs(m.KeyTemplate)
-	// Replace {x} with %s (or %d for int types).
 	formatStr := m.KeyTemplate
 	args := make([]string, 0, len(refs))
 	for _, ref := range refs {
@@ -138,50 +144,87 @@ func renderKeyTemplate(m Method) string {
 		args = append(args, "msg."+goFieldName(ref))
 	}
 	if len(args) == 0 {
-		// No interpolation — template was a literal string.
 		return fmt.Sprintf("%q", formatStr)
 	}
 	return fmt.Sprintf("fmt.Sprintf(%q, %s)", formatStr, strings.Join(args, ", "))
 }
 
-// clientType returns the typed client type name in pkg/query/typed
-// for the given pipeline kind. PipelineSum → "SumClient", etc.
+// clientType returns the typed-client type name in pkg/query/typed
+// for the given pipeline kind.
 func clientType(k PipelineKind) string {
 	switch k {
 	case PipelineSum:
 		return "SumClient"
 	case PipelineHLL:
 		return "HLLClient"
+	case PipelineTopK:
+		return "TopKClient"
+	case PipelineBloom:
+		return "BloomClient"
 	default:
 		return "Client"
 	}
 }
 
-// clientCtor returns the constructor name in pkg/query/typed for
-// the given pipeline kind.
+// clientCtor returns the constructor function name in pkg/query/typed
+// for the given pipeline kind.
 func clientCtor(k PipelineKind) string {
 	switch k {
 	case PipelineSum:
 		return "NewSumClient"
 	case PipelineHLL:
 		return "NewHLLClient"
+	case PipelineTopK:
+		return "NewTopKClient"
+	case PipelineBloom:
+		return "NewBloomClient"
 	default:
 		return "NewClient"
 	}
 }
 
-// valueFieldOnResp returns the expression for the Value field on the
-// response message, given a Go variable name holding the typed-client
-// result. Sum returns int64, HLL returns HLLValue{Cardinality, ByteLen}.
-func valueFieldOnResp(k PipelineKind, varname string) string {
+// buildResponse returns the Go statement(s) that construct and return
+// the response for a method, per pipeline kind. The varName is the
+// local holding the typed-client result (e.g. "val"); presentExpr is
+// either "present" (a local variable name) or "true" (a literal —
+// GetWindow doesn't return a present flag in the typed-client surface).
+//
+// The output is the closing portion of a method body (the indentation
+// is fixed at one tab — the template emits this verbatim after
+// "if err != nil { … }").
+func buildResponse(k PipelineKind, methodName, varName, presentExpr string) string {
+	respType := "pb." + methodName + "Response"
 	switch k {
 	case PipelineSum:
-		return varname
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Value:   %s,
+		Present: %s,
+	}), nil`, respType, varName, presentExpr)
 	case PipelineHLL:
-		// HLLValue.Cardinality is uint64; proto field is int64.
-		return fmt.Sprintf("int64(%s.Cardinality)", varname)
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Value:   int64(%s.Cardinality),
+		Present: %s,
+	}), nil`, respType, varName, presentExpr)
+	case PipelineTopK:
+		// TopK results from typed.TopKClient are []typed.TopKItem; we
+		// have to translate to []*pb.TopKItem.
+		return fmt.Sprintf(`	items := make([]*pb.TopKItem, len(%s))
+	for i, it := range %s {
+		items[i] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+	}
+	return connect.NewResponse(&%s{
+		Items:   items,
+		Present: %s,
+	}), nil`, varName, varName, respType, presentExpr)
+	case PipelineBloom:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		CapacityBits:  int64(%s.CapacityBits),
+		HashFunctions: int32(%s.HashFunctions),
+		ApproxSize:    int64(%s.ApproxSize),
+		Present:       %s,
+	}), nil`, respType, varName, varName, varName, presentExpr)
 	default:
-		return varname
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{Present: %s}), nil`, respType, presentExpr)
 	}
 }
 
