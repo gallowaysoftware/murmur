@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/bloom"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/hll"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
@@ -48,8 +50,13 @@ func (s fakeBytesStore) Get(_ context.Context, k state.Key) ([]byte, bool, error
 	}
 	return v, true, nil
 }
-func (s fakeBytesStore) GetMany(context.Context, []state.Key) ([][]byte, []bool, error) {
-	return nil, nil, nil
+func (s fakeBytesStore) GetMany(_ context.Context, ks []state.Key) ([][]byte, []bool, error) {
+	vs := make([][]byte, len(ks))
+	oks := make([]bool, len(ks))
+	for i, k := range ks {
+		vs[i], oks[i] = s[k]
+	}
+	return vs, oks, nil
 }
 func (s fakeBytesStore) MergeUpdate(_ context.Context, k state.Key, d []byte, _ time.Duration) error {
 	s[k] = d
@@ -226,6 +233,158 @@ func TestTopKClient_Get(t *testing.T) {
 	}
 	if len(items) == 0 || items[0].Key != "post-A" {
 		t.Errorf("top item: got %+v, want post-A first", items)
+	}
+}
+
+func TestHLLClient_GetWindowMany(t *testing.T) {
+	mon := hll.HLL()
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	// Two entities × 5 daily buckets, each bucket holds a single
+	// sketch with N distinct elements. post-A has 10 unique per
+	// bucket → 50 across 5 days; post-B has 30 unique per bucket → 150.
+	for i := 0; i < 5; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		sa := mon.Identity()
+		for j := 0; j < 10; j++ {
+			sa = mon.Combine(sa, hll.Single([]byte{byte(i*100 + j)}))
+		}
+		store[state.Key{Entity: "post-A", Bucket: bucket}] = sa
+
+		sb := mon.Identity()
+		for j := 0; j < 30; j++ {
+			sb = mon.Combine(sb, hll.Single([]byte{byte(i*100 + j + 100)}))
+		}
+		store[state.Key{Entity: "post-B", Bucket: bucket}] = sb
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewHLLClient(rawClient)
+	got, err := c.GetWindowMany(context.Background(),
+		[]string{"post-A", "post-B", "missing"}, 5*24*time.Hour)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(got): got %d, want 3", len(got))
+	}
+	// HLL ~1-2% error; 50 distinct → ±5; 150 distinct → ±10.
+	if got[0].Cardinality < 45 || got[0].Cardinality > 55 {
+		t.Errorf("post-A cardinality: got %d, want ~50", got[0].Cardinality)
+	}
+	if got[1].Cardinality < 140 || got[1].Cardinality > 160 {
+		t.Errorf("post-B cardinality: got %d, want ~150", got[1].Cardinality)
+	}
+	if got[2].Cardinality != 0 {
+		t.Errorf("missing entity: got %d, want 0", got[2].Cardinality)
+	}
+}
+
+func TestTopKClient_GetWindowMany(t *testing.T) {
+	mon := topk.New(5)
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	// Per entity, one bucket with a known TopK distribution.
+	bucket := w.BucketID(now.Add(-1 * time.Hour))
+	for entity, hits := range map[string]map[string]int{
+		"global-A": {"post-X": 10, "post-Y": 5, "post-Z": 2},
+		"global-B": {"post-Q": 7, "post-R": 1},
+	} {
+		sketch := mon.Identity()
+		for k, n := range hits {
+			for i := 0; i < n; i++ {
+				sketch = mon.Combine(sketch, topk.SingleN(5, k, 1))
+			}
+		}
+		store[state.Key{Entity: entity, Bucket: bucket}] = sketch
+	}
+
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewTopKClient(rawClient)
+	got, err := c.GetWindowMany(context.Background(),
+		[]string{"global-A", "global-B", "missing"}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(got): got %d, want 3", len(got))
+	}
+	if len(got[0]) == 0 || got[0][0].Key != "post-X" {
+		t.Errorf("global-A top item: got %+v, want post-X first", got[0])
+	}
+	if len(got[1]) == 0 || got[1][0].Key != "post-Q" {
+		t.Errorf("global-B top item: got %+v, want post-Q first", got[1])
+	}
+	// Missing entity yields the merged-empty-sketch's items list, which
+	// is empty (no items stored, no items returned).
+	if len(got[2]) != 0 {
+		t.Errorf("missing entity: got %+v, want empty", got[2])
+	}
+}
+
+// Test helpers for Bloom — small wrappers that hide the package-name
+// shadowing between `bloom` (imported) and `bloom` the local helper.
+func bloomMon() monoid.Monoid[[]byte] { return bloom.Bloom() }
+func bloomSingle(b byte, salt string) []byte {
+	return bloom.Single(append([]byte(salt), b))
+}
+
+func TestBloomClient_GetWindowMany(t *testing.T) {
+	mon := bloomMon()
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	bucket := w.BucketID(now.Add(-1 * time.Hour))
+	// Build per-entity Bloom filters with known populated counts.
+	for entity, n := range map[string]int{"campaign-A": 50, "campaign-B": 200} {
+		filter := mon.Identity()
+		for i := 0; i < n; i++ {
+			filter = mon.Combine(filter, bloomSingle(byte(i), entity))
+		}
+		store[state.Key{Entity: entity, Bucket: bucket}] = filter
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewBloomClient(rawClient)
+	got, err := c.GetWindowMany(context.Background(),
+		[]string{"campaign-A", "campaign-B", "missing"}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GetWindowMany: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(got): got %d, want 3", len(got))
+	}
+	// CapacityBits and HashFunctions are filter-construction-stable.
+	if got[0].CapacityBits == 0 {
+		t.Errorf("campaign-A capacity_bits: got 0; want > 0")
+	}
+	if got[1].CapacityBits == 0 {
+		t.Errorf("campaign-B capacity_bits: got 0; want > 0")
+	}
+	// Missing entity yields the empty Bloom's structural shape:
+	// capacity_bits and hash_functions are stable filter-construction
+	// constants (returned from the merged-empty sketch's metadata),
+	// only ApproxSize should be 0 (no populated bits).
+	if got[2].ApproxSize != 0 {
+		t.Errorf("missing: got approx_size=%d, want 0", got[2].ApproxSize)
 	}
 }
 
