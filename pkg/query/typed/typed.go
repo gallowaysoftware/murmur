@@ -255,6 +255,39 @@ func (c *HLLClient) GetWindow(ctx context.Context, entity string, duration time.
 	return HLLValue{Cardinality: est, ByteLen: len(data)}, nil
 }
 
+// GetWindowMany is the batched analog of GetWindow — fetches windowed
+// cardinalities for N entities in one round-trip. Returns parallel
+// arrays: out[i] is the cardinality estimate for entities[i]; missing
+// entities yield a zero-valued HLLValue.
+func (c *HLLClient) GetWindowMany(ctx context.Context, entities []string, duration time.Duration, opts ...Option) ([]HLLValue, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetWindowMany(ctx, connect.NewRequest(&pb.GetWindowManyRequest{
+		Entities:        entities,
+		DurationSeconds: int64(duration / time.Second),
+		FreshRead:       o.freshRead,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([]HLLValue, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		data := v.GetData()
+		if len(data) == 0 {
+			continue
+		}
+		est, err := hll.Estimate(data)
+		if err != nil {
+			return nil, fmt.Errorf("typed HLL[%d] decode: %w", i, err)
+		}
+		out[i] = HLLValue{Cardinality: est, ByteLen: len(data)}
+	}
+	return out, nil
+}
+
 // ----------------------------------------------------------------------------
 // TopK — Misra-Gries wire shape
 // ----------------------------------------------------------------------------
@@ -323,6 +356,43 @@ func (c *TopKClient) GetWindow(ctx context.Context, entity string, duration time
 	return out, nil
 }
 
+// GetWindowMany is the batched analog of GetWindow — fetches windowed
+// ranked-item lists for N entities in one round-trip. Returns parallel
+// arrays: out[i] is the ranked items for entities[i]; missing entities
+// yield a nil slice.
+func (c *TopKClient) GetWindowMany(ctx context.Context, entities []string, duration time.Duration, opts ...Option) ([][]TopKItem, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetWindowMany(ctx, connect.NewRequest(&pb.GetWindowManyRequest{
+		Entities:        entities,
+		DurationSeconds: int64(duration / time.Second),
+		FreshRead:       o.freshRead,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([][]TopKItem, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		data := v.GetData()
+		if len(data) == 0 {
+			continue
+		}
+		items, err := topk.Items(data)
+		if err != nil {
+			return nil, fmt.Errorf("typed TopK[%d] decode: %w", i, err)
+		}
+		entry := make([]TopKItem, len(items))
+		for j, it := range items {
+			entry[j] = TopKItem{Key: it.Key, Count: it.Count}
+		}
+		out[i] = entry
+	}
+	return out, nil
+}
+
 // ----------------------------------------------------------------------------
 // Bloom — sketch shape
 // ----------------------------------------------------------------------------
@@ -369,6 +439,70 @@ func (c *BloomClient) Get(ctx context.Context, entity string, opts ...Option) (B
 		HashFunctions: hashes,
 		ApproxSize:    approxSize,
 	}, true, nil
+}
+
+// GetWindow returns the merged Bloom-filter shape over the most-recent
+// `duration`. The merged sketch's capacity / hash count match the
+// per-bucket sketches' shape; ApproxSize reflects the union over the
+// window's buckets.
+func (c *BloomClient) GetWindow(ctx context.Context, entity string, duration time.Duration, opts ...Option) (BloomValue, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetWindow(ctx, connect.NewRequest(&pb.GetWindowRequest{
+		Entity: entity, DurationSeconds: int64(duration / time.Second), FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return BloomValue{}, err
+	}
+	data := resp.Msg.GetValue().GetData()
+	if len(data) == 0 {
+		return BloomValue{}, nil
+	}
+	capacity, hashes, approxSize, err := bloom.Inspect(data)
+	if err != nil {
+		return BloomValue{}, fmt.Errorf("typed Bloom decode: %w", err)
+	}
+	return BloomValue{
+		CapacityBits:  capacity,
+		HashFunctions: hashes,
+		ApproxSize:    approxSize,
+	}, nil
+}
+
+// GetWindowMany is the batched analog of GetWindow — fetches the
+// merged Bloom-filter shape for N entities in one round-trip. Returns
+// parallel arrays: out[i] is the BloomValue for entities[i]; missing
+// entities yield a zero-valued BloomValue.
+func (c *BloomClient) GetWindowMany(ctx context.Context, entities []string, duration time.Duration, opts ...Option) ([]BloomValue, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetWindowMany(ctx, connect.NewRequest(&pb.GetWindowManyRequest{
+		Entities:        entities,
+		DurationSeconds: int64(duration / time.Second),
+		FreshRead:       o.freshRead,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([]BloomValue, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		data := v.GetData()
+		if len(data) == 0 {
+			continue
+		}
+		capacity, hashes, approxSize, err := bloom.Inspect(data)
+		if err != nil {
+			return nil, fmt.Errorf("typed Bloom[%d] decode: %w", i, err)
+		}
+		out[i] = BloomValue{
+			CapacityBits:  capacity,
+			HashFunctions: hashes,
+			ApproxSize:    approxSize,
+		}
+	}
+	return out, nil
 }
 
 // ----------------------------------------------------------------------------
