@@ -721,6 +721,223 @@ func (x *GetRangeManyResponse) GetValues() []*Value {
 	return nil
 }
 
+// GetTrailingRequest asks for a trailing-window merge. Semantically
+// identical to GetWindowRequest; the separate RPC names the intent
+// ("trailing 7-day count") and pairs with the trailing-builder sugar.
+type GetTrailingRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	// Trailing-window duration in seconds (e.g. 604800 for trailing-7d,
+	// 2592000 for trailing-30d).
+	DurationSeconds int64 `protobuf:"varint,2,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	FreshRead       bool  `protobuf:"varint,3,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetTrailingRequest) Reset() {
+	*x = GetTrailingRequest{}
+	mi := &file_murmur_v1_query_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTrailingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTrailingRequest) ProtoMessage() {}
+
+func (x *GetTrailingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTrailingRequest.ProtoReflect.Descriptor instead.
+func (*GetTrailingRequest) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *GetTrailingRequest) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *GetTrailingRequest) GetDurationSeconds() int64 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
+func (x *GetTrailingRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
+type GetTrailingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Value         *Value                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetTrailingResponse) Reset() {
+	*x = GetTrailingResponse{}
+	mi := &file_murmur_v1_query_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTrailingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTrailingResponse) ProtoMessage() {}
+
+func (x *GetTrailingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTrailingResponse.ProtoReflect.Descriptor instead.
+func (*GetTrailingResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *GetTrailingResponse) GetValue() *Value {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+// GetTrailingManyRequest batches GetTrailing for many entities in one
+// round-trip. Same single-store-fetch contract as GetWindowMany.
+type GetTrailingManyRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Entities        []string               `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
+	DurationSeconds int64                  `protobuf:"varint,2,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	FreshRead       bool                   `protobuf:"varint,3,opt,name=fresh_read,json=freshRead,proto3" json:"fresh_read,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetTrailingManyRequest) Reset() {
+	*x = GetTrailingManyRequest{}
+	mi := &file_murmur_v1_query_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTrailingManyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTrailingManyRequest) ProtoMessage() {}
+
+func (x *GetTrailingManyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTrailingManyRequest.ProtoReflect.Descriptor instead.
+func (*GetTrailingManyRequest) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetTrailingManyRequest) GetEntities() []string {
+	if x != nil {
+		return x.Entities
+	}
+	return nil
+}
+
+func (x *GetTrailingManyRequest) GetDurationSeconds() int64 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
+func (x *GetTrailingManyRequest) GetFreshRead() bool {
+	if x != nil {
+		return x.FreshRead
+	}
+	return false
+}
+
+type GetTrailingManyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Same length and order as the request's `entities`. Missing entities
+	// return the monoid Identity with present=true.
+	Values        []*Value `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetTrailingManyResponse) Reset() {
+	*x = GetTrailingManyResponse{}
+	mi := &file_murmur_v1_query_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTrailingManyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTrailingManyResponse) ProtoMessage() {}
+
+func (x *GetTrailingManyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_murmur_v1_query_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTrailingManyResponse.ProtoReflect.Descriptor instead.
+func (*GetTrailingManyResponse) Descriptor() ([]byte, []int) {
+	return file_murmur_v1_query_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetTrailingManyResponse) GetValues() []*Value {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
 var File_murmur_v1_query_proto protoreflect.FileDescriptor
 
 const file_murmur_v1_query_proto_rawDesc = "" +
@@ -773,14 +990,30 @@ const file_murmur_v1_query_proto_rawDesc = "" +
 	"\n" +
 	"fresh_read\x18\x04 \x01(\bR\tfreshRead\"@\n" +
 	"\x14GetRangeManyResponse\x12(\n" +
-	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values2\xb8\x03\n" +
+	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values\"v\n" +
+	"\x12GetTrailingRequest\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12)\n" +
+	"\x10duration_seconds\x18\x02 \x01(\x03R\x0fdurationSeconds\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x03 \x01(\bR\tfreshRead\"=\n" +
+	"\x13GetTrailingResponse\x12&\n" +
+	"\x05value\x18\x01 \x01(\v2\x10.murmur.v1.ValueR\x05value\"~\n" +
+	"\x16GetTrailingManyRequest\x12\x1a\n" +
+	"\bentities\x18\x01 \x03(\tR\bentities\x12)\n" +
+	"\x10duration_seconds\x18\x02 \x01(\x03R\x0fdurationSeconds\x12\x1d\n" +
+	"\n" +
+	"fresh_read\x18\x03 \x01(\bR\tfreshRead\"C\n" +
+	"\x17GetTrailingManyResponse\x12(\n" +
+	"\x06values\x18\x01 \x03(\v2\x10.murmur.v1.ValueR\x06values2\xe0\x04\n" +
 	"\fQueryService\x124\n" +
 	"\x03Get\x12\x15.murmur.v1.GetRequest\x1a\x16.murmur.v1.GetResponse\x12F\n" +
 	"\tGetWindow\x12\x1b.murmur.v1.GetWindowRequest\x1a\x1c.murmur.v1.GetWindowResponse\x12C\n" +
 	"\bGetRange\x12\x1a.murmur.v1.GetRangeRequest\x1a\x1b.murmur.v1.GetRangeResponse\x12@\n" +
 	"\aGetMany\x12\x19.murmur.v1.GetManyRequest\x1a\x1a.murmur.v1.GetManyResponse\x12R\n" +
 	"\rGetWindowMany\x12\x1f.murmur.v1.GetWindowManyRequest\x1a .murmur.v1.GetWindowManyResponse\x12O\n" +
-	"\fGetRangeMany\x12\x1e.murmur.v1.GetRangeManyRequest\x1a\x1f.murmur.v1.GetRangeManyResponseB\xa1\x01\n" +
+	"\fGetRangeMany\x12\x1e.murmur.v1.GetRangeManyRequest\x1a\x1f.murmur.v1.GetRangeManyResponse\x12L\n" +
+	"\vGetTrailing\x12\x1d.murmur.v1.GetTrailingRequest\x1a\x1e.murmur.v1.GetTrailingResponse\x12X\n" +
+	"\x0fGetTrailingMany\x12!.murmur.v1.GetTrailingManyRequest\x1a\".murmur.v1.GetTrailingManyResponseB\xa1\x01\n" +
 	"\rcom.murmur.v1B\n" +
 	"QueryProtoP\x01Z?github.com/gallowaysoftware/murmur/proto/gen/murmur/v1;murmurv1\xa2\x02\x03MXX\xaa\x02\tMurmur.V1\xca\x02\tMurmur\\V1\xe2\x02\x15Murmur\\V1\\GPBMetadata\xea\x02\n" +
 	"Murmur::V1b\x06proto3"
@@ -797,21 +1030,25 @@ func file_murmur_v1_query_proto_rawDescGZIP() []byte {
 	return file_murmur_v1_query_proto_rawDescData
 }
 
-var file_murmur_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_murmur_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_murmur_v1_query_proto_goTypes = []any{
-	(*GetRequest)(nil),            // 0: murmur.v1.GetRequest
-	(*GetManyRequest)(nil),        // 1: murmur.v1.GetManyRequest
-	(*GetWindowRequest)(nil),      // 2: murmur.v1.GetWindowRequest
-	(*GetRangeRequest)(nil),       // 3: murmur.v1.GetRangeRequest
-	(*Value)(nil),                 // 4: murmur.v1.Value
-	(*GetResponse)(nil),           // 5: murmur.v1.GetResponse
-	(*GetWindowResponse)(nil),     // 6: murmur.v1.GetWindowResponse
-	(*GetRangeResponse)(nil),      // 7: murmur.v1.GetRangeResponse
-	(*GetManyResponse)(nil),       // 8: murmur.v1.GetManyResponse
-	(*GetWindowManyRequest)(nil),  // 9: murmur.v1.GetWindowManyRequest
-	(*GetWindowManyResponse)(nil), // 10: murmur.v1.GetWindowManyResponse
-	(*GetRangeManyRequest)(nil),   // 11: murmur.v1.GetRangeManyRequest
-	(*GetRangeManyResponse)(nil),  // 12: murmur.v1.GetRangeManyResponse
+	(*GetRequest)(nil),              // 0: murmur.v1.GetRequest
+	(*GetManyRequest)(nil),          // 1: murmur.v1.GetManyRequest
+	(*GetWindowRequest)(nil),        // 2: murmur.v1.GetWindowRequest
+	(*GetRangeRequest)(nil),         // 3: murmur.v1.GetRangeRequest
+	(*Value)(nil),                   // 4: murmur.v1.Value
+	(*GetResponse)(nil),             // 5: murmur.v1.GetResponse
+	(*GetWindowResponse)(nil),       // 6: murmur.v1.GetWindowResponse
+	(*GetRangeResponse)(nil),        // 7: murmur.v1.GetRangeResponse
+	(*GetManyResponse)(nil),         // 8: murmur.v1.GetManyResponse
+	(*GetWindowManyRequest)(nil),    // 9: murmur.v1.GetWindowManyRequest
+	(*GetWindowManyResponse)(nil),   // 10: murmur.v1.GetWindowManyResponse
+	(*GetRangeManyRequest)(nil),     // 11: murmur.v1.GetRangeManyRequest
+	(*GetRangeManyResponse)(nil),    // 12: murmur.v1.GetRangeManyResponse
+	(*GetTrailingRequest)(nil),      // 13: murmur.v1.GetTrailingRequest
+	(*GetTrailingResponse)(nil),     // 14: murmur.v1.GetTrailingResponse
+	(*GetTrailingManyRequest)(nil),  // 15: murmur.v1.GetTrailingManyRequest
+	(*GetTrailingManyResponse)(nil), // 16: murmur.v1.GetTrailingManyResponse
 }
 var file_murmur_v1_query_proto_depIdxs = []int32{
 	4,  // 0: murmur.v1.GetResponse.value:type_name -> murmur.v1.Value
@@ -820,23 +1057,29 @@ var file_murmur_v1_query_proto_depIdxs = []int32{
 	4,  // 3: murmur.v1.GetManyResponse.values:type_name -> murmur.v1.Value
 	4,  // 4: murmur.v1.GetWindowManyResponse.values:type_name -> murmur.v1.Value
 	4,  // 5: murmur.v1.GetRangeManyResponse.values:type_name -> murmur.v1.Value
-	0,  // 6: murmur.v1.QueryService.Get:input_type -> murmur.v1.GetRequest
-	2,  // 7: murmur.v1.QueryService.GetWindow:input_type -> murmur.v1.GetWindowRequest
-	3,  // 8: murmur.v1.QueryService.GetRange:input_type -> murmur.v1.GetRangeRequest
-	1,  // 9: murmur.v1.QueryService.GetMany:input_type -> murmur.v1.GetManyRequest
-	9,  // 10: murmur.v1.QueryService.GetWindowMany:input_type -> murmur.v1.GetWindowManyRequest
-	11, // 11: murmur.v1.QueryService.GetRangeMany:input_type -> murmur.v1.GetRangeManyRequest
-	5,  // 12: murmur.v1.QueryService.Get:output_type -> murmur.v1.GetResponse
-	6,  // 13: murmur.v1.QueryService.GetWindow:output_type -> murmur.v1.GetWindowResponse
-	7,  // 14: murmur.v1.QueryService.GetRange:output_type -> murmur.v1.GetRangeResponse
-	8,  // 15: murmur.v1.QueryService.GetMany:output_type -> murmur.v1.GetManyResponse
-	10, // 16: murmur.v1.QueryService.GetWindowMany:output_type -> murmur.v1.GetWindowManyResponse
-	12, // 17: murmur.v1.QueryService.GetRangeMany:output_type -> murmur.v1.GetRangeManyResponse
-	12, // [12:18] is the sub-list for method output_type
-	6,  // [6:12] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	4,  // 6: murmur.v1.GetTrailingResponse.value:type_name -> murmur.v1.Value
+	4,  // 7: murmur.v1.GetTrailingManyResponse.values:type_name -> murmur.v1.Value
+	0,  // 8: murmur.v1.QueryService.Get:input_type -> murmur.v1.GetRequest
+	2,  // 9: murmur.v1.QueryService.GetWindow:input_type -> murmur.v1.GetWindowRequest
+	3,  // 10: murmur.v1.QueryService.GetRange:input_type -> murmur.v1.GetRangeRequest
+	1,  // 11: murmur.v1.QueryService.GetMany:input_type -> murmur.v1.GetManyRequest
+	9,  // 12: murmur.v1.QueryService.GetWindowMany:input_type -> murmur.v1.GetWindowManyRequest
+	11, // 13: murmur.v1.QueryService.GetRangeMany:input_type -> murmur.v1.GetRangeManyRequest
+	13, // 14: murmur.v1.QueryService.GetTrailing:input_type -> murmur.v1.GetTrailingRequest
+	15, // 15: murmur.v1.QueryService.GetTrailingMany:input_type -> murmur.v1.GetTrailingManyRequest
+	5,  // 16: murmur.v1.QueryService.Get:output_type -> murmur.v1.GetResponse
+	6,  // 17: murmur.v1.QueryService.GetWindow:output_type -> murmur.v1.GetWindowResponse
+	7,  // 18: murmur.v1.QueryService.GetRange:output_type -> murmur.v1.GetRangeResponse
+	8,  // 19: murmur.v1.QueryService.GetMany:output_type -> murmur.v1.GetManyResponse
+	10, // 20: murmur.v1.QueryService.GetWindowMany:output_type -> murmur.v1.GetWindowManyResponse
+	12, // 21: murmur.v1.QueryService.GetRangeMany:output_type -> murmur.v1.GetRangeManyResponse
+	14, // 22: murmur.v1.QueryService.GetTrailing:output_type -> murmur.v1.GetTrailingResponse
+	16, // 23: murmur.v1.QueryService.GetTrailingMany:output_type -> murmur.v1.GetTrailingManyResponse
+	16, // [16:24] is the sub-list for method output_type
+	8,  // [8:16] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_murmur_v1_query_proto_init() }
@@ -850,7 +1093,7 @@ func file_murmur_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_murmur_v1_query_proto_rawDesc), len(file_murmur_v1_query_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

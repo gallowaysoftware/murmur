@@ -39,3 +39,13 @@ go.work.sum
 # `npx buf generate` in web/). The Go bindings under proto/gen/ are checked
 # in (Go is more sensitive to module-path drift), but TS is regenerated.
 /web/src/gen/
+
+# Terraform working directories and state. The .terraform/ cache and
+# .tfstate files are local to a working copy; the modules under
+# deploy/terraform/ are root-less (consumers compose them), so lock files
+# at the module level would just create churn.
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan

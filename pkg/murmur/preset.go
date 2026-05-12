@@ -33,15 +33,16 @@ func Counter[T any](name string) *CounterBuilder[T] {
 }
 
 // CounterBuilder builds a Counter pipeline. Required: From, KeyBy or
-// KeyByMany, StoreIn. Optional: Daily/Hourly windowing, Cache.
+// KeyByMany, StoreIn. Optional: Daily/Hourly/Trailing windowing, Cache.
 type CounterBuilder[T any] struct {
-	name   string
-	keyFn  func(T) string
-	keysFn func(T) []string
-	src    source.Source[T]
-	store  state.Store[int64]
-	cache  state.Cache[int64]
-	window *windowed.Config
+	name     string
+	keyFn    func(T) string
+	keysFn   func(T) []string
+	src      source.Source[T]
+	store    state.Store[int64]
+	cache    state.Cache[int64]
+	window   *windowed.Config
+	trailing []time.Duration // recorded by Trailing(); see trailing.go
 }
 
 // From sets the live event source. Required for streaming.Run; can be omitted

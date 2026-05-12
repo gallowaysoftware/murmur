@@ -46,6 +46,18 @@ service QueryService {
 
   // GetRangeMany is the absolute-range counterpart to GetWindowMany.
   rpc GetRangeMany(GetRangeManyRequest) returns (GetRangeManyResponse);
+
+  // GetTrailing returns the aggregation merged across the trailing window
+  // covering the most recent `duration_seconds`, ending at the server's
+  // "now". Equivalent to GetWindow but documents the "trailing window"
+  // intent (last-7d, last-30d) — and pairs with the matching builder
+  // sugar `(*CounterBuilder).Trailing(durations...)` which sizes daily
+  // retention from the requested durations.
+  rpc GetTrailing(GetTrailingRequest) returns (GetTrailingResponse);
+
+  // GetTrailingMany batches GetTrailing across many entities in one
+  // round-trip — counterpart to GetWindowMany.
+  rpc GetTrailingMany(GetTrailingManyRequest) returns (GetTrailingManyResponse);
 }
 
 // GetRequest is the input for Get — a single entity lookup.
@@ -138,5 +150,34 @@ message GetRangeManyRequest {
 }
 
 message GetRangeManyResponse {
+  repeated Value values = 1;
+}
+
+// GetTrailingRequest asks for a trailing-window merge. Semantically
+// identical to GetWindowRequest; the separate RPC names the intent
+// ("trailing 7-day count") and pairs with the trailing-builder sugar.
+message GetTrailingRequest {
+  string entity = 1;
+  // Trailing-window duration in seconds (e.g. 604800 for trailing-7d,
+  // 2592000 for trailing-30d).
+  int64 duration_seconds = 2;
+  bool fresh_read = 3;
+}
+
+message GetTrailingResponse {
+  Value value = 1;
+}
+
+// GetTrailingManyRequest batches GetTrailing for many entities in one
+// round-trip. Same single-store-fetch contract as GetWindowMany.
+message GetTrailingManyRequest {
+  repeated string entities = 1;
+  int64 duration_seconds = 2;
+  bool fresh_read = 3;
+}
+
+message GetTrailingManyResponse {
+  // Same length and order as the request's `entities`. Missing entities
+  // return the monoid Identity with present=true.
   repeated Value values = 1;
 }

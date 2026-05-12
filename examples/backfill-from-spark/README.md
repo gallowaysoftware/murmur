@@ -16,6 +16,16 @@ Both sources implement `snapshot.Source[T]` and plug directly into
 producer — it's Spark's native output format and avoids a wasteful
 `.write.json(...).gz` round-trip.
 
+```
+Redshift / warehouse → Spark aggregation → S3 → bootstrap.Run → DDB Sum store
+                                                       ▲
+                                                       │
+                                        live Kafka/Kinesis worker
+                                        (takes over from HandoffToken)
+```
+
+Because the Murmur Sum monoid is associative, a pre-aggregated row with `count=42` produces the same bucket value as forty-two streaming events with `count=1`. The pipeline definition is identical; only the source differs.
+
 ## Canonical Parquet schema
 
 Spark jobs targeting Murmur should write rows in this shape:
@@ -63,7 +73,7 @@ reading them based on the partition values parsed from the key path.
 Spark defaults to Snappy compression — leave it. The Parquet snapshot
 source handles Snappy / gzip / zstd / lz4 transparently.
 
-## Go bootstrap
+## Go bootstrap (Parquet)
 
 ```go
 import (
@@ -119,17 +129,92 @@ you would the JSON-Lines variant — the Source contract is identical.
 
 ## JSON Lines variant
 
-For ad-hoc backfills or sources that Spark is not the producer for,
-`pkg/source/snapshot/s3` is the right choice. The schema is the same
-shape, JSON-encoded one event per line:
+For ad-hoc backfills or sources Spark isn't the producer for,
+`pkg/source/snapshot/s3` is the right choice. The runnable binary in
+`cmd/backfill/` exercises this path end-to-end.
 
-```json
-{"entity_id":"u-1","count":5,"occurred_at_unix_ms":1717420800000}
-{"entity_id":"u-2","count":3,"occurred_at_unix_ms":1717420860000}
+The schema mirrors the Parquet shape but JSON-encoded one event per line:
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `entity_id` | string | yes | The keying dimension. Maps to the pipeline's `Key`/`KeyByMany` output. |
+| `count` | int64 | yes | The pre-aggregated count for this `(entity_id, bucket)`. |
+| `occurred_at` | string (RFC3339 UTC) | yes | Bucket-mid timestamp; the source emits `Record.EventTime` from this so windowed counters bucket correctly. |
+| `year` / `month` / `day` / `hour` | int | informational | Partition components, redundant with `occurred_at` but useful for ad hoc SQL over the archive. |
+
+File layout — Hive-style partitioned, gzipped JSON-Lines:
+
 ```
+s3://my-bucket/counters/<counter-name>/year=2026/month=05/day=08/hour=14/part-00000.jsonl.gz
+s3://my-bucket/counters/<counter-name>/year=2026/month=05/day=08/hour=15/part-00000.jsonl.gz
+…
+```
+
+S3 returns keys in lexicographic order, so the Hive partitioning above scans chronologically. For backfill that doesn't matter — Sum is commutative — but it makes the operator-side log line readable when watching a 40-day backfill walk forward.
 
 Gzip is auto-detected by `.gz` suffix. For Snappy / Zstd, supply a
 custom `OpenObject` hook (see the s3 source's `OpenObject` field).
+
+### Usage
+
+```go
+import (
+    "github.com/gallowaysoftware/murmur/examples/backfill-from-spark"
+    "github.com/gallowaysoftware/murmur/pkg/exec/bootstrap"
+    "github.com/gallowaysoftware/murmur/pkg/source/snapshot/s3"
+)
+
+src, err := s3.NewSource(s3.Config[backfill.CountEvent]{
+    Client:      s3Client,
+    Bucket:      "my-bucket",
+    Prefix:      "counters/bot_interaction/",
+    Concurrency: 8,                      // parallel fetches
+    Decode:      backfill.DecodeJSONL,   // canonical decoder
+    EventID:     backfill.StableEventID, // (entity, hour) hash for dedup
+})
+if err != nil { /* ... */ }
+
+token, err := bootstrap.Run(ctx, pipe, src,
+    bootstrap.WithDedup(deduper), // idempotent re-runs
+)
+```
+
+Run the included binary:
+
+```sh
+go run ./examples/backfill-from-spark/cmd/backfill \
+    -bucket=my-bucket \
+    -prefix=counters/bot_interaction/ \
+    -table=bot_interaction_counts \
+    -name=bot_interaction \
+    -concurrency=8 \
+    -retention=720h        # 30 days
+```
+
+The pipeline shape is intentionally minimal — `Key` + `Value` + `Sum` over a `Daily` window — to keep the example focused on the source. Real counters add `KeyByMany` for scope-key fan-out (`lifetime:<id>`, `hourly:<id>:<bucket>`, `trailing_7d:<id>`), a cache layer, and a `state.Deduper`.
+
+### Bounded concurrency
+
+`s3.Config.Concurrency` caps the number of objects fetched and decoded in parallel. Default 1 (sequential, preserves S3 lexicographic order). Bump to 4–16 when:
+
+- The prefix has many small objects (each `GetObject` round-trip is a fixed cost).
+- The DDB-side write throughput exceeds what a single goroutine can drive.
+
+With `Concurrency > 1` the record emission order is non-deterministic across keys; within a single key, lines are emitted in file order. The dedup contract handles the rest: `EventID` is derived from the row payload, not the file position, so re-ordering across keys doesn't change the dedup decision.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `event.go` | `CountEvent` struct, `DecodeJSONL`, and the `StableEventID` extractor. Wired into `s3.Config.Decode` / `s3.Config.EventID`. |
+| `cmd/backfill/main.go` | Minimal runnable binary: flags → pipeline → `bootstrap.Run`. Loads AWS config from the ambient environment. |
+
+### What's NOT in the JSONL example
+
+- **A Spark job.** Lives in the consumer repository (each counter has its own aggregation SQL). This example documents the schema the Spark job must produce.
+- **A `state.Deduper`.** Wire `bootstrap.WithDedup(...)` in `main.go` when you need re-run idempotence; left out here to keep the example single-step.
+- **Custom partition pruning.** `s3.Config.KeyFilter` is the seam — wire it to skip partitions outside the target backfill window or to exclude `_SUCCESS` markers.
+- **Handoff to live mode.** `bootstrap.Run` returns a `HandoffToken` (nil for S3, which has no live-mode resume position); a production wrapper persists the token alongside its progress and starts the live Kafka/Kinesis worker pointed at the same DDB table.
 
 ## Picking between the two
 
