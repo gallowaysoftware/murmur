@@ -101,7 +101,8 @@ type Config[V any] struct {
 	// latency under the pipeline name; the query side records
 	// "<pipeline>:query_get", "<pipeline>:query_get_many",
 	// "<pipeline>:query_get_window", "<pipeline>:query_get_range",
-	// "<pipeline>:query_get_window_many", "<pipeline>:query_get_range_many".
+	// "<pipeline>:query_get_window_many", "<pipeline>:query_get_range_many",
+	// "<pipeline>:query_get_trailing", "<pipeline>:query_get_trailing_many".
 	// Use a metrics.InMemory in development; a Prometheus / CloudWatch
 	// adapter in production.
 	Recorder metrics.Recorder
@@ -254,43 +255,56 @@ func (s *Server[V]) GetMany(ctx context.Context, req *connect.Request[pb.GetMany
 // coalesce key includes the bucketed `now` so two requests one second apart
 // can share work, while requests across a bucket boundary do not.
 func (s *Server[V]) GetWindow(ctx context.Context, req *connect.Request[pb.GetWindowRequest]) (*connect.Response[pb.GetWindowResponse], error) {
+	v, err := s.windowedSingle(ctx, "query_get_window", "GetWindow", req.Msg.GetEntity(), req.Msg.GetDurationSeconds(), req.Msg.GetFreshRead())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&pb.GetWindowResponse{
+		Value: &pb.Value{Present: true, Data: s.encode(v)},
+	}), nil
+}
+
+// windowedSingle is the shared body of GetWindow and GetTrailing —
+// both merge the most-recent buckets covering `durationSeconds` ending
+// at the server's now. The RPC name (and coalesce-key prefix) is the
+// only thing that differs; keeping that as a parameter rather than
+// collapsing both RPCs onto one route preserves the documented intent
+// at the wire layer.
+func (s *Server[V]) windowedSingle(ctx context.Context, metric, coalescePrefix, entity string, durationSeconds int64, freshRead bool) (V, error) {
 	start := time.Now()
 	defer func() {
-		s.recorder.RecordLatency(s.pipeline, "query_get_window", time.Since(start))
+		s.recorder.RecordLatency(s.pipeline, metric, time.Since(start))
 	}()
-	s.recorder.RecordEvent(s.pipeline + ":query_get_window")
+	s.recorder.RecordEvent(s.pipeline + ":" + metric)
 
+	var zero V
 	if s.window == nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
+		return zero, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use Get instead"))
 	}
 	now := s.nowFn()
-	d := time.Duration(req.Msg.GetDurationSeconds()) * time.Second
-	entity := req.Msg.GetEntity()
+	d := time.Duration(durationSeconds) * time.Second
 	doFetch := func() (V, bool, error) {
 		out, err := query.GetWindow(ctx, s.store, s.mon, *s.window, entity, d, now)
 		return out, true, err
 	}
 
-	var (
-		v   V
-		err error
-	)
-	if req.Msg.GetFreshRead() {
-		v, _, err = doFetch()
-	} else {
-		// Coalesce key: bucketed "now" means consecutive requests within the
-		// same bucket reuse a single store call; first request in a new bucket
-		// does the work. This bounds staleness to at most one bucket.
-		bucket := s.window.BucketID(now)
-		key := "GetWindow|" + entity + "|" + strconv.FormatInt(int64(d/time.Second), 10) + "|" + strconv.FormatInt(bucket, 10)
-		v, _, err = coalesceGet(&s.sf, key, doFetch)
+	if freshRead {
+		v, _, err := doFetch()
+		if err != nil {
+			return zero, connect.NewError(connect.CodeInternal, err)
+		}
+		return v, nil
 	}
+	// Coalesce key: bucketed "now" means consecutive requests within the
+	// same bucket reuse a single store call; first request in a new bucket
+	// does the work. This bounds staleness to at most one bucket.
+	bucket := s.window.BucketID(now)
+	key := coalescePrefix + "|" + entity + "|" + strconv.FormatInt(durationSeconds, 10) + "|" + strconv.FormatInt(bucket, 10)
+	v, _, err := coalesceGet(&s.sf, key, doFetch)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return zero, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.GetWindowResponse{
-		Value: &pb.Value{Present: true, Data: s.encode(v)},
-	}), nil
+	return v, nil
 }
 
 // GetRange implements murmur.v1.QueryService/GetRange. Merges every bucket
@@ -345,47 +359,60 @@ func (s *Server[V]) GetRange(ctx context.Context, req *connect.Request[pb.GetRan
 // fresh_read bypasses singleflight. The default path coalesces concurrent
 // identical requests at the (sorted-entities, duration, bucket) granularity.
 func (s *Server[V]) GetWindowMany(ctx context.Context, req *connect.Request[pb.GetWindowManyRequest]) (*connect.Response[pb.GetWindowManyResponse], error) {
+	vs, err := s.windowedMany(ctx, "query_get_window_many", "GetWindowMany", req.Msg.GetEntities(), req.Msg.GetDurationSeconds(), req.Msg.GetFreshRead())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&pb.GetWindowManyResponse{Values: s.encodeMany(vs)}), nil
+}
+
+// windowedMany is the shared body of GetWindowMany and GetTrailingMany.
+// See windowedSingle for the design rationale.
+func (s *Server[V]) windowedMany(ctx context.Context, metric, coalescePrefix string, entities []string, durationSeconds int64, freshRead bool) ([]V, error) {
 	t0 := time.Now()
 	defer func() {
-		s.recorder.RecordLatency(s.pipeline, "query_get_window_many", time.Since(t0))
+		s.recorder.RecordLatency(s.pipeline, metric, time.Since(t0))
 	}()
-	s.recorder.RecordEvent(s.pipeline + ":query_get_window_many")
+	s.recorder.RecordEvent(s.pipeline + ":" + metric)
 
 	if s.window == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("pipeline is not windowed; use GetMany instead"))
 	}
-	entities := req.Msg.GetEntities()
 	now := s.nowFn()
-	d := time.Duration(req.Msg.GetDurationSeconds()) * time.Second
-
+	d := time.Duration(durationSeconds) * time.Second
 	doFetch := func() ([]V, bool, error) {
 		vs, err := query.GetWindowMany(ctx, s.store, s.mon, *s.window, entities, d, now)
 		return vs, true, err
 	}
 
-	var (
-		vs  []V
-		err error
-	)
-	if req.Msg.GetFreshRead() {
-		vs, _, err = doFetch()
-	} else {
-		// Coalesce key: hash the (sorted) entity list + duration + bucket.
-		// Sorting normalizes equivalent permutations onto the same coalesce
-		// key. For typical query shapes (a fixed candidate set per query),
-		// concurrent identical reads collapse to one store fetch.
-		bucket := s.window.BucketID(now)
-		key := "GetWindowMany|" + sortedJoin(entities) + "|" + strconv.FormatInt(int64(d/time.Second), 10) + "|" + strconv.FormatInt(bucket, 10)
-		vs, _, err = coalesceGetSlice(&s.sf, key, doFetch)
+	if freshRead {
+		vs, _, err := doFetch()
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		return vs, nil
 	}
+	// Coalesce key: hash the (sorted) entity list + duration + bucket.
+	// Sorting normalizes equivalent permutations onto the same coalesce
+	// key. For typical query shapes (a fixed candidate set per query),
+	// concurrent identical reads collapse to one store fetch.
+	bucket := s.window.BucketID(now)
+	key := coalescePrefix + "|" + sortedJoin(entities) + "|" + strconv.FormatInt(durationSeconds, 10) + "|" + strconv.FormatInt(bucket, 10)
+	vs, _, err := coalesceGetSlice(&s.sf, key, doFetch)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	out := &pb.GetWindowManyResponse{Values: make([]*pb.Value, len(vs))}
+	return vs, nil
+}
+
+// encodeMany wraps each typed value in a present=true pb.Value with the
+// configured encoder. Shared by every "Many" response builder.
+func (s *Server[V]) encodeMany(vs []V) []*pb.Value {
+	out := make([]*pb.Value, len(vs))
 	for i, v := range vs {
-		out.Values[i] = &pb.Value{Present: true, Data: s.encode(v)}
+		out[i] = &pb.Value{Present: true, Data: s.encode(v)}
 	}
-	return connect.NewResponse(out), nil
+	return out
 }
 
 // GetRangeMany implements murmur.v1.QueryService/GetRangeMany. Same shape
@@ -424,11 +451,35 @@ func (s *Server[V]) GetRangeMany(ctx context.Context, req *connect.Request[pb.Ge
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	out := &pb.GetRangeManyResponse{Values: make([]*pb.Value, len(vs))}
-	for i, v := range vs {
-		out.Values[i] = &pb.Value{Present: true, Data: s.encode(v)}
+	return connect.NewResponse(&pb.GetRangeManyResponse{Values: s.encodeMany(vs)}), nil
+}
+
+// GetTrailing implements murmur.v1.QueryService/GetTrailing. Semantically
+// identical to GetWindow — both merge the most-recent buckets covering
+// `duration_seconds` ending at the server's now — but exposed under a
+// distinct RPC so callsites that think in "trailing windows" (last-7d,
+// last-30d) don't have to translate intent. Same not-windowed
+// precondition and same singleflight coalesce shape as GetWindow.
+func (s *Server[V]) GetTrailing(ctx context.Context, req *connect.Request[pb.GetTrailingRequest]) (*connect.Response[pb.GetTrailingResponse], error) {
+	v, err := s.windowedSingle(ctx, "query_get_trailing", "GetTrailing", req.Msg.GetEntity(), req.Msg.GetDurationSeconds(), req.Msg.GetFreshRead())
+	if err != nil {
+		return nil, err
 	}
-	return connect.NewResponse(out), nil
+	return connect.NewResponse(&pb.GetTrailingResponse{
+		Value: &pb.Value{Present: true, Data: s.encode(v)},
+	}), nil
+}
+
+// GetTrailingMany implements murmur.v1.QueryService/GetTrailingMany.
+// Same shape as GetWindowMany; pairs with GetTrailing for the
+// batched-trailing-windows case (e.g. trailing-7d engagement for
+// 200 candidate posts in one round-trip).
+func (s *Server[V]) GetTrailingMany(ctx context.Context, req *connect.Request[pb.GetTrailingManyRequest]) (*connect.Response[pb.GetTrailingManyResponse], error) {
+	vs, err := s.windowedMany(ctx, "query_get_trailing_many", "GetTrailingMany", req.Msg.GetEntities(), req.Msg.GetDurationSeconds(), req.Msg.GetFreshRead())
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&pb.GetTrailingManyResponse{Values: s.encodeMany(vs)}), nil
 }
 
 // coalesceGetSlice is the slice-result analog of coalesceGet. Used by the
