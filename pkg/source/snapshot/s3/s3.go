@@ -23,6 +23,15 @@
 // Keys ending in `.gz` are auto-decompressed via gzip.NewReader before
 // being passed through to the JSON Lines decoder. Other compressions
 // (snappy, zstd) require a custom Config.OpenObject hook.
+//
+// # Bounded concurrency
+//
+// Set Config.Concurrency to fetch and decode N objects in parallel.
+// Default 1 (sequential, preserves S3's lexicographic key order in the
+// emitted record stream). Bumping to 4–16 is the usual operational
+// move when the prefix contains many small objects and GetObject
+// latency dominates; bootstrap dedup downstream handles the
+// non-deterministic record ordering that parallel mode produces.
 package s3
 
 import (
@@ -32,6 +41,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -62,6 +73,14 @@ type Config[T any] struct {
 	// object key + line number for context. Default: "<key>:<line>".
 	EventID func(decoded T, key string, lineNum int) string
 
+	// EventTime, when non-nil, derives the per-record EventTime used
+	// for window bucket assignment. Defaults to time.Now() when unset;
+	// backfill of windowed counters must wire this to the record's
+	// source-of-truth timestamp (e.g., the bucket-mid `occurred_at`
+	// field on a Spark-aggregated row) or every row will land in the
+	// same bucket.
+	EventTime func(decoded T) time.Time
+
 	// KeyFilter, when non-nil, is called for every listed object key
 	// and must return true for keys that should be scanned. Use this
 	// to skip non-data objects (manifests, _SUCCESS markers) or to
@@ -84,6 +103,24 @@ type Config[T any] struct {
 	// that want to inject a static body. The returned Closer is closed
 	// after the per-object scan completes.
 	OpenObject func(ctx context.Context, key string) (io.ReadCloser, error)
+
+	// ListKeys, when non-nil, overrides the default ListObjectsV2 paged
+	// scan. Use for tests that want a fixed key set, or for callers
+	// that maintain an external manifest of archive keys (e.g., a
+	// `_manifest.json` written alongside the data files). When nil,
+	// the source uses Client.ListObjectsV2 paged over the configured
+	// Bucket + Prefix.
+	ListKeys func(ctx context.Context) ([]string, error)
+
+	// Concurrency bounds the number of objects fetched and decoded in
+	// parallel. Default 1 (sequential, preserves lexicographic key
+	// order for the emitted records). Set higher (typically 4–16) when
+	// the prefix contains many small objects and the per-object
+	// `GetObject` latency dominates. With Concurrency > 1 the record
+	// emission order is non-deterministic across keys; per-record
+	// EventID derivation handles dedup so this is safe under the
+	// at-least-once contract.
+	Concurrency int
 }
 
 // Source implements snapshot.Source[T] over an S3 prefix.
@@ -125,10 +162,19 @@ func (s *Source[T]) CaptureHandoff(_ context.Context) (snapshot.HandoffToken, er
 // Per-object decode errors fire OnDecodeError but do NOT abort — a
 // single poison line in a 100-object archive shouldn't fail the
 // bootstrap.
+//
+// With Config.Concurrency > 1, up to N objects are fetched and decoded
+// in parallel; records from any worker funnel into the single `out`
+// channel. The emission order across keys is non-deterministic in that
+// mode (within a single key, lines remain in file order). Sequential
+// (Concurrency <= 1) preserves the lexicographic key order S3 returns.
 func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error {
 	keys, err := s.listKeys(ctx)
 	if err != nil {
 		return fmt.Errorf("s3 list %s/%s: %w", s.cfg.Bucket, s.cfg.Prefix, err)
+	}
+	if s.cfg.Concurrency > 1 && len(keys) > 1 {
+		return s.scanParallel(ctx, keys, out)
 	}
 	for _, key := range keys {
 		if ctx.Err() != nil {
@@ -137,6 +183,69 @@ func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error
 		if err := s.scanOne(ctx, key, out); err != nil {
 			return fmt.Errorf("s3 scan %s: %w", key, err)
 		}
+	}
+	return nil
+}
+
+// scanParallel runs up to Config.Concurrency workers, each pulling a
+// key from a job channel and streaming its records into the shared
+// `out` channel. The first worker error cancels the others; remaining
+// workers drain quickly without emitting further records.
+func (s *Source[T]) scanParallel(ctx context.Context, keys []string, out chan<- source.Record[T]) error {
+	n := s.cfg.Concurrency
+	if n > len(keys) {
+		n = len(keys)
+	}
+
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan string)
+	// Buffered size 1: only the first worker error matters; peers see
+	// workCtx cancellation and bail without contending for the slot.
+	errCh := make(chan error, 1)
+
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				if err := s.scanOne(workCtx, key, out); err != nil {
+					select {
+					case errCh <- fmt.Errorf("s3 scan %s: %w", key, err):
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+
+	// Feeder: stop pushing keys once the context is canceled so the
+	// workers drain promptly.
+feed:
+	for _, key := range keys {
+		select {
+		case jobs <- key:
+		case <-workCtx.Done():
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return nil
 }
@@ -150,6 +259,22 @@ func (s *Source[T]) Resume(ctx context.Context, _ []byte, out chan<- source.Reco
 }
 
 func (s *Source[T]) listKeys(ctx context.Context) ([]string, error) {
+	if s.cfg.ListKeys != nil {
+		keys, err := s.cfg.ListKeys(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if s.cfg.KeyFilter == nil {
+			return keys, nil
+		}
+		filtered := make([]string, 0, len(keys))
+		for _, k := range keys {
+			if s.cfg.KeyFilter(k) {
+				filtered = append(filtered, k)
+			}
+		}
+		return filtered, nil
+	}
 	if s.cfg.OpenObject != nil && s.cfg.Client == nil {
 		// OpenObject-only mode: caller supplies a fixed key list via
 		// the prefix (single key) or composes their own listing.
@@ -213,6 +338,7 @@ func (s *Source[T]) scanOne(ctx context.Context, key string, out chan<- source.R
 			}
 			return key + ":" + jsonlLineKey(lineNum)
 		},
+		EventTime: s.cfg.EventTime,
 		OnDecodeError: func(line []byte, lineNum int, err error) {
 			if s.cfg.OnDecodeError != nil {
 				s.cfg.OnDecodeError(key, lineNum, line, err)
