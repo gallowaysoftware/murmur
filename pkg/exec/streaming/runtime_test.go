@@ -500,3 +500,57 @@ func TestKeyByMany_HierarchicalRollups_FanOutIntoEveryLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestStreaming_EmitsRecordBatchWithStreamingMode(t *testing.T) {
+	// Streaming must emit RecordBatch with mode="streaming" so a single
+	// dashboard can stack streaming alongside bootstrap and replay
+	// throughput during the M8 backfill phase.
+	store := newFlakyStore(0)
+	src := &flakySource{n: 5}
+	rec := metrics.NewInMemory()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, newPipe(src, store),
+		streaming.WithMetrics(rec),
+		// 10 ms tick: fires at least once after the 5 records drain.
+		streaming.WithBatchTick(10*time.Millisecond),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Allow the background tick goroutine a tick or two to flush.
+	time.Sleep(30 * time.Millisecond)
+
+	got := rec.SnapshotOne("test:batch:streaming").EventsProcessed
+	if got != 5 {
+		t.Errorf("streaming batch events: got %d, want 5", got)
+	}
+	// Cross-mode buckets remain empty so dashboards can filter cleanly.
+	if got := rec.SnapshotOne("test:batch:bootstrap").EventsProcessed; got != 0 {
+		t.Errorf("bootstrap batch events on streaming run: got %d, want 0", got)
+	}
+	if got := rec.SnapshotOne("test:batch:replay").EventsProcessed; got != 0 {
+		t.Errorf("replay batch events on streaming run: got %d, want 0", got)
+	}
+	pipe := rec.SnapshotOne("test")
+	if _, ok := pipe.Latencies["batch_streaming"]; !ok {
+		t.Errorf("expected batch_streaming latency op")
+	}
+}
+
+func TestStreaming_NoopRecorderIsDefault(t *testing.T) {
+	// Without WithMetrics the runtime must default to a metrics.Noop and
+	// must not panic when emitting batch / latency / event records on
+	// either the single-worker path or the periodic tick goroutine.
+	store := newFlakyStore(0)
+	src := &flakySource{n: 5}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := streaming.Run(ctx, newPipe(src, store)); err != nil {
+		t.Fatalf("Run with default Noop recorder: %v", err)
+	}
+}

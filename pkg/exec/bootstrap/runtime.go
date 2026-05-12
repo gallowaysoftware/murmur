@@ -41,6 +41,13 @@ type runConfig struct {
 	// shouldn't fail the whole snapshot, especially for retry-driven
 	// re-runs.
 	failOnError bool
+
+	// batchTick is the periodic flush interval for RecordBatch metrics. A
+	// snapshot draining 40M documents emits one RecordBatch per tick with
+	// the records-since-last-tick count and elapsed wall time, so the
+	// "events/s by mode" dashboard updates without waiting for the whole
+	// bootstrap to finish. Default 1 s.
+	batchTick time.Duration
 }
 
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
@@ -105,6 +112,16 @@ func WithFailOnError(v bool) RunOption {
 	}
 }
 
+// WithBatchTick overrides the RecordBatch flush interval. The default 1 s
+// fits a multi-hour bootstrap where dashboard granularity matters more
+// than emission cost. Pass d <= 0 to disable periodic batch flushes (a
+// single batch is still emitted at completion).
+func WithBatchTick(d time.Duration) RunOption {
+	return func(c *runConfig) {
+		c.batchTick = d
+	}
+}
+
 // Run drives the bootstrap. Returns the captured HandoffToken on success; the deployment
 // system persists it and hands it to the live runtime on transition.
 func Run[T any, V any](
@@ -119,7 +136,7 @@ func Run[T any, V any](
 	if src == nil {
 		return nil, fmt.Errorf("bootstrap.Run: snapshot source is nil")
 	}
-	cfg := runConfig{Config: processor.Defaults()}
+	cfg := runConfig{Config: processor.Defaults(), batchTick: time.Second}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -144,7 +161,31 @@ func Run[T any, V any](
 		close(records)
 	}()
 
-	for rec := range records {
+	// Batch metrics: count records and wall time since the last RecordBatch
+	// emit. emitBatch is called every batchTick and once at completion so
+	// dashboards can plot throughput by mode in near-real-time during a
+	// multi-hour snapshot.
+	var (
+		batchCount int
+		batchStart = time.Now()
+	)
+	emitBatch := func() {
+		if batchCount == 0 {
+			return
+		}
+		cfg.Recorder.RecordBatch(name, metrics.ModeBootstrap, batchCount, time.Since(batchStart))
+		batchCount = 0
+		batchStart = time.Now()
+	}
+
+	var tickC <-chan time.Time
+	if cfg.batchTick > 0 {
+		t := time.NewTicker(cfg.batchTick)
+		defer t.Stop()
+		tickC = t.C
+	}
+
+	drain := func(rec source.Record[T]) error {
 		eventTime := rec.EventTime
 		if eventTime.IsZero() {
 			eventTime = time.Now()
@@ -157,7 +198,7 @@ func Run[T any, V any](
 			// recorded the metric). Decide between abort and continue
 			// per the failOnError flag.
 			if cfg.failOnError {
-				return nil, err
+				return err
 			}
 			// Continue: the metrics surface carries the dead-letter event,
 			// the operator sees the count, and the bootstrap finishes.
@@ -167,11 +208,27 @@ func Run[T any, V any](
 				cfg.Recorder.RecordError(name, fmt.Errorf("snapshot ack: %w", err))
 			}
 		}
-	}
-	if err := <-scanErr; err != nil {
-		cfg.Recorder.RecordError(name, fmt.Errorf("snapshot scan: %w", err))
-		return nil, fmt.Errorf("snapshot scan: %w", err)
+		batchCount++
+		return nil
 	}
 
-	return token, nil
+	for {
+		select {
+		case <-tickC:
+			emitBatch()
+		case rec, ok := <-records:
+			if !ok {
+				emitBatch()
+				if err := <-scanErr; err != nil {
+					cfg.Recorder.RecordError(name, fmt.Errorf("snapshot scan: %w", err))
+					return nil, fmt.Errorf("snapshot scan: %w", err)
+				}
+				return token, nil
+			}
+			if err := drain(rec); err != nil {
+				emitBatch()
+				return nil, err
+			}
+		}
+	}
 }

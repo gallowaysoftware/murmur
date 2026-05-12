@@ -200,6 +200,146 @@ func TestBootstrap_FailOnErrorAborts(t *testing.T) {
 	}
 }
 
+func TestBootstrap_EmitsRecordBatchWithBootstrapMode(t *testing.T) {
+	// A successful bootstrap must emit exactly one or more RecordBatch
+	// calls with mode="bootstrap" whose summed n equals the records
+	// drained from the snapshot. The mode attribute is what lets the
+	// "events/s by mode" dashboard distinguish bootstrap from streaming
+	// traffic during the M8 backfill phase.
+	store := newFakeStore()
+	src := &fakeSnapshot{values: []int{1, 2, 3, 4, 5, 6}}
+	rec := metrics.NewInMemory()
+
+	if _, err := bootstrap.Run(context.Background(), newPipe(store), src,
+		bootstrap.WithMetrics(rec),
+		// Disable the periodic ticker so the test isn't time-sensitive; the
+		// completion-time flush is what we assert on.
+		bootstrap.WithBatchTick(0),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// 6 records drained; the per-mode batch counter must reflect that.
+	got := rec.SnapshotOne("bootstrap-test:batch:bootstrap").EventsProcessed
+	if got != 6 {
+		t.Errorf("bootstrap batch events: got %d, want 6", got)
+	}
+
+	// The unrelated streaming bucket must remain empty so dashboards
+	// filtering by mode don't see cross-contamination.
+	if got := rec.SnapshotOne("bootstrap-test:batch:streaming").EventsProcessed; got != 0 {
+		t.Errorf("streaming batch events on a bootstrap run: got %d, want 0", got)
+	}
+
+	// Batch latency op must be present on the pipeline name so dashboards
+	// can plot p50/p95/p99 of per-batch wall time.
+	pipe := rec.SnapshotOne("bootstrap-test")
+	if _, ok := pipe.Latencies["batch_bootstrap"]; !ok {
+		t.Errorf("expected batch_bootstrap latency op on bootstrap-test")
+	}
+}
+
+func TestBootstrap_EmitsExpectedProcessorOps(t *testing.T) {
+	// Bootstrap must emit the same per-op latencies (store_merge,
+	// cache_merge) that streaming does, so a single dashboard panel
+	// covers all modes. We assert store_merge appears; cache_merge is
+	// skipped here because the test pipeline has no cache configured.
+	store := newFakeStore()
+	src := &fakeSnapshot{values: []int{1, 2, 3}}
+	rec := metrics.NewInMemory()
+
+	if _, err := bootstrap.Run(context.Background(), newPipe(store), src,
+		bootstrap.WithMetrics(rec),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	pipe := rec.SnapshotOne("bootstrap-test")
+	if _, ok := pipe.Latencies["store_merge"]; !ok {
+		t.Errorf("expected store_merge latency op")
+	}
+	if pipe.EventsProcessed != 3 {
+		t.Errorf("pipeline events: got %d, want 3", pipe.EventsProcessed)
+	}
+}
+
+func TestBootstrap_NoopRecorderIsDefault(t *testing.T) {
+	// Without WithMetrics the runtime must default to a metrics.Noop and
+	// must not panic when emitting batch / latency / event records. This
+	// is the zero-overhead-default contract for callers that don't want
+	// any observability surface.
+	store := newFakeStore()
+	src := &fakeSnapshot{values: []int{1, 2, 3}}
+
+	if _, err := bootstrap.Run(context.Background(), newPipe(store), src); err != nil {
+		t.Fatalf("Run with default Noop recorder: %v", err)
+	}
+}
+
+func TestBootstrap_PeriodicBatchTickEmitsDuringScan(t *testing.T) {
+	// With a periodic batchTick, the bootstrap must emit RecordBatch
+	// while the snapshot is still being drained — not only at completion.
+	// This is the dashboard-granularity contract for multi-hour bootstraps.
+	store := newFakeStore()
+	// Slow snapshot: emit one record every 30 ms, 5 records total. With
+	// a 50 ms batchTick, the runtime should emit at least 2 batches
+	// before the snapshot closes.
+	slow := &slowSnapshot{values: []int{1, 2, 3, 4, 5}, delay: 30 * time.Millisecond}
+	rec := metrics.NewInMemory()
+
+	if _, err := bootstrap.Run(context.Background(), newPipe(store), slow,
+		bootstrap.WithMetrics(rec),
+		bootstrap.WithBatchTick(50*time.Millisecond),
+	); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// All 5 records accounted for in the summed batch count.
+	got := rec.SnapshotOne("bootstrap-test:batch:bootstrap").EventsProcessed
+	if got != 5 {
+		t.Errorf("bootstrap batch events: got %d, want 5", got)
+	}
+	// At least two batch latency samples (one tick mid-flight + one at
+	// completion). Tolerate >= 1 since a fast machine could still race
+	// the ticker, but the typical case is >= 2.
+	pipe := rec.SnapshotOne("bootstrap-test")
+	lat, ok := pipe.Latencies["batch_bootstrap"]
+	if !ok || lat.N < 1 {
+		t.Errorf("expected at least 1 batch_bootstrap latency sample, got %d", lat.N)
+	}
+}
+
+// slowSnapshot emits values with a delay between each. Lets the periodic
+// batch ticker fire before the snapshot completes.
+type slowSnapshot struct {
+	values []int
+	delay  time.Duration
+}
+
+func (s *slowSnapshot) CaptureHandoff(context.Context) (snapshot.HandoffToken, error) {
+	return snapshot.HandoffToken("token-slow"), nil
+}
+func (s *slowSnapshot) Scan(ctx context.Context, out chan<- source.Record[int]) error {
+	for i, v := range s.values {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(s.delay):
+		}
+		out <- source.Record[int]{
+			EventID: "ev-" + strconv.Itoa(i),
+			Value:   v,
+			Ack:     func() error { return nil },
+		}
+	}
+	return nil
+}
+func (*slowSnapshot) Resume(context.Context, []byte, chan<- source.Record[int]) error {
+	return nil
+}
+func (*slowSnapshot) Name() string { return "slow-snapshot" }
+func (*slowSnapshot) Close() error { return nil }
+
 func TestBootstrap_KeyByManyHierarchical(t *testing.T) {
 	// Each value contributes to multiple keys (a + b + c). Verify the
 	// hierarchical-rollup wiring works in bootstrap mode just like

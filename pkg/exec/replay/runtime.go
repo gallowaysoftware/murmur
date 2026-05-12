@@ -32,6 +32,13 @@ type RunOption func(*runConfig)
 type runConfig struct {
 	processor.Config
 	failOnError bool
+
+	// batchTick is the periodic flush interval for RecordBatch metrics. A
+	// multi-day replay emits one RecordBatch per tick with the records-
+	// since-last-tick count and elapsed wall time, so the "events/s by
+	// mode" dashboard updates without waiting for the whole replay to
+	// finish. Default 1 s.
+	batchTick time.Duration
 }
 
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
@@ -94,6 +101,16 @@ func WithFailOnError(v bool) RunOption {
 	}
 }
 
+// WithBatchTick overrides the RecordBatch flush interval. The default 1 s
+// fits a multi-day replay where dashboard granularity matters more than
+// emission cost. Pass d <= 0 to disable periodic batch flushes (a single
+// batch is still emitted at completion).
+func WithBatchTick(d time.Duration) RunOption {
+	return func(c *runConfig) {
+		c.batchTick = d
+	}
+}
+
 // Run drives the replay to completion. Returns nil when the driver exhausts its source
 // and all records have been processed; non-nil on a fatal error (or any dead-lettered
 // record when WithFailOnError(true)).
@@ -109,7 +126,7 @@ func Run[T any, V any](
 	if drv == nil {
 		return fmt.Errorf("replay.Run: driver is nil")
 	}
-	cfg := runConfig{Config: processor.Defaults()}
+	cfg := runConfig{Config: processor.Defaults(), batchTick: time.Second}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -128,7 +145,31 @@ func Run[T any, V any](
 		close(records)
 	}()
 
-	for rec := range records {
+	// Batch metrics: count records and wall time since the last RecordBatch
+	// emit. emitBatch is called every batchTick and once at completion so
+	// dashboards can plot throughput by mode in near-real-time during a
+	// multi-day replay.
+	var (
+		batchCount int
+		batchStart = time.Now()
+	)
+	emitBatch := func() {
+		if batchCount == 0 {
+			return
+		}
+		cfg.Recorder.RecordBatch(name, metrics.ModeReplay, batchCount, time.Since(batchStart))
+		batchCount = 0
+		batchStart = time.Now()
+	}
+
+	var tickC <-chan time.Time
+	if cfg.batchTick > 0 {
+		t := time.NewTicker(cfg.batchTick)
+		defer t.Stop()
+		tickC = t.C
+	}
+
+	drain := func(rec source.Record[T]) error {
 		eventTime := rec.EventTime
 		if eventTime.IsZero() {
 			eventTime = time.Now()
@@ -146,10 +187,27 @@ func Run[T any, V any](
 				cfg.Recorder.RecordError(name, fmt.Errorf("replay ack: %w", err))
 			}
 		}
+		batchCount++
+		return nil
 	}
-	if err := <-driverErr; err != nil {
-		cfg.Recorder.RecordError(name, fmt.Errorf("replay driver: %w", err))
-		return fmt.Errorf("replay driver: %w", err)
+
+	for {
+		select {
+		case <-tickC:
+			emitBatch()
+		case rec, ok := <-records:
+			if !ok {
+				emitBatch()
+				if err := <-driverErr; err != nil {
+					cfg.Recorder.RecordError(name, fmt.Errorf("replay driver: %w", err))
+					return fmt.Errorf("replay driver: %w", err)
+				}
+				return nil
+			}
+			if err := drain(rec); err != nil {
+				emitBatch()
+				return err
+			}
+		}
 	}
-	return nil
 }

@@ -85,3 +85,63 @@ func TestInMemory_ConcurrentSafety(t *testing.T) {
 		t.Errorf("EventsProcessed: got %d, want 8000", s.EventsProcessed)
 	}
 }
+
+func TestInMemory_RecordBatch(t *testing.T) {
+	m := metrics.NewInMemory()
+	// Three batches of 10/20/30 records under the streaming mode and one
+	// of 7 under the bootstrap mode.
+	m.RecordBatch("p", metrics.ModeStreaming, 10, 100*time.Millisecond)
+	m.RecordBatch("p", metrics.ModeStreaming, 20, 200*time.Millisecond)
+	m.RecordBatch("p", metrics.ModeStreaming, 30, 300*time.Millisecond)
+	m.RecordBatch("p", metrics.ModeBootstrap, 7, 50*time.Millisecond)
+
+	// Per-mode event counts live under a synthetic pipeline name; this is
+	// how a dashboard separates streaming vs bootstrap throughput while
+	// preserving the unmodified pipeline name for per-op latencies.
+	stream := m.SnapshotOne("p:batch:streaming")
+	if stream.EventsProcessed != 60 {
+		t.Errorf("streaming events: got %d, want 60", stream.EventsProcessed)
+	}
+	boot := m.SnapshotOne("p:batch:bootstrap")
+	if boot.EventsProcessed != 7 {
+		t.Errorf("bootstrap events: got %d, want 7", boot.EventsProcessed)
+	}
+
+	// Batch latency lives on the unmodified pipeline name under the synthetic
+	// "batch_<mode>" op; dashboards can plot p50/p95/p99 by mode.
+	p := m.SnapshotOne("p")
+	streamLat, ok := p.Latencies["batch_streaming"]
+	if !ok {
+		t.Fatalf("expected batch_streaming latency op")
+	}
+	if streamLat.N != 3 {
+		t.Errorf("streaming latency samples: got %d, want 3", streamLat.N)
+	}
+	bootLat, ok := p.Latencies["batch_bootstrap"]
+	if !ok {
+		t.Fatalf("expected batch_bootstrap latency op")
+	}
+	if bootLat.N != 1 {
+		t.Errorf("bootstrap latency samples: got %d, want 1", bootLat.N)
+	}
+}
+
+func TestInMemory_RecordBatch_ZeroCountSkipsEventEmit(t *testing.T) {
+	// A 0-count batch with non-zero duration should NOT inflate the event
+	// counter (idle ticks must not pollute throughput dashboards) but the
+	// duration sample should still be discarded too — zero events in zero
+	// time is a noise observation.
+	m := metrics.NewInMemory()
+	m.RecordBatch("p", metrics.ModeStreaming, 0, 50*time.Millisecond)
+	if got := m.SnapshotOne("p:batch:streaming").EventsProcessed; got != 0 {
+		t.Errorf("events on zero-count batch: got %d, want 0", got)
+	}
+}
+
+func TestNoop_RecordBatch_ZeroCost(t *testing.T) {
+	// The Noop recorder MUST satisfy Recorder including the new
+	// RecordBatch method and remain a true no-op. Compile-time check
+	// (interface satisfaction) + a runtime smoke test.
+	var r metrics.Recorder = metrics.Noop{}
+	r.RecordBatch("p", "streaming", 1_000_000, time.Hour)
+}
