@@ -56,6 +56,8 @@ import (
 
 	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
+	"github.com/gallowaysoftware/murmur/pkg/monoid"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
@@ -204,9 +206,16 @@ func NewHandler[T any, V any](
 	name := p.Name()
 	keysFn := p.KeysFn()
 	valueFn := p.ValueFn()
+	mon := p.Monoid()
 	store := p.Store()
 	cacheStore := p.CacheStore()
 	window := p.Window()
+	coalesceCfg := p.Coalesce()
+
+	if coalesceCfg.Enabled {
+		return newCoalescingHandler(&cfg, coalesceCfg, name, mon, keysFn, valueFn,
+			store, cacheStore, window, decode), nil
+	}
 
 	return func(ctx context.Context, evt events.KinesisEvent) (events.KinesisEventResponse, error) {
 		var resp events.KinesisEventResponse
@@ -239,6 +248,134 @@ func NewHandler[T any, V any](
 		}
 		return resp, nil
 	}, nil
+}
+
+// newCoalescingHandler returns the Kinesis Lambda handler path that uses
+// processor.Coalescer to collapse N events touching the same key into 1
+// MergeUpdate per batch.
+//
+// Failure granularity: when a flushed key fails after retries, the handler
+// reports BatchItemFailures for every Kinesis sequence number that contributed
+// to that key (the Coalescer surfaces contributing EventIDs; this code maps
+// each EventID back to its sequence number via the local arrivedIDs map).
+// Records whose sequence numbers don't appear among the contributors are not
+// reported — Lambda treats them as successful, the dedup guard prevents
+// double-counting on the inevitable replay of the failed-sequence subset.
+//
+// Records that fail to decode are not added to BatchItemFailures (same poison-
+// pill policy as the per-event path).
+func newCoalescingHandler[T any, V any](
+	cfg *handlerConfig,
+	coalesceCfg processor.CoalesceConfig,
+	name string,
+	mon monoid.Monoid[V],
+	keysFn func(T) []string,
+	valueFn func(T) V,
+	store state.Store[V],
+	cacheStore state.Cache[V],
+	window *windowed.Config,
+	decode Decoder[T],
+) Handler {
+	return func(ctx context.Context, evt events.KinesisEvent) (events.KinesisEventResponse, error) {
+		var resp events.KinesisEventResponse
+
+		// eventIDToSeq maps the dedup EventID (event-source-ARN/sequence-number)
+		// back to the raw Kinesis sequence number for BatchItemFailures reporting.
+		eventIDToSeq := make(map[string]string, len(evt.Records))
+
+		c := processor.NewCoalescer(&cfg.Config, coalesceCfg, name, mon, store, cacheStore, window)
+		// failedMidBatch is set when an auto-flush returned an error inside the
+		// add-loop. Subsequent records are not added — we abort the batch and
+		// report every record from that point forward as a failure so Lambda
+		// redelivers them. Dedup keeps successful prefix-keys from double-
+		// counting on redelivery.
+		var (
+			midBatchErr     error
+			abortedAtRecord = -1
+		)
+		for i := range evt.Records {
+			rec := &evt.Records[i]
+			value, err := decode(rec.Kinesis.Data)
+			if err != nil {
+				if cfg.onDecodeError != nil {
+					cfg.onDecodeError(rec.Kinesis.Data, rec.Kinesis.SequenceNumber, rec.Kinesis.PartitionKey, err)
+				}
+				cfg.Recorder.RecordError(name, fmt.Errorf("decode %q: %w", rec.Kinesis.SequenceNumber, err))
+				continue
+			}
+
+			eventID := buildEventID(rec)
+			eventIDToSeq[eventID] = rec.Kinesis.SequenceNumber
+			eventTime := rec.Kinesis.ApproximateArrivalTimestamp.Time
+			if eventTime.IsZero() {
+				eventTime = cfg.now()
+			}
+
+			if err := c.AddMany(ctx, eventID, eventTime, keysFn(value), valueFn(value)); err != nil {
+				midBatchErr = err
+				abortedAtRecord = i
+				break
+			}
+		}
+
+		if midBatchErr != nil {
+			// Report the keys that actually failed via the FlushError surface
+			// (precise sequence-number mapping where possible).
+			appendBatchFailures(&resp, midBatchErr, eventIDToSeq)
+			// Plus every record we never got to: they remain unprocessed. Lambda
+			// must redeliver them; dedup makes that safe.
+			for i := abortedAtRecord + 1; i < len(evt.Records); i++ {
+				resp.BatchItemFailures = append(resp.BatchItemFailures, events.KinesisBatchItemFailure{
+					ItemIdentifier: evt.Records[i].Kinesis.SequenceNumber,
+				})
+			}
+			return resp, nil
+		}
+
+		if err := c.Flush(ctx); err != nil {
+			appendBatchFailures(&resp, err, eventIDToSeq)
+		}
+		return resp, nil
+	}
+}
+
+// appendBatchFailures maps Coalescer flush failures back to the corresponding
+// Kinesis sequence numbers via the contributing-EventID metadata the Coalescer
+// preserved. On any other error type, all known sequence numbers are reported
+// — Lambda will redeliver the whole batch (safe with the dedup guard).
+func appendBatchFailures(
+	resp *events.KinesisEventResponse,
+	err error,
+	eventIDToSeq map[string]string,
+) {
+	var fe *processor.FlushError
+	if !errors.As(err, &fe) {
+		// Unknown error (likely context cancellation). Report every known
+		// sequence number; Lambda will redeliver the batch and dedup will
+		// prevent double-counting of any keys that did complete.
+		for _, seq := range eventIDToSeq {
+			resp.BatchItemFailures = append(resp.BatchItemFailures, events.KinesisBatchItemFailure{
+				ItemIdentifier: seq,
+			})
+		}
+		return
+	}
+	seen := make(map[string]struct{}, len(fe.FailedKeys))
+	for _, kf := range fe.FailedKeys {
+		for _, id := range kf.ContributingIDs {
+			seq, ok := eventIDToSeq[id]
+			if !ok {
+				continue
+			}
+			if _, dup := seen[seq]; dup {
+				continue
+			}
+			seen[seq] = struct{}{}
+			resp.BatchItemFailures = append(resp.BatchItemFailures, events.KinesisBatchItemFailure{
+				ItemIdentifier: seq,
+			})
+		}
+	}
 }
 
 // buildEventID derives a stream-globally-unique ID for dedup. Falls back to

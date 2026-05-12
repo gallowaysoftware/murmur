@@ -56,3 +56,52 @@ type Monoid[V any] interface {
 func IsStructural(k Kind) bool {
 	return k != KindCustom
 }
+
+// IsAdditive reports whether values produced by a monoid of the given Kind can be safely
+// pre-combined client-side and applied to a state store via a single MergeUpdate per key
+// without changing the result. In practice this means the monoid is commutative and its
+// values are cheap to combine in memory — the canonical examples are KindSum and
+// KindCount, which back DynamoDB ADD-style atomic increments.
+//
+// In-memory delta coalescing (pkg/exec/processor.Coalescer) consults this to decide
+// whether a batch of per-event deltas can collapse to a single MergeUpdate per unique
+// key. Monoids whose Kind is KindCustom may opt in to the same fast path by implementing
+// the Additive interface defined below.
+//
+// Non-additive Kinds (KindMin / KindMax / KindFirst / KindLast / KindSet / KindMap /
+// KindTuple / KindHLL / KindTopK / KindBloom) return false: their values typically
+// require a read-modify-write CAS path or carry sketch state where pre-combining adds
+// no wire savings and may complicate retry semantics.
+func IsAdditive(k Kind) bool {
+	switch k {
+	case KindSum, KindCount:
+		return true
+	default:
+		return false
+	}
+}
+
+// Additive is an opt-in capability for monoids whose Kind is KindCustom but whose Combine
+// is still safe to apply pre-store-write. Custom decayed-sum and other linearly-combining
+// numeric monoids should implement this returning true so the coalescing path picks them
+// up. Monoids whose Kind already returns true from IsAdditive(Kind) need not implement
+// this interface — the Kind check wins.
+type Additive interface {
+	// IsAdditive reports whether the implementing monoid supports client-side
+	// pre-combining for delta coalescing.
+	IsAdditive() bool
+}
+
+// IsAdditiveMonoid is a convenience helper that returns true if either the monoid's Kind
+// is in the additive built-in set or the monoid implements Additive with IsAdditive()
+// returning true. Use this from runtimes rather than calling IsAdditive(k) directly when
+// you have a full Monoid handle.
+func IsAdditiveMonoid[V any](m Monoid[V]) bool {
+	if IsAdditive(m.Kind()) {
+		return true
+	}
+	if a, ok := any(m).(Additive); ok {
+		return a.IsAdditive()
+	}
+	return false
+}
