@@ -184,9 +184,15 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 }
 
 // flushAll drains every batch currently held. Called on ticker fire and on
-// shutdown. Each batch flushes serially — concurrent flushes against
-// distinct DDB partitions could be parallelized, but at moderate flush
-// frequency (1s) that's premature.
+// shutdown.
+//
+// When the runtime is configured with WithConcurrency(N>1), flushAll
+// dispatches the per-key flushes across at most N worker goroutines.
+// Each (entity, bucket) batch has already coalesced its contributions
+// into ONE delta at accept-time, so the per-key flushes touch distinct
+// store keys and can run in parallel safely regardless of monoid
+// commutativity. Concurrency=1 (the default) preserves the historical
+// serial flush path.
 func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 	a.mu.Lock()
 	keys := make([]state.Key, 0, len(a.batches))
@@ -195,9 +201,36 @@ func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 	}
 	a.mu.Unlock()
 
-	for _, sk := range keys {
-		a.flushOne(ctx, sk)
+	n := a.cfg.concurrency
+	if n <= 1 || len(keys) <= 1 {
+		for _, sk := range keys {
+			a.flushOne(ctx, sk)
+		}
+		return
 	}
+
+	if n > len(keys) {
+		n = len(keys)
+	}
+	// Bound parallelism via a semaphore rather than processor.FlushBatch
+	// directly — flushOne carries the per-batch Ack/dead-letter wiring
+	// (deferred per-record acks, deadLetter callbacks, retry-exhausted
+	// metrics) that FlushBatch doesn't know about. The store-side
+	// retry/backoff still runs inside flushOne -> processor.MergeMany,
+	// so this is purely a goroutine-pool dispatch around the existing
+	// per-key flush.
+	sem := make(chan struct{}, n)
+	var wg sync.WaitGroup
+	for _, sk := range keys {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(sk state.Key) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			a.flushOne(ctx, sk)
+		}(sk)
+	}
+	wg.Wait()
 }
 
 // flushOne removes the named batch from the live map and merges it into the
