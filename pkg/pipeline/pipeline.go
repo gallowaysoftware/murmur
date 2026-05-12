@@ -21,6 +21,7 @@ package pipeline
 import (
 	"errors"
 
+	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/source"
@@ -31,16 +32,17 @@ import (
 // Value, Aggregate, StoreIn, Cache, ServeOn) to populate it, then Build to validate and
 // freeze.
 type Pipeline[T any, V any] struct {
-	name    string
-	src     source.Source[T]
-	keyFn   func(T) string
-	keysFn  func(T) []string // when set, takes precedence over keyFn (multi-key fanout)
-	valueFn func(T) V
-	mon     monoid.Monoid[V]
-	window  *windowed.Config
-	store   state.Store[V]
-	cache   state.Cache[V]
-	query   QueryConfig
+	name     string
+	src      source.Source[T]
+	keyFn    func(T) string
+	keysFn   func(T) []string // when set, takes precedence over keyFn (multi-key fanout)
+	valueFn  func(T) V
+	mon      monoid.Monoid[V]
+	window   *windowed.Config
+	store    state.Store[V]
+	cache    state.Cache[V]
+	query    QueryConfig
+	coalesce processor.CoalesceConfig
 }
 
 // QueryConfig describes how the auto-generated gRPC service should be served.

@@ -71,6 +71,12 @@ func (m decayedMonoid) Combine(a, b Decayed) Decayed {
 
 func (decayedMonoid) Kind() monoid.Kind { return monoid.KindCustom }
 
+// IsAdditive opts decayed-sum into the in-memory delta-coalescing fast path
+// (pkg/exec/processor.Coalescer). Combine over Decayed values is associative and
+// commutative — coalescing N per-event deltas into one before MergeUpdate produces the
+// same final state as N individual MergeUpdate calls, modulo IEEE-754 ULP slop.
+func (decayedMonoid) IsAdditive() bool { return true }
+
 // DecayedAt builds a Decayed observation for use as a per-event delta. amount is the
 // raw contribution at time t. The returned value has Set=true so it round-trips
 // through Combine(Identity, ...) correctly.
