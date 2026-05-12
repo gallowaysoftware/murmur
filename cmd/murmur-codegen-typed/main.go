@@ -19,10 +19,10 @@
 // pipeline. That keeps the dependency footprint zero and lets the
 // user pin their preferred protoc plugin versions.
 //
-// Pipeline kinds supported: sum, hll. Method kinds supported:
-// get_all_time, get_window. TopK/Bloom and many-key methods are
-// not yet covered — write the wrapper by hand against
-// `pkg/query/typed` for those.
+// Pipeline kinds supported: sum, hll, topk, bloom.
+// Method kinds supported: get_all_time, get_window, get_window_many,
+// get_many, get_range. get_many and get_range are sum-only (the typed
+// clients in pkg/query/typed only expose those methods on SumClient).
 package main
 
 import (

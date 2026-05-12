@@ -43,9 +43,7 @@ type Service struct {
 	// in /<pipeline>.QueryService/Get). Required.
 	PipelineName string `yaml:"pipeline_name"`
 
-	// PipelineKind is the monoid family. One of: sum, hll.
-	// (TopK and Bloom are not yet supported by codegen — write
-	// the wrapper by hand against pkg/query/typed for those.)
+	// PipelineKind is the monoid family. One of: sum, hll, topk, bloom.
 	PipelineKind PipelineKind `yaml:"pipeline_kind"`
 
 	// Methods lists the RPCs exposed on this service.
@@ -74,7 +72,8 @@ type Method struct {
 	// Name is the RPC method name (e.g. "GetCount"). Required.
 	Name string `yaml:"name"`
 
-	// Kind is one of: get_all_time, get_window, get_window_many.
+	// Kind is one of: get_all_time, get_window, get_window_many,
+	// get_many, get_range.
 	Kind MethodKind `yaml:"kind"`
 
 	// Request lists the fields on the request message. Order is
@@ -94,18 +93,32 @@ type Method struct {
 
 	// ManyKeyField is the request-field name (must be repeated-string-typed)
 	// holding the list of entity values to query. Required for
-	// kind=get_window_many. The KeyTemplate is applied per element.
+	// kind=get_window_many and kind=get_many. The KeyTemplate is
+	// applied per element.
 	ManyKeyField string `yaml:"many_key_field"`
+
+	// RangeStartField / RangeEndField are int64 request-field names
+	// supplying Unix-second start/end timestamps for kind=get_range.
+	// The runtime converts them with time.Unix(v, 0).
+	RangeStartField string `yaml:"range_start_field"`
+	RangeEndField   string `yaml:"range_end_field"`
 }
 
-// MethodKind tags which typed-client method (Get / GetWindow /
-// GetWindowMany) the generated handler will call.
+// MethodKind tags which typed-client method (Get / GetMany / GetWindow /
+// GetWindowMany / GetRange) the generated handler will call.
+//
+// kind=get_many and kind=get_range only support pipeline_kind=sum today,
+// because the typed clients in pkg/query/typed only expose GetMany /
+// GetRange on SumClient. If HLLClient / TopKClient / BloomClient grow
+// those methods, lift the restriction in validate().
 type MethodKind string
 
 const (
 	MethodGetAllTime    MethodKind = "get_all_time"
 	MethodGetWindow     MethodKind = "get_window"
 	MethodGetWindowMany MethodKind = "get_window_many"
+	MethodGetMany       MethodKind = "get_many"
+	MethodGetRange      MethodKind = "get_range"
 )
 
 // Field is one field on a proto message.
@@ -158,14 +171,14 @@ func (s *Spec) validate() error {
 		return errors.New("service.methods is empty")
 	}
 	for i, m := range s.Service.Methods {
-		if err := m.validate(); err != nil {
+		if err := m.validate(s.Service.PipelineKind); err != nil {
 			return fmt.Errorf("methods[%d] (%s): %w", i, m.Name, err)
 		}
 	}
 	return nil
 }
 
-func (m *Method) validate() error {
+func (m *Method) validate(serviceKind PipelineKind) error {
 	if m.Name == "" {
 		return errors.New("method.name is required")
 	}
@@ -173,7 +186,7 @@ func (m *Method) validate() error {
 		return fmt.Errorf("method.name %q must be UpperCamelCase", m.Name)
 	}
 	switch m.Kind {
-	case MethodGetAllTime, MethodGetWindow, MethodGetWindowMany:
+	case MethodGetAllTime, MethodGetWindow, MethodGetWindowMany, MethodGetMany, MethodGetRange:
 	default:
 		return fmt.Errorf("method.kind: unsupported %q", m.Kind)
 	}
@@ -205,7 +218,7 @@ func (m *Method) validate() error {
 			return fmt.Errorf("window_duration_field %q must be an int64 request field", m.WindowDurationField)
 		}
 	}
-	if m.Kind == MethodGetWindowMany {
+	if m.Kind == MethodGetWindowMany || m.Kind == MethodGetMany {
 		if m.ManyKeyField == "" {
 			return fmt.Errorf("kind=%s requires many_key_field", m.Kind)
 		}
@@ -213,6 +226,37 @@ func (m *Method) validate() error {
 		if f == nil || f.Type != "repeated string" {
 			return fmt.Errorf("many_key_field %q must be a 'repeated string' request field", m.ManyKeyField)
 		}
+		// The key_template must reference the many_key_field — otherwise every
+		// element of the batch produces the same key and the batched call is
+		// pointless (also leaves the generated loop variable unused).
+		found := false
+		for _, ref := range templateRefs(m.KeyTemplate) {
+			if ref == m.ManyKeyField {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("kind=%s: key_template must reference {%s}", m.Kind, m.ManyKeyField)
+		}
+	}
+	if m.Kind == MethodGetRange {
+		if m.RangeStartField == "" || m.RangeEndField == "" {
+			return fmt.Errorf("kind=%s requires both range_start_field and range_end_field", m.Kind)
+		}
+		fs := findField(m.Request, m.RangeStartField)
+		fe := findField(m.Request, m.RangeEndField)
+		if fs == nil || fs.Type != "int64" {
+			return fmt.Errorf("range_start_field %q must be an int64 request field", m.RangeStartField)
+		}
+		if fe == nil || fe.Type != "int64" {
+			return fmt.Errorf("range_end_field %q must be an int64 request field", m.RangeEndField)
+		}
+	}
+	// GetMany / GetRange only exist on SumClient today; reject other kinds
+	// loudly so users don't ship a generated server that fails at compile time.
+	if (m.Kind == MethodGetMany || m.Kind == MethodGetRange) && serviceKind != PipelineSum {
+		return fmt.Errorf("kind=%s is only supported on pipeline_kind=sum (got %q); HLL/TopK/Bloom typed clients lack the underlying method", m.Kind, serviceKind)
 	}
 	return nil
 }

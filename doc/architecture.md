@@ -26,7 +26,7 @@ Worth recording the rationale, since "just use Beam" is the obvious counter-prop
 
 Beam's promise — write once, run on any runner — is real on Dataflow (GCP), partially real on Flink-anywhere, and a fiction on Spark-streaming. For a Go-first, AWS-first counter framework in 2026, Beam isn't a fit.
 
-The framework's three value propositions, all required to justify building (vs. just using Flink + KCL Go + DDB):
+The framework's three value propositions, all required to justify building (vs. just using Flink + a hand-rolled Lambda + DDB):
 1. **Unified Go programming model** — one pipeline definition, multiple execution drivers (live stream, Kafka replay, S3 replay, batch backfill).
 2. **Auto-generated query layer** — gRPC service that correctly merges batch view + realtime delta using the pipeline's monoid Combine. This is the layer nobody else has built.
 3. **AWS-opinionated deployment** — Terraform/CDK modules so deploying a counter pipeline is a few lines, not a quarter of platform-eng work.
@@ -84,11 +84,12 @@ The pipeline DSL doesn't know which mode it's in. The orchestration is a deploym
 
 ### Streaming runtime (the "engine")
 
-**Not building Flink-in-Go.** Generate code that runs on **ECS Fargate workers** consuming via:
-- **Kinesis**: KCL v3 Go (AWS-supported).
-- **Kafka/MSK**: franz-go.
+**Not building Flink-in-Go.** Two deployment shapes share one pipeline DSL, one retry/dedup/metrics core (`pkg/exec/processor`), and one state-store contract:
 
-Workers checkpoint to DDB, write aggregations to state. **Default semantics: at-least-once with per-event-ID dedup** (recently-seen event IDs tracked in DDB or Valkey with TTL; duplicates within the dedup window are dropped). Exactly-once via DDB transactions is queued as a Phase 2 extension for users who can't tolerate the dedup-window edge cases.
+- **Kafka / MSK** → long-running ECS Fargate workers via `pkg/exec/streaming.Run` (franz-go). Kafka's consumer-group coordination is built into the broker; ECS is the natural fit for a persistent connection.
+- **Kinesis / DynamoDB Streams / SQS** → AWS Lambda via `pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`. Lambda's event-source mapping owns shard discovery, lease coordination, autoscaling on shard count (via `ParallelizationFactor`), checkpointing, and partial-batch retry (`BatchItemFailures`). We deliberately do NOT bring KCL v3 Go in-tree — Lambda is operationally cheaper and the supported production path for AWS-native event sources.
+
+Both shapes write through the same DDB-backed `state.Store`, so a single pipeline can ingest from BOTH a Kinesis Lambda and an ECS Kafka worker simultaneously (`examples/recently-interacted-topk/`). **Default semantics: at-least-once with per-event-ID dedup** (recently-seen event IDs tracked in DDB with TTL; duplicates within the dedup window are dropped). Exactly-once via DDB transactions is queued as a Phase 2 extension for users who can't tolerate the dedup-window edge cases.
 
 For users with Flink-class needs (complex joins, watermark semantics, exactly-once across stages), the framework points them at Amazon Managed Service for Apache Flink — we don't try to be it.
 
@@ -112,18 +113,17 @@ This reframing means: Valkey is never trusted as ground truth. If Valkey goes aw
 
 ### Query layer (the differentiator)
 
-Auto-generated gRPC service from the pipeline definition. For aggregator `Counter[string]`:
-```protobuf
-service PageViewsQuery {
-  rpc Get(KeyRequest) returns (CounterResponse);
-  rpc GetMany(KeysRequest) returns (CounterListResponse);
-  rpc GetByPrefix(PrefixRequest) returns (CounterListResponse);
-}
-```
-- Reads the live state store directly in kappa mode.
-- In lambda mode: reads `batch_view` (immutable, from last batch run) + `realtime_delta` (counter increments since last batch checkpoint), merges via the user's monoid Combine, returns.
-- HTTP/JSON gateway via grpc-gateway.
-- No user query code required for the common path.
+Two-tier surface, both built and shipping:
+
+1. **Generic Connect-RPC server** (`pkg/query/grpc`) — one service definition (`proto/murmur/v1/query.proto`) covers every pipeline. Values are byte-encoded so the same handler serves Sum / HLL / TopK / Bloom / custom. RPCs: `Get`, `GetMany`, `GetWindow`, `GetWindowMany`, `GetRange`, `GetRangeMany`. Singleflight coalescing, per-RPC metrics, `fresh_read` flag, optional Valkey-cache fronting.
+2. **Typed per-pipeline codegen** (`cmd/murmur-codegen-typed`) — YAML pipeline-spec → typed `.proto` + Go Connect-RPC server stub that delegates to `pkg/query/typed` and returns the per-kind shape directly (`int64`, `repeated TopKItem`, `BloomShape`, …). Supported pipeline kinds: Sum / HLL / TopK / Bloom. Supported method kinds: `get_all_time` / `get_window` / `get_window_many` / `get_many` / `get_range`. The last two are Sum-only until the typed clients gain matching methods on HLL/TopK/Bloom.
+
+Both layers:
+
+- Read the live state store directly in kappa mode.
+- In lambda mode (`pkg/query.LambdaQuery`): read `batch_view` (immutable, from last batch run) + `realtime_delta` (increments since last batch checkpoint) and merge via the user's monoid Combine.
+- Single port speaks gRPC + gRPC-Web + Connect/HTTP-JSON (Connect-RPC).
+- Require no user query code for the common path.
 
 ### Aggregation primitives (day 1)
 
@@ -170,8 +170,8 @@ CDK constructs as a parallel deliverable if there's appetite.
 │   │   ├── compose/                 # Map, Tuple, decayed-value
 │   │   └── custom/                  # user-defined opaque monoids (Go-only backends)
 │   ├── source/
-│   │   ├── kinesis/                 # KCL v3 Go wrapper (live)
-│   │   ├── kafka/                   # franz-go wrapper (live)
+│   │   ├── kinesis/                 # polling consumer (dev / demo only — production via pkg/exec/lambda/kinesis)
+│   │   ├── kafka/                   # franz-go wrapper (live, ECS)
 │   │   └── snapshot/                # bootstrap drivers
 │   │       ├── mongo/               # collection scan, incremental chunked
 │   │       ├── dynamodb/            # ParallelScan
@@ -187,8 +187,14 @@ CDK constructs as a parallel deliverable if there's appetite.
 │   │   ├── codegen/                 # protobuf+grpc service generation from pipeline
 │   │   └── runtime/                 # merge logic (kappa direct read; lambda batch+delta merge)
 │   └── exec/
-│       ├── streaming/               # ECS Fargate streaming worker entrypoint
+│       ├── streaming/               # ECS Fargate streaming worker entrypoint (Kafka)
+│       ├── lambda/
+│       │   ├── kinesis/             # Kinesis-trigger Lambda handler
+│       │   ├── dynamodbstreams/     # DDB-Streams-trigger Lambda handler
+│       │   └── sqs/                 # SQS-trigger Lambda handler
+│       ├── processor/               # shared retry / dedup / metrics core (streaming + bootstrap + replay + lambda)
 │       ├── bootstrap/               # ECS Fargate bootstrap-driver entrypoint
+│       ├── replay/                  # ECS Fargate replay-driver entrypoint
 │       └── batch/
 │           ├── fargate/             # pure-Go batch on ECS Fargate
 │           ├── sparkconnect/        # spark-connect-go driver against persistent EMR
@@ -226,12 +232,12 @@ CDK constructs as a parallel deliverable if there's appetite.
 ### MVP (Phase 1) — first usable version
 
 - Core pipeline DSL with generics, structural monoid registry
-- **Sources (live)**: Kinesis (KCL v3 Go) + Kafka/MSK (franz-go)
+- **Sources (live)**: Kafka/MSK (franz-go) via ECS workers; Kinesis / DDB Streams / SQS via AWS Lambda event-source mappings
 - **Sources (bootstrap)**: Mongo collection scan, DDB ParallelScan
 - **State**: DynamoDB (source of truth) + Valkey (cache/sketch accelerator)
 - **Monoids**: Counter (Sum, Count, Min, Max, First, Last, Set), HLL, TopK, Bloom
 - **Windowed monoids first-class**: `Windowed[M]` with daily/hourly granularity, sliding-window queries (`GetWindow(key, Last7Days)`, `GetRange`)
-- **Streaming runtime**: ECS Fargate worker (Kinesis + Kafka)
+- **Streaming runtime**: ECS Fargate worker (Kafka) + Lambda handlers (Kinesis / DDB Streams / SQS) sharing the `pkg/exec/processor` core
 - **Bootstrap runtime**: ECS Fargate one-shot driver
 - **Replay**: S3ReplayDriver (Firehose/MSK-Connect archives) + KafkaReplayDriver (offset range)
 - **Batch executors**: ECSFargateExecutor + SparkConnectExecutor (using `pequalsnp/spark-connect-go` fork)
@@ -283,7 +289,7 @@ These are the load-bearing files where architectural decisions live and where mo
 ## Reused / External Dependencies
 
 - [aws/aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) — AWS SDK
-- [awslabs/amazon-kinesis-client-go](https://github.com/awslabs/amazon-kinesis-client-go) — KCL v3 Go (verify current state at impl time)
+- [aws/aws-lambda-go](https://github.com/aws/aws-lambda-go) — Lambda event types (`events.KinesisEvent`, `events.DynamoDBEvent`, `events.SQSEvent`) and `lambda.Start` entry point
 - [twmb/franz-go](https://github.com/twmb/franz-go) — Kafka client
 - [valkey-io/valkey-go](https://github.com/valkey-io/valkey-go) — Valkey client (Valkey-native, also Redis-protocol-compatible)
 - [pequalsnp/spark-connect-go](https://github.com/pequalsnp/spark-connect-go) — Kyle's fork; production-validated at GSS. Upstream is `apache/spark-connect-go` (community-supported in Spark 4.0)

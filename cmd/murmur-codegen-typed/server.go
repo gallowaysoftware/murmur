@@ -13,22 +13,30 @@ import (
 // Imports the buf-generated proto types from Spec.ProtoGoPackage; the
 // user must run buf (or protoc) before the stub will compile.
 //
-// Per-kind response assembly:
+// Per-kind response assembly for get_all_time / get_window:
 //   - sum   → response.Value = val
 //   - hll   → response.Value = int64(val.Cardinality)
 //   - topk  → response.Items built from []typed.TopKItem
 //   - bloom → response fields populated from typed.BloomValue
+//
+// Per-kind response assembly for get_window_many:
+//   - sum   → response.Values = values  ([]int64 from typed.SumClient.GetWindowMany)
+//   - hll   → response.Values = []int64 derived from []HLLValue cardinalities
+//   - topk  → response.Entries = []*pb.TopKItemList from [][]typed.TopKItem
+//   - bloom → response.Entries = []*pb.BloomShape from []typed.BloomValue
 func renderServer(s *Spec) ([]byte, error) {
 	t, err := template.New("server").Funcs(template.FuncMap{
-		"goFieldName":     goFieldName,
-		"renderKey":       renderKeyTemplate,
-		"clientType":      clientType,
-		"clientCtor":      clientCtor,
-		"buildResponse":   buildResponse,
-		"goPkgName":       goPkgName,
-		"protoPkgAlias":   protoPkgAlias,
-		"isTopK":          func(k PipelineKind) bool { return k == PipelineTopK },
-		"emitTopKImports": func(k PipelineKind) bool { return k == PipelineTopK },
+		"goFieldName":          goFieldName,
+		"renderKey":            renderKeyTemplate,
+		"renderManyKeyBuilder": renderManyKeyBuilder,
+		"clientType":           clientType,
+		"clientCtor":           clientCtor,
+		"buildResponse":        buildResponse,
+		"buildResponseMany":    buildResponseMany,
+		"goPkgName":            goPkgName,
+		"protoPkgAlias":        protoPkgAlias,
+		"isTopK":               func(k PipelineKind) bool { return k == PipelineTopK },
+		"emitTopKImports":      func(k PipelineKind) bool { return k == PipelineTopK },
 	}).Parse(serverTemplate)
 	if err != nil {
 		return nil, err
@@ -85,6 +93,42 @@ func (s *{{$.Service.Name}}Server) {{$m.Name}}(ctx context.Context, req *connect
 	}
 {{- end}}
 {{- end}}
+{{- if eq $m.Kind "get_window_many"}}
+	if len(msg.{{goFieldName $m.ManyKeyField}}) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("{{$m.ManyKeyField}} is required"))
+	}
+	duration := time.Duration(msg.{{goFieldName $m.WindowDurationField}}) * time.Second
+	{{renderManyKeyBuilder $m}}
+	values, err := s.client.GetWindowMany(ctx, keys, duration)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+{{buildResponseMany $.Service.PipelineKind $m.Name}}
+{{- else if eq $m.Kind "get_many"}}
+	if len(msg.{{goFieldName $m.ManyKeyField}}) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("{{$m.ManyKeyField}} is required"))
+	}
+	{{renderManyKeyBuilder $m}}
+	values, present, err := s.client.GetMany(ctx, keys)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.{{$m.Name}}Response{
+		Values:  values,
+		Present: present,
+	}), nil
+{{- else if eq $m.Kind "get_range"}}
+	key := {{renderKey $m}}
+	start := time.Unix(msg.{{goFieldName $m.RangeStartField}}, 0)
+	end := time.Unix(msg.{{goFieldName $m.RangeEndField}}, 0)
+	val, err := s.client.GetRange(ctx, key, start, end)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.{{$m.Name}}Response{
+		Value: val,
+	}), nil
+{{- else}}
 	key := {{renderKey $m}}
 {{- if eq $m.Kind "get_all_time"}}
 	val, present, err := s.client.Get(ctx, key)
@@ -94,15 +138,12 @@ func (s *{{$.Service.Name}}Server) {{$m.Name}}(ctx context.Context, req *connect
 {{buildResponse $.Service.PipelineKind $m.Name "val" "present"}}
 {{- else if eq $m.Kind "get_window"}}
 	duration := time.Duration(msg.{{goFieldName $m.WindowDurationField}}) * time.Second
-{{- if or (eq $.Service.PipelineKind "sum") (eq $.Service.PipelineKind "hll")}}
 	val, err := s.client.GetWindow(ctx, key, duration)
-{{- else}}
-	val, err := s.client.GetWindow(ctx, key, duration)
-{{- end}}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 {{buildResponse $.Service.PipelineKind $m.Name "val" "true"}}
+{{- end}}
 {{- end}}
 }
 {{end}}
@@ -147,6 +188,100 @@ func renderKeyTemplate(m Method) string {
 		return fmt.Sprintf("%q", formatStr)
 	}
 	return fmt.Sprintf("fmt.Sprintf(%q, %s)", formatStr, strings.Join(args, ", "))
+}
+
+// renderManyKeyBuilder emits the Go statement block that builds the
+// per-entity key slice for a get_window_many method. The block declares
+// `keys := make([]string, len(msg.<ManyField>))` and ranges over
+// `msg.<ManyField>` substituting the loop variable for the many-field
+// placeholder in the KeyTemplate.
+//
+// Example: KeyTemplate "bot:{bot_id}|user:{user_ids}" with ManyKeyField=user_ids
+// emits:
+//
+//	keys := make([]string, len(msg.UserIds))
+//	for i, v := range msg.UserIds {
+//	    keys[i] = fmt.Sprintf("bot:%s|user:%s", msg.BotId, v)
+//	}
+//
+// Spec validation guarantees the template references the many field, so
+// the loop variable is always used.
+func renderManyKeyBuilder(m Method) string {
+	refs := templateRefs(m.KeyTemplate)
+	formatStr := m.KeyTemplate
+	args := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		f := findField(m.Request, ref)
+		if f == nil {
+			continue
+		}
+		var verb string
+		switch f.Type {
+		case "int64":
+			verb = "%d"
+		default:
+			verb = "%s"
+		}
+		formatStr = strings.Replace(formatStr, "{"+ref+"}", verb, 1)
+		if ref == m.ManyKeyField {
+			args = append(args, "v")
+		} else {
+			args = append(args, "msg."+goFieldName(ref))
+		}
+	}
+	loopOver := "msg." + goFieldName(m.ManyKeyField)
+	return fmt.Sprintf(`keys := make([]string, len(%s))
+	for i, v := range %s {
+		keys[i] = fmt.Sprintf(%q, %s)
+	}`, loopOver, loopOver, formatStr, strings.Join(args, ", "))
+}
+
+// buildResponseMany returns the Go statement(s) that construct and
+// return the get_window_many response for a method, per pipeline kind.
+// The local `values` is whatever the typed-client GetWindowMany returned
+// ([]int64 for SumClient, []HLLValue for HLLClient, etc).
+func buildResponseMany(k PipelineKind, methodName string) string {
+	respType := "pb." + methodName + "Response"
+	switch k {
+	case PipelineSum:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Values: values,
+	}), nil`, respType)
+	case PipelineHLL:
+		return fmt.Sprintf(`	out := make([]int64, len(values))
+	for i, v := range values {
+		out[i] = int64(v.Cardinality)
+	}
+	return connect.NewResponse(&%s{
+		Values: out,
+	}), nil`, respType)
+	case PipelineTopK:
+		return fmt.Sprintf(`	entries := make([]*pb.TopKItemList, len(values))
+	for i, v := range values {
+		items := make([]*pb.TopKItem, len(v))
+		for j, it := range v {
+			items[j] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+		}
+		entries[i] = &pb.TopKItemList{Items: items}
+	}
+	return connect.NewResponse(&%s{
+		Entries: entries,
+	}), nil`, respType)
+	case PipelineBloom:
+		return fmt.Sprintf(`	entries := make([]*pb.BloomShape, len(values))
+	for i, v := range values {
+		entries[i] = &pb.BloomShape{
+			CapacityBits:  int64(v.CapacityBits),
+			HashFunctions: int32(v.HashFunctions),
+			ApproxSize:    int64(v.ApproxSize),
+		}
+	}
+	return connect.NewResponse(&%s{
+		Entries: entries,
+	}), nil`, respType)
+	default:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{}), nil`, respType)
+	}
 }
 
 // clientType returns the typed-client type name in pkg/query/typed

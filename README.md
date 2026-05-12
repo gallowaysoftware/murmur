@@ -6,13 +6,13 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 
 ## Status
 
-**Pre-1.0, experimental.** The architecture is built and exercised end-to-end against a docker-compose stack. Several rough edges are tracked openly in [`STABILITY.md`](STABILITY.md) — most notably error-handling gaps and the gRPC `Get`/`GetWindow`/etc. surface being a generic adapter today rather than per-pipeline codegen.
+**Pre-1.0, experimental.** The architecture is built and exercised end-to-end against a docker-compose stack. Rough edges are tracked openly in [`STABILITY.md`](STABILITY.md). The generic `Get`/`GetWindow`/etc. adapter and the per-pipeline typed codegen ([`cmd/murmur-codegen-typed`](cmd/murmur-codegen-typed)) both ship; the typed codegen covers Sum / HLL / TopK / Bloom across `get_all_time` / `get_window` / `get_window_many` / `get_many` / `get_range` (the last two are Sum-only until `pkg/query/typed` grows the matching methods on HLL/TopK/Bloom).
 
 | Feature | Status |
 |---|---|
 | Pipeline DSL with structural monoids | ✅ |
 | Live mode: Kafka source ([franz-go](https://github.com/twmb/franz-go)) | ✅ |
-| Live mode: Kinesis source | ⚠️ single-instance only, no checkpointing — KCL v3 multi-instance is on the roadmap |
+| Live mode: Kinesis (production path: AWS Lambda trigger) | ✅ [`pkg/exec/lambda/kinesis`](pkg/exec/lambda/kinesis) — Lambda owns shard discovery, leasing, scaling, checkpointing; [`pkg/source/kinesis`](pkg/source/kinesis) remains as a dev/demo polling consumer |
 | Bootstrap mode: Mongo SnapshotSource + handoff token | ✅ |
 | Replay mode: S3 / MinIO JSON-Lines | ✅ |
 | State: DynamoDB Int64SumStore (atomic ADD) + BytesStore (CAS) | ✅ |
@@ -21,7 +21,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 | Monoids: Min, Max (`Bounded[V]`) | ✅ |
 | Sketches: HyperLogLog, TopK (Misra-Gries), Bloom | ✅ |
 | Windowed aggregations + sliding-window queries | ✅ |
-| Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetRange`) | ✅ — typed-per-pipeline codegen is on the roadmap |
+| Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany`) | ✅ [`pkg/query/grpc`](pkg/query/grpc/) Connect-RPC server with singleflight coalescing |
 | Atomic state-table swap (alias version pointer) | ✅ |
 | Spark Connect batch executor (user-supplied SQL) | ✅ validated locally against `apache/spark:4.0.1` |
 | Lambda mode (batch view ⊕ realtime delta merge) | ✅ via [`pkg/query.LambdaQuery`](pkg/query/lambda.go) |
@@ -33,15 +33,15 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 | DX facade (`Counter` / `UniqueCount` / `TopN` presets) | ✅ [`pkg/murmur`](pkg/murmur) |
 | Terraform `pipeline-counter` module | ✅ |
 | Worked example: `page-view-counters` (worker + query binaries) | ✅ |
-| Per-pipeline gRPC codegen (typed responses) | 🛣 roadmap |
-| Valkey-native HLL/Bloom acceleration | 🛣 roadmap |
-| KCL-v3 Kinesis source | 🛣 roadmap |
+| Per-pipeline gRPC codegen (typed responses) | ✅ [`cmd/murmur-codegen-typed`](cmd/murmur-codegen-typed) — Sum / HLL / TopK / Bloom; method kinds `get_all_time` / `get_window` / `get_window_many` / `get_many` / `get_range` |
+| Valkey-native Bloom acceleration | 🛣 roadmap (HLL accelerator is shipped via [`pkg/state/valkey.HLLCache`](pkg/state/valkey/hllcache.go)) |
 
 ## Limitations to read before adopting
 
 - **`replace` directive only for Spark Connect.** The root `github.com/gallowaysoftware/murmur` module no longer depends on `apache/spark-connect-go` — `pkg/exec/batch/sparkconnect` carries its own `go.mod`. Consumers who don't use Spark Connect (95% of users) get a clean `go.mod`. Consumers who DO use the sparkconnect submodule must mirror its `replace github.com/apache/spark-connect-go => github.com/pequalsnp/spark-connect-go …` line in their own `go.mod` — Go does not propagate replace directives transitively.
 - **At-least-once with optional dedup.** Pass `streaming.WithDedup(d)` (where `d` is a `pkg/state/dynamodb.Deduper`) to make replay-after-crash idempotent for any monoid. Without it, the streaming runtime is at-least-once with no per-EventID dedup — fine for idempotent monoids (Set, Min, Max, Bloom) but double-counts non-idempotent ones (Sum, HLL, TopK).
 - **Single-goroutine streaming runtime.** Phase-1 streaming processes records sequentially per worker. Throughput ceiling is roughly 5–10 k events/s/worker against DDB-local depending on item size. Scale horizontally with Kafka partitions until per-partition parallelism lands.
+- **Kinesis production path is Lambda, not ECS.** Use [`pkg/exec/lambda/kinesis`](pkg/exec/lambda/kinesis) — AWS Lambda's event-source mapping owns shard discovery, lease coordination, autoscaling on shard count (via `ParallelizationFactor`), and partial-batch retry semantics via `BatchItemFailures`. The same pipeline definition runs as either a Kafka ECS worker or a Kinesis Lambda; both share state through DDB. The ECS polling path in [`pkg/source/kinesis`](pkg/source/kinesis) is single-instance, has no checkpointing, and is kept for dev / demo only.
 - ~~Min / Max monoids violate the identity law.~~ Fixed: lift inputs via `core.NewBounded(v)`; the monoid value type is `core.Bounded[V]` and Identity is the unset wrapper.
 - **CORS is closed by default.** Pass `admin.WithAllowedOrigins("https://dashboard.example", …)` (or `cmd/murmur-ui --allow-origin=…`) to open it up. The admin API is read-only but still leaks pipeline metadata, so don't expose it to the public internet without auth in front.
 - **CI runs on every PR.** `gofmt` / `go vet` / unit tests with `-race` / `golangci-lint` / web `tsc` + `eslint` + `vite build`. Dependabot is wired up for Go, npm, and Actions.
@@ -94,7 +94,7 @@ func main() {
 
 For the runnable version, see [`examples/page-view-counters/`](examples/page-view-counters/).
 
-The generic gRPC service exposes `Get(entity)`, `GetWindow(entity, duration)`, `GetMany(entities)`, and `GetRange(entity, start, end)` — wire it up with [`pkg/query/grpc.NewServer`](pkg/query/grpc/server.go); proto definitions in [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto). Per-pipeline typed responses (today everything is `bytes`) are tracked on the roadmap.
+The generic gRPC service exposes `Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany` — wire it up with [`pkg/query/grpc.NewServer`](pkg/query/grpc/server.go); proto definitions in [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto). Values are byte-encoded so one service covers every monoid Kind. For type-safe responses, run [`cmd/murmur-codegen-typed`](cmd/murmur-codegen-typed) against a YAML pipeline-spec: it emits a per-service `.proto` + Connect-RPC Go server stub that delegates to [`pkg/query/typed`](pkg/query/typed) and returns the per-kind shape directly (`int64`, `TopKItem[]`, `BloomShape`, …). Examples in [`examples/typed-rpc-codegen/`](examples/typed-rpc-codegen/).
 
 ## Architecture
 
@@ -106,7 +106,7 @@ The headline ideas:
 2. **Three execution modes, one DSL.** A pipeline definition is execution-mode-agnostic. The same monoid Combine runs from a Kafka consumer (live), a Mongo collection scan (bootstrap), or an S3 JSON-Lines archive (replay).
 3. **DDB is source of truth, Valkey is a cache.** State that's lost in Valkey is repopulatable from DDB. The cache is never trusted as ground truth.
 4. **Windowed monoids first-class.** `windowed.Daily(retention)` adds a time-bucket dimension to state keys; queries assemble sliding windows by merging the N most-recent buckets via the monoid Combine.
-5. **No Beam, no Flink-in-Go.** Beam's Go SDK is unmaintained and its Spark runner is batch-only. Murmur is *not* a streaming engine — it's a framework that runs your monoid Combine on ECS Fargate workers reading from Kinesis/Kafka, and dispatches batch through Spark Connect.
+5. **No Beam, no Flink-in-Go.** Beam's Go SDK is unmaintained and its Spark runner is batch-only. Murmur is *not* a streaming engine — it's a framework that runs your monoid Combine on ECS Fargate workers reading from Kafka, on AWS Lambda (Kinesis / DDB Streams / SQS triggers), and dispatches batch through Spark Connect.
 
 ## Why not Beam, why not Flink, why not Goka?
 

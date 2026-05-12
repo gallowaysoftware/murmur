@@ -72,3 +72,70 @@ func (s *BotInteractionCountServiceServer) GetCountWindow(ctx context.Context, r
 		Present: true,
 	}), nil
 }
+
+// GetCountWindowMany implements the GetCountWindowMany RPC.
+func (s *BotInteractionCountServiceServer) GetCountWindowMany(ctx context.Context, req *connect.Request[pb.GetCountWindowManyRequest]) (*connect.Response[pb.GetCountWindowManyResponse], error) {
+	msg := req.Msg
+	if strings.TrimSpace(msg.BotId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bot_id is required"))
+	}
+	if len(msg.UserIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("user_ids is required"))
+	}
+	duration := time.Duration(msg.DurationSeconds) * time.Second
+	keys := make([]string, len(msg.UserIds))
+	for i, v := range msg.UserIds {
+		keys[i] = fmt.Sprintf("bot:%s|user:%s", msg.BotId, v)
+	}
+	values, err := s.client.GetWindowMany(ctx, keys, duration)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.GetCountWindowManyResponse{
+		Values: values,
+	}), nil
+}
+
+// GetCountMany implements the GetCountMany RPC.
+func (s *BotInteractionCountServiceServer) GetCountMany(ctx context.Context, req *connect.Request[pb.GetCountManyRequest]) (*connect.Response[pb.GetCountManyResponse], error) {
+	msg := req.Msg
+	if strings.TrimSpace(msg.BotId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bot_id is required"))
+	}
+	if len(msg.UserIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("user_ids is required"))
+	}
+	keys := make([]string, len(msg.UserIds))
+	for i, v := range msg.UserIds {
+		keys[i] = fmt.Sprintf("bot:%s|user:%s", msg.BotId, v)
+	}
+	values, present, err := s.client.GetMany(ctx, keys)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.GetCountManyResponse{
+		Values:  values,
+		Present: present,
+	}), nil
+}
+
+// GetCountRange implements the GetCountRange RPC.
+func (s *BotInteractionCountServiceServer) GetCountRange(ctx context.Context, req *connect.Request[pb.GetCountRangeRequest]) (*connect.Response[pb.GetCountRangeResponse], error) {
+	msg := req.Msg
+	if strings.TrimSpace(msg.BotId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bot_id is required"))
+	}
+	if strings.TrimSpace(msg.UserId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("user_id is required"))
+	}
+	key := fmt.Sprintf("bot:%s|user:%s", msg.BotId, msg.UserId)
+	start := time.Unix(msg.StartUnix, 0)
+	end := time.Unix(msg.EndUnix, 0)
+	val, err := s.client.GetRange(ctx, key, start, end)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.GetCountRangeResponse{
+		Value: val,
+	}), nil
+}

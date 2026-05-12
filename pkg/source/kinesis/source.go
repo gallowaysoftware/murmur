@@ -1,22 +1,34 @@
 // Package kinesis provides a Kinesis Data Streams source via aws-sdk-go-v2.
 //
-// Phase 1 ships a simple shard-fanout consumer: ListShards once at startup, spawn one
-// goroutine per shard that loops GetRecords + decode + emit. EventID is
-// "<stream>/<shard>/<sequenceNumber>", globally unique across the stream's history,
-// suitable for at-least-once dedup at the state-store boundary.
+// PRODUCTION USERS: prefer pkg/exec/lambda/kinesis. AWS Lambda's Kinesis
+// event-source mapping owns shard discovery, lease coordination, automatic
+// scaling on shard count (via ParallelizationFactor), checkpointing, and
+// partial-batch retry semantics — everything this package punts on. The
+// Lambda handler shares the same retry / dedup / metrics core
+// (pkg/exec/processor) as streaming.Run, so the pipeline definition is
+// identical.
 //
-// What's NOT in Phase 1:
-//   - Lease management / shard rebalancing across multiple worker instances. Single-
-//     instance only; for horizontally-scaled deployments use KCL v3 (Phase 2).
-//   - Checkpointing. Each Read call starts from the configured StartingPosition
-//     (LATEST / TRIM_HORIZON / AT_TIMESTAMP). At-least-once dedup at the state level
-//     handles re-emission on restart, but lag accumulates if processing is paused
-//     longer than the stream retention.
-//   - Reshard handling. Splits and merges aren't observed mid-run; restart the
-//     consumer to pick up the new shard topology.
+// This package is the polling ECS path, kept for dev/demo and for
+// single-instance use cases where running a Lambda is unnecessary
+// (integration tests, local one-shot consumers). It is NOT a production
+// path: it is single-instance, has no checkpointing, and does not handle
+// resharding mid-run.
 //
-// For production at scale, integrate awslabs/amazon-kinesis-client-go (KCL v3) — a
-// Phase 2 upgrade that is API-compatible with this Source's contract.
+// Implementation: ListShards once at startup, spawn one goroutine per
+// shard that loops GetRecords + decode + emit. EventID is
+// "<stream>/<shard>/<sequenceNumber>", globally unique across the stream's
+// history, suitable for at-least-once dedup at the state-store boundary.
+//
+// What's missing for production scale (intentionally — Lambda owns it):
+//   - Lease management / shard rebalancing across multiple workers.
+//   - Checkpointing across restarts.
+//   - Resharding mid-run.
+//
+// We do not plan to bring KCL v3 Go in-tree — the Lambda event-source
+// mapping is the supported production path. If you need KCL semantics
+// inside an ECS worker (e.g. for a long-running per-record cost that
+// exceeds Lambda's 15-minute cap), wire awslabs/amazon-kinesis-client-go
+// yourself against the source.Source contract.
 package kinesis
 
 import (

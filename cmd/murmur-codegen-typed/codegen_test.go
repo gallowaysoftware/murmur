@@ -5,6 +5,7 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -148,7 +149,7 @@ func TestMethod_ValidateRejectsBadKeyTemplate(t *testing.T) {
 		KeyTemplate: "x:{undefined_field}",
 		Request:     []Field{{Name: "bot_id", Type: "string"}},
 	}
-	err := m.validate()
+	err := m.validate(PipelineSum)
 	if err == nil {
 		t.Fatal("validate: nil error, want failure on undefined template ref")
 	}
@@ -161,9 +162,101 @@ func TestMethod_ValidateRequiresWindowDurationField(t *testing.T) {
 		KeyTemplate: "x:{bot_id}",
 		Request:     []Field{{Name: "bot_id", Type: "string"}},
 	}
-	err := m.validate()
+	err := m.validate(PipelineSum)
 	if err == nil {
 		t.Fatal("validate: nil error, want window_duration_field requirement")
+	}
+}
+
+func TestMethod_ValidateGetWindowManyRequiresManyFieldRef(t *testing.T) {
+	m := Method{
+		Name:                "GetX",
+		Kind:                MethodGetWindowMany,
+		KeyTemplate:         "bot:{bot_id}",
+		ManyKeyField:        "user_ids",
+		WindowDurationField: "duration_seconds",
+		Request: []Field{
+			{Name: "bot_id", Type: "string"},
+			{Name: "user_ids", Type: "repeated string"},
+			{Name: "duration_seconds", Type: "int64"},
+		},
+	}
+	err := m.validate(PipelineSum)
+	if err == nil {
+		t.Fatal("validate: nil error, want failure when template omits the many field")
+	}
+	if !strings.Contains(err.Error(), "key_template must reference") {
+		t.Errorf("error: got %q, want a 'key_template must reference' message", err.Error())
+	}
+}
+
+func TestMethod_ValidateGetManyRejectsNonSumPipelineKind(t *testing.T) {
+	m := Method{
+		Name:         "GetX",
+		Kind:         MethodGetMany,
+		KeyTemplate:  "x:{ids}",
+		ManyKeyField: "ids",
+		Request:      []Field{{Name: "ids", Type: "repeated string"}},
+	}
+	for _, k := range []PipelineKind{PipelineHLL, PipelineTopK, PipelineBloom} {
+		if err := m.validate(k); err == nil {
+			t.Errorf("validate(%s): nil error, want sum-only restriction", k)
+		}
+	}
+	if err := m.validate(PipelineSum); err != nil {
+		t.Errorf("validate(sum): %v, want nil", err)
+	}
+}
+
+func TestMethod_ValidateGetRangeRequiresStartEndFields(t *testing.T) {
+	m := Method{
+		Name:        "GetX",
+		Kind:        MethodGetRange,
+		KeyTemplate: "x:{id}",
+		Request:     []Field{{Name: "id", Type: "string"}},
+	}
+	if err := m.validate(PipelineSum); err == nil {
+		t.Fatal("validate: nil error, want range_start_field requirement")
+	}
+}
+
+func TestRenderManyKeyBuilder(t *testing.T) {
+	cases := []struct {
+		name string
+		m    Method
+		want string
+	}{
+		{
+			name: "scalar plus many",
+			m: Method{
+				KeyTemplate:  "bot:{bot_id}|user:{user_ids}",
+				ManyKeyField: "user_ids",
+				Request: []Field{
+					{Name: "bot_id", Type: "string"},
+					{Name: "user_ids", Type: "repeated string"},
+				},
+			},
+			want: "keys := make([]string, len(msg.UserIds))\n\tfor i, v := range msg.UserIds {\n\t\tkeys[i] = fmt.Sprintf(\"bot:%s|user:%s\", msg.BotId, v)\n\t}",
+		},
+		{
+			name: "many only",
+			m: Method{
+				KeyTemplate:  "category:{category_ids}",
+				ManyKeyField: "category_ids",
+				Request: []Field{
+					{Name: "category_ids", Type: "repeated string"},
+				},
+			},
+			want: "keys := make([]string, len(msg.CategoryIds))\n\tfor i, v := range msg.CategoryIds {\n\t\tkeys[i] = fmt.Sprintf(\"category:%s\", v)\n\t}",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderManyKeyBuilder(tc.m)
+			if got != tc.want {
+				t.Errorf("renderManyKeyBuilder:\n--- got ---\n%s\n--- want ---\n%s", got, tc.want)
+			}
+		})
 	}
 }
 

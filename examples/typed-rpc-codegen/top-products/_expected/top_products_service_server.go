@@ -74,3 +74,31 @@ func (s *TopProductsServiceServer) GetTopWindow(ctx context.Context, req *connec
 		Present: true,
 	}), nil
 }
+
+// GetTopWindowMany implements the GetTopWindowMany RPC.
+func (s *TopProductsServiceServer) GetTopWindowMany(ctx context.Context, req *connect.Request[pb.GetTopWindowManyRequest]) (*connect.Response[pb.GetTopWindowManyResponse], error) {
+	msg := req.Msg
+	if len(msg.CategoryIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("category_ids is required"))
+	}
+	duration := time.Duration(msg.DurationSeconds) * time.Second
+	keys := make([]string, len(msg.CategoryIds))
+	for i, v := range msg.CategoryIds {
+		keys[i] = fmt.Sprintf("category:%s", v)
+	}
+	values, err := s.client.GetWindowMany(ctx, keys, duration)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	entries := make([]*pb.TopKItemList, len(values))
+	for i, v := range values {
+		items := make([]*pb.TopKItem, len(v))
+		for j, it := range v {
+			items[j] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+		}
+		entries[i] = &pb.TopKItemList{Items: items}
+	}
+	return connect.NewResponse(&pb.GetTopWindowManyResponse{
+		Entries: entries,
+	}), nil
+}

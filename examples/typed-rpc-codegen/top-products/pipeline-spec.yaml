@@ -35,3 +35,18 @@ service:
           type: string
         - name: duration_seconds
           type: int64
+
+    # Batched windowed read — one round-trip for N categories. Delegates
+    # to typed.TopKClient.GetWindowMany; response is
+    # `repeated TopKItemList entries` (proto3 disallows
+    # repeated-of-repeated, so each entry wraps the per-category items).
+    - name: GetTopWindowMany
+      kind: get_window_many
+      key_template: "category:{category_ids}"
+      window_duration_field: duration_seconds
+      many_key_field: category_ids
+      request:
+        - name: category_ids
+          type: repeated string
+        - name: duration_seconds
+          type: int64

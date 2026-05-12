@@ -15,6 +15,13 @@ message TopKItem {
 }
 
 
+// TopKItemList wraps one entity's TopKItem ranking for batched responses.
+// proto3 disallows nested repeated fields; this is the workaround.
+message TopKItemList {
+  repeated TopKItem items = 1;
+}
+
+
 message GetTopRequest {
   string category_id = 1;
 }
@@ -34,7 +41,17 @@ message GetTopWindowResponse {
   bool present = 2;
 }
 
+message GetTopWindowManyRequest {
+  repeated string category_ids = 1;
+  int64 duration_seconds = 2;
+}
+
+message GetTopWindowManyResponse {
+  repeated TopKItemList entries = 1;
+}
+
 service TopProductsService {
   rpc GetTop(GetTopRequest) returns (GetTopResponse);
   rpc GetTopWindow(GetTopWindowRequest) returns (GetTopWindowResponse);
+  rpc GetTopWindowMany(GetTopWindowManyRequest) returns (GetTopWindowManyResponse);
 }

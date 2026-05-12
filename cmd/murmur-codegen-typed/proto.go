@@ -10,22 +10,39 @@ import (
 
 // renderProto emits the .proto file for the given Spec.
 //
-// Response message shape varies by pipeline kind:
+// Response message shape varies by (pipeline kind, method kind):
 //
-//	sum   → { int64 value, bool present }
-//	hll   → { int64 value, bool present } (value is the cardinality)
-//	topk  → { repeated TopKItem items, bool present }
-//	bloom → { int64 capacity_bits, int32 hash_functions, int64 approx_size, bool present }
+//	sum   / get_all_time | get_window     → { int64 value, bool present }
+//	hll   / get_all_time | get_window     → { int64 value, bool present } (value is the cardinality)
+//	topk  / get_all_time | get_window     → { repeated TopKItem items, bool present }
+//	bloom / get_all_time | get_window     → { int64 capacity_bits, int32 hash_functions, int64 approx_size, bool present }
+//	sum   / get_window_many               → { repeated int64 values }
+//	hll   / get_window_many               → { repeated int64 values } (parallel cardinalities)
+//	topk  / get_window_many               → { repeated TopKItemList entries }
+//	bloom / get_window_many               → { repeated BloomShape entries }
+//	sum   / get_many                      → { repeated int64 values, repeated bool present } (sum-only)
+//	sum   / get_range                     → { int64 value }                                   (sum-only)
 //
-// TopK pipelines emit a `TopKItem` message at the top of the proto so
-// the response can reference it.
+// Top-of-file message emissions (driven by service kind + presence of
+// get_window_many methods):
+//
+//	TopKItem      — emitted for every topk pipeline (singleton + batched responses both need it)
+//	TopKItemList  — emitted only when a topk pipeline has a get_window_many method
+//	BloomShape    — emitted only when a bloom pipeline has a get_window_many method
+//
+// The batched shapes intentionally omit a `present` flag — the underlying
+// typed clients in pkg/query/typed don't surface presence per-entity today, so
+// "present-and-zero" and "absent" are indistinguishable. If pkg/query/typed
+// grows a per-entity present flag, extend the schema here in lockstep.
 func renderProto(s *Spec) ([]byte, error) {
 	t, err := template.New("proto").Funcs(template.FuncMap{
-		"protoFieldType": protoFieldType,
-		"plus1":          func(i int) int { return i + 1 },
-		"responseBody":   responseBody,
-		"goPackageShort": goPackageShort,
-		"isTopK":         func(k PipelineKind) bool { return k == PipelineTopK },
+		"protoFieldType":   protoFieldType,
+		"plus1":            func(i int) int { return i + 1 },
+		"responseBody":     responseBody,
+		"goPackageShort":   goPackageShort,
+		"isTopK":           func(k PipelineKind) bool { return k == PipelineTopK },
+		"emitTopKItemList": emitTopKItemList,
+		"emitBloomShape":   emitBloomShape,
 	}).Parse(protoTemplate)
 	if err != nil {
 		return nil, err
@@ -53,13 +70,31 @@ message TopKItem {
   int64 count = 2;
 }
 {{end}}
+{{- if emitTopKItemList .}}
+
+// TopKItemList wraps one entity's TopKItem ranking for batched responses.
+// proto3 disallows nested repeated fields; this is the workaround.
+message TopKItemList {
+  repeated TopKItem items = 1;
+}
+{{end}}
+{{- if emitBloomShape .}}
+
+// BloomShape is one entity's Bloom-filter structural metadata for
+// batched responses.
+message BloomShape {
+  int64 capacity_bits = 1;
+  int32 hash_functions = 2;
+  int64 approx_size = 3;
+}
+{{end}}
 {{range .Service.Methods}}
 message {{.Name}}Request {
 {{range $i, $f := .Request}}  {{protoFieldType $f.Type}} {{$f.Name}} = {{plus1 $i}};
 {{end}}}
 
 message {{.Name}}Response {
-{{responseBody $.Service.PipelineKind}}}
+{{responseBody $.Service.PipelineKind .Kind}}}
 {{end}}
 service {{.Service.Name}} {
 {{range .Service.Methods}}  rpc {{.Name}}({{.Name}}Request) returns ({{.Name}}Response);
@@ -81,11 +116,32 @@ func protoFieldType(t string) string {
 }
 
 // responseBody returns the proto-field block for a Response message,
-// per pipeline kind. The block is indented and includes the trailing
-// newline before the closing brace; the template wraps it with
-// `message Foo { ... }`.
-func responseBody(k PipelineKind) string {
-	switch k {
+// per (pipeline kind, method kind). The block is indented and includes
+// the trailing newline before the closing brace; the template wraps it
+// with `message Foo { ... }`.
+func responseBody(serviceKind PipelineKind, methodKind MethodKind) string {
+	switch methodKind {
+	case MethodGetWindowMany:
+		switch serviceKind {
+		case PipelineSum, PipelineHLL:
+			return "  repeated int64 values = 1;\n"
+		case PipelineTopK:
+			return "  repeated TopKItemList entries = 1;\n"
+		case PipelineBloom:
+			return "  repeated BloomShape entries = 1;\n"
+		default:
+			return "  // unsupported pipeline kind\n"
+		}
+	case MethodGetMany:
+		// Sum-only at the spec layer; the typed client surfaces both the
+		// merged value and the per-entity present flag, so we expose both.
+		return "  repeated int64 values = 1;\n  repeated bool present = 2;\n"
+	case MethodGetRange:
+		// Sum-only; SumClient.GetRange returns just the merged value.
+		return "  int64 value = 1;\n"
+	}
+	// get_all_time / get_window
+	switch serviceKind {
 	case PipelineSum, PipelineHLL:
 		return "  int64 value = 1;\n  bool present = 2;\n"
 	case PipelineTopK:
@@ -95,6 +151,35 @@ func responseBody(k PipelineKind) string {
 	default:
 		return "  // unsupported pipeline kind\n  bool present = 1;\n"
 	}
+}
+
+// emitTopKItemList reports whether the .proto needs a top-of-file
+// TopKItemList message. Only emitted when a topk pipeline has at least
+// one get_window_many method.
+func emitTopKItemList(s *Spec) bool {
+	if s.Service.PipelineKind != PipelineTopK {
+		return false
+	}
+	return hasMethodKind(s, MethodGetWindowMany)
+}
+
+// emitBloomShape reports whether the .proto needs a top-of-file
+// BloomShape message. Only emitted when a bloom pipeline has at least
+// one get_window_many method.
+func emitBloomShape(s *Spec) bool {
+	if s.Service.PipelineKind != PipelineBloom {
+		return false
+	}
+	return hasMethodKind(s, MethodGetWindowMany)
+}
+
+func hasMethodKind(s *Spec, k MethodKind) bool {
+	for _, m := range s.Service.Methods {
+		if m.Kind == k {
+			return true
+		}
+	}
+	return false
 }
 
 // goPackageShort returns the package alias for the go_package option:

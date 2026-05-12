@@ -9,6 +9,15 @@ option go_package = "github.com/example/marketing/gen/visitors/v1;v1";
 
 
 
+// BloomShape is one entity's Bloom-filter structural metadata for
+// batched responses.
+message BloomShape {
+  int64 capacity_bits = 1;
+  int32 hash_functions = 2;
+  int64 approx_size = 3;
+}
+
+
 message GetFilterShapeRequest {
   string campaign_id = 1;
 }
@@ -20,6 +29,16 @@ message GetFilterShapeResponse {
   bool present = 4;
 }
 
+message GetFilterShapeWindowManyRequest {
+  repeated string campaign_ids = 1;
+  int64 duration_seconds = 2;
+}
+
+message GetFilterShapeWindowManyResponse {
+  repeated BloomShape entries = 1;
+}
+
 service RecentVisitorsService {
   rpc GetFilterShape(GetFilterShapeRequest) returns (GetFilterShapeResponse);
+  rpc GetFilterShapeWindowMany(GetFilterShapeWindowManyRequest) returns (GetFilterShapeWindowManyResponse);
 }

@@ -28,3 +28,17 @@ service:
       request:
         - name: campaign_id
           type: string
+
+    # Batched windowed read — one round-trip for N campaigns. Delegates
+    # to typed.BloomClient.GetWindowMany; response is `repeated BloomShape
+    # entries` carrying the per-campaign filter structural metadata.
+    - name: GetFilterShapeWindowMany
+      kind: get_window_many
+      key_template: "campaign:{campaign_ids}"
+      window_duration_field: duration_seconds
+      many_key_field: campaign_ids
+      request:
+        - name: campaign_ids
+          type: repeated string
+        - name: duration_seconds
+          type: int64

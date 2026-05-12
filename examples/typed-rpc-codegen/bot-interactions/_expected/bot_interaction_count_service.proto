@@ -30,7 +30,41 @@ message GetCountWindowResponse {
   bool present = 2;
 }
 
+message GetCountWindowManyRequest {
+  string bot_id = 1;
+  repeated string user_ids = 2;
+  int64 duration_seconds = 3;
+}
+
+message GetCountWindowManyResponse {
+  repeated int64 values = 1;
+}
+
+message GetCountManyRequest {
+  string bot_id = 1;
+  repeated string user_ids = 2;
+}
+
+message GetCountManyResponse {
+  repeated int64 values = 1;
+  repeated bool present = 2;
+}
+
+message GetCountRangeRequest {
+  string bot_id = 1;
+  string user_id = 2;
+  int64 start_unix = 3;
+  int64 end_unix = 4;
+}
+
+message GetCountRangeResponse {
+  int64 value = 1;
+}
+
 service BotInteractionCountService {
   rpc GetCount(GetCountRequest) returns (GetCountResponse);
   rpc GetCountWindow(GetCountWindowRequest) returns (GetCountWindowResponse);
+  rpc GetCountWindowMany(GetCountWindowManyRequest) returns (GetCountWindowManyResponse);
+  rpc GetCountMany(GetCountManyRequest) returns (GetCountManyResponse);
+  rpc GetCountRange(GetCountRangeRequest) returns (GetCountRangeResponse);
 }

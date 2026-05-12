@@ -50,3 +50,31 @@ func (s *RecentVisitorsServiceServer) GetFilterShape(ctx context.Context, req *c
 		Present:       present,
 	}), nil
 }
+
+// GetFilterShapeWindowMany implements the GetFilterShapeWindowMany RPC.
+func (s *RecentVisitorsServiceServer) GetFilterShapeWindowMany(ctx context.Context, req *connect.Request[pb.GetFilterShapeWindowManyRequest]) (*connect.Response[pb.GetFilterShapeWindowManyResponse], error) {
+	msg := req.Msg
+	if len(msg.CampaignIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("campaign_ids is required"))
+	}
+	duration := time.Duration(msg.DurationSeconds) * time.Second
+	keys := make([]string, len(msg.CampaignIds))
+	for i, v := range msg.CampaignIds {
+		keys[i] = fmt.Sprintf("campaign:%s", v)
+	}
+	values, err := s.client.GetWindowMany(ctx, keys, duration)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	entries := make([]*pb.BloomShape, len(values))
+	for i, v := range values {
+		entries[i] = &pb.BloomShape{
+			CapacityBits:  int64(v.CapacityBits),
+			HashFunctions: int32(v.HashFunctions),
+			ApproxSize:    int64(v.ApproxSize),
+		}
+	}
+	return connect.NewResponse(&pb.GetFilterShapeWindowManyResponse{
+		Entries: entries,
+	}), nil
+}

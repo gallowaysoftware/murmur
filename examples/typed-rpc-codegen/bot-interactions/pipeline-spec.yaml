@@ -45,3 +45,51 @@ service:
           type: string
         - name: duration_seconds
           type: int64
+
+    # Batched windowed read — one round-trip for N user IDs against the
+    # same bot. Delegates to typed.SumClient.GetWindowMany; response is
+    # parallel `repeated int64 values` aligned with the request's
+    # `user_ids`. Missing entities yield 0 (indistinguishable from a
+    # present-and-zero count).
+    - name: GetCountWindowMany
+      kind: get_window_many
+      key_template: "bot:{bot_id}|user:{user_ids}"
+      window_duration_field: duration_seconds
+      many_key_field: user_ids
+      request:
+        - name: bot_id
+          type: string
+        - name: user_ids
+          type: repeated string
+        - name: duration_seconds
+          type: int64
+
+    # Batched all-time read with per-entity present flag — useful when
+    # callers need to distinguish "absent" from "present and zero".
+    # Delegates to typed.SumClient.GetMany. Sum-only.
+    - name: GetCountMany
+      kind: get_many
+      key_template: "bot:{bot_id}|user:{user_ids}"
+      many_key_field: user_ids
+      request:
+        - name: bot_id
+          type: string
+        - name: user_ids
+          type: repeated string
+
+    # Absolute-time range read — merge every bucket from start to end
+    # (Unix seconds). Delegates to typed.SumClient.GetRange. Sum-only.
+    - name: GetCountRange
+      kind: get_range
+      key_template: "bot:{bot_id}|user:{user_id}"
+      range_start_field: start_unix
+      range_end_field: end_unix
+      request:
+        - name: bot_id
+          type: string
+        - name: user_id
+          type: string
+        - name: start_unix
+          type: int64
+        - name: end_unix
+          type: int64

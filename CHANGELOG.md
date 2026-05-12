@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Kinesis is Lambda-only in production
+
+- **`pkg/source/kinesis`** is now flagged "dev / demo only" in `STABILITY.md`. It's a single-instance polling consumer with no checkpointing — fine for integration tests and local one-shot consumers, not for production. Production Kinesis ingest goes through **`pkg/exec/lambda/kinesis`**, which lets AWS Lambda's event-source mapping own shard discovery, lease coordination, autoscaling (via `ParallelizationFactor`), checkpointing, and partial-batch retry (`BatchItemFailures`).
+- **`KCL-v3 Kinesis source` removed from the roadmap.** Lambda is the supported production path; we will not bring KCL v3 Go in-tree. The roadmap row in `README.md` is gone.
+- The same pipeline definition runs as either a Kafka ECS worker (`streaming.Run`) or a Kinesis Lambda — both share state via DDB, so `examples/recently-interacted-topk/` can ingest from both simultaneously.
+
+### Added — Typed gRPC codegen: get_window_many / get_many / get_range
+
+- `cmd/murmur-codegen-typed` now emits `get_window_many` methods alongside `get_all_time` / `get_window`. Per-kind response shapes:
+  - **sum / hll** → `repeated int64 values` (delegates to `typed.{Sum,HLL}Client.GetWindowMany`)
+  - **topk** → `repeated TopKItemList entries` (proto3 disallows nested repeated, so each entry wraps the per-entity ranking)
+  - **bloom** → `repeated BloomShape entries` (per-entity filter structural metadata)
+- Spec validation requires the `key_template` to reference the `many_key_field`; otherwise every element of the batch produces the same key and the loop variable is unused.
+- `get_many` (Sum-only) — batched all-time read with per-entity present flag. Response: `repeated int64 values + repeated bool present`. Lets callers distinguish "absent" from "present-and-zero", which `get_window_many` cannot.
+- `get_range` (Sum-only) — absolute Unix-second start/end range read. Response: `int64 value` (merged across the buckets in range).
+- `get_many` / `get_range` are gated to `pipeline_kind=sum` at validate time, because the typed clients in `pkg/query/typed` only expose `GetMany` / `GetRange` on `SumClient`. Lift the restriction when HLL/TopK/Bloom typed clients grow those methods.
+- All three example pipeline-specs (`bot-interactions` / `top-products` / `recent-visitors`) grew a `Get*WindowMany` method; `bot-interactions` additionally grew `GetCountMany` + `GetCountRange`. Goldens regenerated.
+- Closes the "Per-pipeline gRPC codegen (typed responses)" roadmap row in `README.md` for the four currently-supported pipeline kinds.
+
 ### Added — Production-readiness pass
 
 A focused push closing the gaps that separate Murmur from "deployable to production AWS shops at meaningful scale." Each entry below references a real package or commit; for the per-commit history use `git log`.
