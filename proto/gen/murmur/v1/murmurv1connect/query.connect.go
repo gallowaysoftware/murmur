@@ -47,6 +47,12 @@ const (
 	// QueryServiceGetRangeManyProcedure is the fully-qualified name of the QueryService's GetRangeMany
 	// RPC.
 	QueryServiceGetRangeManyProcedure = "/murmur.v1.QueryService/GetRangeMany"
+	// QueryServiceGetTrailingProcedure is the fully-qualified name of the QueryService's GetTrailing
+	// RPC.
+	QueryServiceGetTrailingProcedure = "/murmur.v1.QueryService/GetTrailing"
+	// QueryServiceGetTrailingManyProcedure is the fully-qualified name of the QueryService's
+	// GetTrailingMany RPC.
+	QueryServiceGetTrailingManyProcedure = "/murmur.v1.QueryService/GetTrailingMany"
 )
 
 // QueryServiceClient is a client for the murmur.v1.QueryService service.
@@ -71,6 +77,16 @@ type QueryServiceClient interface {
 	GetWindowMany(context.Context, *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error)
 	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
 	GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error)
+	// GetTrailing returns the aggregation merged across the trailing window
+	// covering the most recent `duration_seconds`, ending at the server's
+	// "now". Equivalent to GetWindow but documents the "trailing window"
+	// intent (last-7d, last-30d) — and pairs with the matching builder
+	// sugar `(*CounterBuilder).Trailing(durations...)` which sizes daily
+	// retention from the requested durations.
+	GetTrailing(context.Context, *connect.Request[v1.GetTrailingRequest]) (*connect.Response[v1.GetTrailingResponse], error)
+	// GetTrailingMany batches GetTrailing across many entities in one
+	// round-trip — counterpart to GetWindowMany.
+	GetTrailingMany(context.Context, *connect.Request[v1.GetTrailingManyRequest]) (*connect.Response[v1.GetTrailingManyResponse], error)
 }
 
 // NewQueryServiceClient constructs a client for the murmur.v1.QueryService service. By default, it
@@ -120,17 +136,31 @@ func NewQueryServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(queryServiceMethods.ByName("GetRangeMany")),
 			connect.WithClientOptions(opts...),
 		),
+		getTrailing: connect.NewClient[v1.GetTrailingRequest, v1.GetTrailingResponse](
+			httpClient,
+			baseURL+QueryServiceGetTrailingProcedure,
+			connect.WithSchema(queryServiceMethods.ByName("GetTrailing")),
+			connect.WithClientOptions(opts...),
+		),
+		getTrailingMany: connect.NewClient[v1.GetTrailingManyRequest, v1.GetTrailingManyResponse](
+			httpClient,
+			baseURL+QueryServiceGetTrailingManyProcedure,
+			connect.WithSchema(queryServiceMethods.ByName("GetTrailingMany")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // queryServiceClient implements QueryServiceClient.
 type queryServiceClient struct {
-	get           *connect.Client[v1.GetRequest, v1.GetResponse]
-	getWindow     *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
-	getRange      *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
-	getMany       *connect.Client[v1.GetManyRequest, v1.GetManyResponse]
-	getWindowMany *connect.Client[v1.GetWindowManyRequest, v1.GetWindowManyResponse]
-	getRangeMany  *connect.Client[v1.GetRangeManyRequest, v1.GetRangeManyResponse]
+	get             *connect.Client[v1.GetRequest, v1.GetResponse]
+	getWindow       *connect.Client[v1.GetWindowRequest, v1.GetWindowResponse]
+	getRange        *connect.Client[v1.GetRangeRequest, v1.GetRangeResponse]
+	getMany         *connect.Client[v1.GetManyRequest, v1.GetManyResponse]
+	getWindowMany   *connect.Client[v1.GetWindowManyRequest, v1.GetWindowManyResponse]
+	getRangeMany    *connect.Client[v1.GetRangeManyRequest, v1.GetRangeManyResponse]
+	getTrailing     *connect.Client[v1.GetTrailingRequest, v1.GetTrailingResponse]
+	getTrailingMany *connect.Client[v1.GetTrailingManyRequest, v1.GetTrailingManyResponse]
 }
 
 // Get calls murmur.v1.QueryService.Get.
@@ -163,6 +193,16 @@ func (c *queryServiceClient) GetRangeMany(ctx context.Context, req *connect.Requ
 	return c.getRangeMany.CallUnary(ctx, req)
 }
 
+// GetTrailing calls murmur.v1.QueryService.GetTrailing.
+func (c *queryServiceClient) GetTrailing(ctx context.Context, req *connect.Request[v1.GetTrailingRequest]) (*connect.Response[v1.GetTrailingResponse], error) {
+	return c.getTrailing.CallUnary(ctx, req)
+}
+
+// GetTrailingMany calls murmur.v1.QueryService.GetTrailingMany.
+func (c *queryServiceClient) GetTrailingMany(ctx context.Context, req *connect.Request[v1.GetTrailingManyRequest]) (*connect.Response[v1.GetTrailingManyResponse], error) {
+	return c.getTrailingMany.CallUnary(ctx, req)
+}
+
 // QueryServiceHandler is an implementation of the murmur.v1.QueryService service.
 type QueryServiceHandler interface {
 	// Get returns the all-time aggregation value for entity (non-windowed
@@ -185,6 +225,16 @@ type QueryServiceHandler interface {
 	GetWindowMany(context.Context, *connect.Request[v1.GetWindowManyRequest]) (*connect.Response[v1.GetWindowManyResponse], error)
 	// GetRangeMany is the absolute-range counterpart to GetWindowMany.
 	GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error)
+	// GetTrailing returns the aggregation merged across the trailing window
+	// covering the most recent `duration_seconds`, ending at the server's
+	// "now". Equivalent to GetWindow but documents the "trailing window"
+	// intent (last-7d, last-30d) — and pairs with the matching builder
+	// sugar `(*CounterBuilder).Trailing(durations...)` which sizes daily
+	// retention from the requested durations.
+	GetTrailing(context.Context, *connect.Request[v1.GetTrailingRequest]) (*connect.Response[v1.GetTrailingResponse], error)
+	// GetTrailingMany batches GetTrailing across many entities in one
+	// round-trip — counterpart to GetWindowMany.
+	GetTrailingMany(context.Context, *connect.Request[v1.GetTrailingManyRequest]) (*connect.Response[v1.GetTrailingManyResponse], error)
 }
 
 // NewQueryServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -230,6 +280,18 @@ func NewQueryServiceHandler(svc QueryServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(queryServiceMethods.ByName("GetRangeMany")),
 		connect.WithHandlerOptions(opts...),
 	)
+	queryServiceGetTrailingHandler := connect.NewUnaryHandler(
+		QueryServiceGetTrailingProcedure,
+		svc.GetTrailing,
+		connect.WithSchema(queryServiceMethods.ByName("GetTrailing")),
+		connect.WithHandlerOptions(opts...),
+	)
+	queryServiceGetTrailingManyHandler := connect.NewUnaryHandler(
+		QueryServiceGetTrailingManyProcedure,
+		svc.GetTrailingMany,
+		connect.WithSchema(queryServiceMethods.ByName("GetTrailingMany")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/murmur.v1.QueryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case QueryServiceGetProcedure:
@@ -244,6 +306,10 @@ func NewQueryServiceHandler(svc QueryServiceHandler, opts ...connect.HandlerOpti
 			queryServiceGetWindowManyHandler.ServeHTTP(w, r)
 		case QueryServiceGetRangeManyProcedure:
 			queryServiceGetRangeManyHandler.ServeHTTP(w, r)
+		case QueryServiceGetTrailingProcedure:
+			queryServiceGetTrailingHandler.ServeHTTP(w, r)
+		case QueryServiceGetTrailingManyProcedure:
+			queryServiceGetTrailingManyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -275,4 +341,12 @@ func (UnimplementedQueryServiceHandler) GetWindowMany(context.Context, *connect.
 
 func (UnimplementedQueryServiceHandler) GetRangeMany(context.Context, *connect.Request[v1.GetRangeManyRequest]) (*connect.Response[v1.GetRangeManyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetRangeMany is not implemented"))
+}
+
+func (UnimplementedQueryServiceHandler) GetTrailing(context.Context, *connect.Request[v1.GetTrailingRequest]) (*connect.Response[v1.GetTrailingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetTrailing is not implemented"))
+}
+
+func (UnimplementedQueryServiceHandler) GetTrailingMany(context.Context, *connect.Request[v1.GetTrailingManyRequest]) (*connect.Response[v1.GetTrailingManyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("murmur.v1.QueryService.GetTrailingMany is not implemented"))
 }
