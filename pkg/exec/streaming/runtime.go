@@ -147,17 +147,33 @@ func WithBatchWindow(window time.Duration, maxBatch int) RunOption {
 	}
 }
 
-// WithConcurrency configures N worker goroutines that drain the source
-// channel concurrently. Default 1 (the historical single-goroutine
-// loop). When n > 1, records are routed by hash(first-emitted-key) to
-// a worker, so SAME-key records always land on the same worker — that
-// preserves per-key order and keeps the aggregator's per-(entity, bucket)
-// lock contention tight.
+// WithConcurrency configures the runtime's intra-worker parallelism.
+// Default 1 (the historical single-goroutine loop). The value is
+// reused in two places:
+//
+//  1. **Source-dispatch routing.** When no aggregator is configured
+//     (no WithBatchWindow), N worker goroutines drain the source
+//     channel and records are routed by hash(first-emitted-key) — so
+//     SAME-key records always land on the same worker. This preserves
+//     per-key arrival order for non-additive monoids (First, Last,
+//     Min, Max) where ordering still matters.
+//
+//  2. **Aggregator flush fan-out.** When WithBatchWindow IS configured,
+//     each (entity, bucket) batch has already coalesced its
+//     contributions into ONE delta at accept-time, so per-key flushes
+//     touch distinct store keys. flushAll dispatches the per-key
+//     MergeUpdates across N worker goroutines (bounded by the number
+//     of distinct keys in the flush). This is the change that unlocks
+//     real I/O parallelism inside a single worker instance: a flush
+//     touching 1000 keys against a 5ms-per-call store completes in
+//     ~5s at concurrency=1 vs ~315ms at concurrency=16.
 //
 // When to raise it:
 //
 //   - The single-goroutine ceiling (~5–10k events/s/worker against
 //     DDB-local; documented in README) is your bottleneck.
+//   - The aggregator flush is bottlenecked on store latency (large
+//     coalesced-key set per window, DDB UpdateItem at ~5ms each).
 //   - Fan-out via additional Kafka partitions isn't an option (e.g.,
 //     downstream key cardinality demands a single partition).
 //
@@ -166,17 +182,16 @@ func WithBatchWindow(window time.Duration, maxBatch int) RunOption {
 //   - Your store is CAS-heavy (BytesStore on a hot key). N workers
 //     pre-routing by key removes cross-worker CAS contention but a
 //     single worker on a hot CAS key is already the bottleneck.
-//   - You're using `WithBatchWindow` aggressively. The aggregator's
-//     per-key lock already serializes hot-key writes; concurrency
-//     adds dispatch overhead without throughput gain on a single hot
-//     key.
+//   - You have very few distinct keys per flush window — the flush
+//     fan-out is bounded by len(keys), so concurrency above that
+//     produces no extra speedup.
 //
-// The router routes by first-key hash. Hierarchical-rollup pipelines
-// (KeyByMany) partition on the FIRST emitted key — so a record's
-// "post:X" delta lands on the same worker as another "post:X" record,
-// even if the records also fan out to "country:Y" / "global" keys
-// that happen to hash differently. This keeps the per-key ordering
-// guarantee meaningful where it matters most.
+// The source-dispatch router routes by first-key hash. Hierarchical-
+// rollup pipelines (KeyByMany) partition on the FIRST emitted key —
+// so a record's "post:X" delta lands on the same worker as another
+// "post:X" record, even if the records also fan out to "country:Y" /
+// "global" keys that happen to hash differently. This keeps the
+// per-key ordering guarantee meaningful where it matters most.
 func WithConcurrency(n int) RunOption {
 	return func(c *runConfig) {
 		if n >= 1 {
@@ -274,7 +289,14 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 	if cfg.concurrency > 1 {
 		err := runConcurrent(ctx, name, records, srcDone, keysFn, valueFn, store, cache, window, agg, &cfg)
 		if agg != nil {
-			<-flushDone
+			// Source closed naturally — force a final flush so the
+			// caller sees the post-drain state without having to wait
+			// for ctx cancellation. Matches the sequential path's
+			// "force a final flush" behavior below. The runFlushLoop
+			// goroutine continues to fire on its ticker until ctx is
+			// canceled; flushAll is safe to call concurrently with
+			// the ticker firing.
+			agg.flushAll(ctx)
 		}
 		return err
 	}
