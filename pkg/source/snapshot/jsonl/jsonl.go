@@ -75,6 +75,15 @@ func DefaultDecoder[T any]() Decoder[T] {
 // (a Mongo `_id`, a DDB partition key).
 type EventIDFn[T any] func(decoded T, lineNum int) string
 
+// EventTimeFn extracts the upstream EventTime from a decoded record.
+// When set, the returned time is used as Record.EventTime; the
+// bootstrap runtime uses it for window bucket assignment. Default —
+// when unset — the source emits time.Now(), which is correct for
+// non-windowed counters but wrong for backfill of windowed counters
+// (every row would land in the same bucket). Pre-aggregated Spark
+// rows must wire this so each row lands in its source-of-truth hour.
+type EventTimeFn[T any] func(decoded T) time.Time
+
 // Config configures a JSON-Lines snapshot Source.
 type Config[T any] struct {
 	// Reader is the line source. The Source consumes it sequentially;
@@ -91,6 +100,13 @@ type Config[T any] struct {
 
 	// EventID derives the dedup key per record. Optional; see EventIDFn.
 	EventID EventIDFn[T]
+
+	// EventTime, when non-nil, derives the per-record EventTime used
+	// for window bucket assignment. Defaults to time.Now() when unset;
+	// backfill of windowed counters must wire this to the record's
+	// source-of-truth timestamp (e.g., the bucket-mid `occurred_at`
+	// field) or every row will land in the same bucket.
+	EventTime EventTimeFn[T]
 
 	// OnDecodeError, when non-nil, is invoked for lines that fail to
 	// decode. Default behavior: drop silently and continue. Wire to a
@@ -213,9 +229,15 @@ func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error
 		}
 		s.decoded.Add(1)
 		eventID := s.eventID(value, lineNum)
+		eventTime := time.Now()
+		if s.cfg.EventTime != nil {
+			if t := s.cfg.EventTime(value); !t.IsZero() {
+				eventTime = t
+			}
+		}
 		rec := source.Record[T]{
 			EventID:   eventID,
-			EventTime: time.Now(),
+			EventTime: eventTime,
 			Value:     value,
 			Ack:       func() error { return nil },
 		}

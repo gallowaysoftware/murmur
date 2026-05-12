@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/source"
 	"github.com/gallowaysoftware/murmur/pkg/source/snapshot/jsonl"
@@ -98,6 +99,75 @@ func TestScan_EventIDDefaultIsLineBased(t *testing.T) {
 	got := collect(t, src)
 	if got[0].EventID != "src:1" || got[1].EventID != "src:2" {
 		t.Errorf("default EventID: got %q,%q", got[0].EventID, got[1].EventID)
+	}
+}
+
+func TestScan_EventTimeFromExtractor(t *testing.T) {
+	// The decoded record carries an OccurredAt that the extractor
+	// returns; the source must propagate it into Record.EventTime.
+	type ev struct {
+		ID         string    `json:"id"`
+		OccurredAt time.Time `json:"occurred_at"`
+	}
+	body := `{"id":"a","occurred_at":"2026-05-08T14:00:00Z"}
+{"id":"b","occurred_at":"2026-05-08T15:00:00Z"}
+`
+	src, err := jsonl.NewSource(jsonl.Config[ev]{
+		Reader:    strings.NewReader(body),
+		Name:      "test",
+		EventTime: func(e ev) time.Time { return e.OccurredAt },
+	})
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	ch := make(chan source.Record[ev], 10)
+	done := make(chan error, 1)
+	go func() {
+		done <- src.Scan(context.Background(), ch)
+		close(ch)
+	}()
+	var got []source.Record[ev]
+	for r := range ch {
+		got = append(got, r)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len: got %d, want 2", len(got))
+	}
+	wantA, _ := time.Parse(time.RFC3339, "2026-05-08T14:00:00Z")
+	wantB, _ := time.Parse(time.RFC3339, "2026-05-08T15:00:00Z")
+	if !got[0].EventTime.Equal(wantA) {
+		t.Errorf("EventTime[0]: got %v, want %v", got[0].EventTime, wantA)
+	}
+	if !got[1].EventTime.Equal(wantB) {
+		t.Errorf("EventTime[1]: got %v, want %v", got[1].EventTime, wantB)
+	}
+}
+
+func TestScan_EventTimeZeroFallsBackToNow(t *testing.T) {
+	// EventTime extractor returning the zero value — the source must
+	// fall back to time.Now() rather than emitting a zero EventTime.
+	body := `{"id":"a"}` + "\n"
+	src, _ := jsonl.NewSource(jsonl.Config[order]{
+		Reader:    strings.NewReader(body),
+		Name:      "test",
+		EventTime: func(_ order) time.Time { return time.Time{} },
+	})
+	before := time.Now()
+	ch := make(chan source.Record[order], 1)
+	done := make(chan error, 1)
+	go func() { done <- src.Scan(context.Background(), ch); close(ch) }()
+	var got []source.Record[order]
+	for r := range ch {
+		got = append(got, r)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if got[0].EventTime.Before(before) {
+		t.Errorf("EventTime: got %v, want >= %v (fallback to time.Now)", got[0].EventTime, before)
 	}
 }
 

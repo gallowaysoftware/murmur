@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/source"
 	"github.com/gallowaysoftware/murmur/pkg/source/snapshot/s3"
@@ -179,6 +182,307 @@ func TestCaptureHandoff_PassThrough(t *testing.T) {
 	}
 	if string(tok) != "opaque-token" {
 		t.Errorf("token: got %q", tok)
+	}
+}
+
+func TestScan_EventTimePropagatesFromExtractor(t *testing.T) {
+	// EventTime extractor on s3.Config flows through to Record.EventTime
+	// (proves the plumb-through into the underlying jsonl source).
+	type ev struct {
+		ID         string    `json:"id"`
+		OccurredAt time.Time `json:"occurred_at"`
+	}
+	want, _ := time.Parse(time.RFC3339, "2026-05-08T14:00:00Z")
+	src, _ := s3.NewSource(s3.Config[ev]{
+		Prefix: "k.jsonl",
+		OpenObject: func(_ context.Context, _ string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(
+				`{"id":"a","occurred_at":"2026-05-08T14:00:00Z"}` + "\n",
+			)), nil
+		},
+		EventTime: func(e ev) time.Time { return e.OccurredAt },
+	})
+	ch := make(chan source.Record[ev], 1)
+	done := make(chan error, 1)
+	go func() { done <- src.Scan(context.Background(), ch); close(ch) }()
+	var got []source.Record[ev]
+	for r := range ch {
+		got = append(got, r)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !got[0].EventTime.Equal(want) {
+		t.Errorf("EventTime: got %v, want %v", got[0].EventTime, want)
+	}
+}
+
+func TestScan_PrefixScanMultipleObjects(t *testing.T) {
+	// Three keys under the same prefix; sequential mode preserves
+	// lexicographic order in the emitted record stream.
+	bodies := map[string]string{
+		"events/year=2026/month=05/day=01/data-001.jsonl": `{"id":"a"}` + "\n" + `{"id":"b"}` + "\n",
+		"events/year=2026/month=05/day=01/data-002.jsonl": `{"id":"c"}` + "\n",
+		"events/year=2026/month=05/day=02/data-001.jsonl": `{"id":"d"}` + "\n" + `{"id":"e"}` + "\n",
+	}
+	keys := []string{
+		"events/year=2026/month=05/day=01/data-001.jsonl",
+		"events/year=2026/month=05/day=01/data-002.jsonl",
+		"events/year=2026/month=05/day=02/data-001.jsonl",
+	}
+
+	src, err := s3.NewSource(s3.Config[order]{
+		Prefix: "events/",
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return keys, nil
+		},
+		OpenObject: func(_ context.Context, key string) (io.ReadCloser, error) {
+			body, ok := bodies[key]
+			if !ok {
+				return nil, errors.New("unknown key: " + key)
+			}
+			return io.NopCloser(strings.NewReader(body)), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	got := collectAll(t, src)
+	if len(got) != 5 {
+		t.Fatalf("len: got %d, want 5", len(got))
+	}
+	gotIDs := []string{got[0].Value.ID, got[1].Value.ID, got[2].Value.ID, got[3].Value.ID, got[4].Value.ID}
+	wantIDs := []string{"a", "b", "c", "d", "e"}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Errorf("sequential record order: got %v, want %v", gotIDs, wantIDs)
+			break
+		}
+	}
+}
+
+func TestScan_ListKeysWithKeyFilter(t *testing.T) {
+	// Listing returns a mix of data and manifest keys; KeyFilter
+	// excludes manifests so they're never opened.
+	allKeys := []string{
+		"events/_manifest.json",
+		"events/data-001.jsonl",
+		"events/_SUCCESS",
+		"events/data-002.jsonl",
+	}
+	var opened []string
+	var openedMu sync.Mutex
+
+	src, _ := s3.NewSource(s3.Config[order]{
+		Prefix: "events/",
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return allKeys, nil
+		},
+		KeyFilter: func(k string) bool {
+			return strings.HasSuffix(k, ".jsonl")
+		},
+		OpenObject: func(_ context.Context, key string) (io.ReadCloser, error) {
+			openedMu.Lock()
+			opened = append(opened, key)
+			openedMu.Unlock()
+			return io.NopCloser(strings.NewReader(`{"id":"x"}` + "\n")), nil
+		},
+	})
+	got := collectAll(t, src)
+	if len(got) != 2 {
+		t.Fatalf("len: got %d, want 2", len(got))
+	}
+	openedMu.Lock()
+	defer openedMu.Unlock()
+	if len(opened) != 2 || opened[0] != "events/data-001.jsonl" || opened[1] != "events/data-002.jsonl" {
+		t.Errorf("KeyFilter should skip non-data keys: opened=%v", opened)
+	}
+}
+
+func TestScan_BoundedConcurrencyAllRecords(t *testing.T) {
+	// 32 keys, 4 lines each → 128 records. Concurrency=8 must emit
+	// every record exactly once (order is non-deterministic).
+	const nKeys = 32
+	const linesPerKey = 4
+	keys := make([]string, nKeys)
+	for i := 0; i < nKeys; i++ {
+		keys[i] = "shard-" + strconv.Itoa(i) + ".jsonl"
+	}
+
+	var inFlight int64
+	var maxInFlight int64
+	var opens int64
+
+	src, _ := s3.NewSource(s3.Config[order]{
+		Prefix:      "events/",
+		Concurrency: 8,
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return keys, nil
+		},
+		OpenObject: func(_ context.Context, key string) (io.ReadCloser, error) {
+			atomic.AddInt64(&opens, 1)
+			cur := atomic.AddInt64(&inFlight, 1)
+			defer atomic.AddInt64(&inFlight, -1)
+			// Track the high-water mark for the parallelism assertion.
+			for {
+				m := atomic.LoadInt64(&maxInFlight)
+				if cur <= m || atomic.CompareAndSwapInt64(&maxInFlight, m, cur) {
+					break
+				}
+			}
+			// Build a tiny body unique to this key.
+			var b strings.Builder
+			for i := 0; i < linesPerKey; i++ {
+				b.WriteString(`{"id":"`)
+				b.WriteString(key)
+				b.WriteString(":")
+				b.WriteString(strconv.Itoa(i))
+				b.WriteString(`"}` + "\n")
+			}
+			return io.NopCloser(strings.NewReader(b.String())), nil
+		},
+		EventID: func(o order, _ string, _ int) string {
+			// Natural-id EventID so the exactly-once assertion is
+			// invariant to worker scheduling.
+			return o.ID
+		},
+	})
+
+	got := collectAll(t, src)
+	if len(got) != nKeys*linesPerKey {
+		t.Fatalf("len: got %d, want %d", len(got), nKeys*linesPerKey)
+	}
+	if atomic.LoadInt64(&opens) != int64(nKeys) {
+		t.Errorf("opens: got %d, want %d (each key opened once)", opens, nKeys)
+	}
+	if got := atomic.LoadInt64(&maxInFlight); got < 2 {
+		// 8 workers across 32 keys must overlap; a >=2 floor is a
+		// safe lower bound for this fixture even on a single-CPU
+		// runner because the test workload is synthetic and the
+		// scheduler will multiplex.
+		t.Errorf("maxInFlight: got %d, want >= 2 (concurrent fetch was requested)", got)
+	}
+	// Exactly-once emission.
+	seen := make(map[string]int, len(got))
+	for _, r := range got {
+		seen[r.EventID]++
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("duplicate emission for %q: %d", id, n)
+		}
+	}
+	if len(seen) != nKeys*linesPerKey {
+		t.Errorf("distinct EventIDs: got %d, want %d", len(seen), nKeys*linesPerKey)
+	}
+}
+
+func TestScan_BoundedConcurrencyCapsAtConfig(t *testing.T) {
+	// 16 keys, Concurrency=4 → the high-water in-flight count must
+	// never exceed 4. The sleep is deliberate: it guarantees each
+	// worker holds the slot long enough for peers to overlap, so
+	// the upper bound is tight rather than coincidental.
+	const nKeys = 16
+	const conc = 4
+	keys := make([]string, nKeys)
+	for i := range keys {
+		keys[i] = "k-" + strconv.Itoa(i)
+	}
+
+	var inFlight int64
+	var maxInFlight int64
+
+	src, _ := s3.NewSource(s3.Config[order]{
+		Prefix:      "p/",
+		Concurrency: conc,
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return keys, nil
+		},
+		OpenObject: func(_ context.Context, _ string) (io.ReadCloser, error) {
+			cur := atomic.AddInt64(&inFlight, 1)
+			for {
+				m := atomic.LoadInt64(&maxInFlight)
+				if cur <= m || atomic.CompareAndSwapInt64(&maxInFlight, m, cur) {
+					break
+				}
+			}
+			// Yield so peers have a chance to overlap before we
+			// release the slot.
+			time.Sleep(2 * time.Millisecond)
+			atomic.AddInt64(&inFlight, -1)
+			return io.NopCloser(strings.NewReader(`{"id":"x"}` + "\n")), nil
+		},
+	})
+	_ = collectAll(t, src)
+	if got := atomic.LoadInt64(&maxInFlight); got > conc {
+		t.Errorf("maxInFlight: got %d, want <= %d (bounded by Concurrency)", got, conc)
+	}
+}
+
+func TestScan_ConcurrencyOneIsSequential(t *testing.T) {
+	// Concurrency=1 (default) must scan in lexicographic key order.
+	keys := []string{"a.jsonl", "b.jsonl", "c.jsonl"}
+	bodies := map[string]string{
+		"a.jsonl": `{"id":"a-1"}` + "\n",
+		"b.jsonl": `{"id":"b-1"}` + "\n",
+		"c.jsonl": `{"id":"c-1"}` + "\n",
+	}
+	src, _ := s3.NewSource(s3.Config[order]{
+		Prefix: "p/",
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return keys, nil
+		},
+		OpenObject: func(_ context.Context, key string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(bodies[key])), nil
+		},
+	})
+	got := collectAll(t, src)
+	if got[0].Value.ID != "a-1" || got[1].Value.ID != "b-1" || got[2].Value.ID != "c-1" {
+		t.Errorf("sequential order: got %+v", got)
+	}
+}
+
+func TestScan_ConcurrencyContextCancel(t *testing.T) {
+	// 50 keys, Concurrency=4; consumer cancels after a few records.
+	// Scan must return promptly without leaking goroutines.
+	keys := make([]string, 50)
+	for i := range keys {
+		keys[i] = "k-" + strconv.Itoa(i)
+	}
+	src, _ := s3.NewSource(s3.Config[order]{
+		Prefix:      "p/",
+		Concurrency: 4,
+		ListKeys: func(_ context.Context) ([]string, error) {
+			return keys, nil
+		},
+		OpenObject: func(_ context.Context, _ string) (io.ReadCloser, error) {
+			// Each object emits 1 line and sleeps briefly, so the
+			// consumer can cancel mid-stream.
+			time.Sleep(1 * time.Millisecond)
+			return io.NopCloser(strings.NewReader(`{"id":"x"}` + "\n")), nil
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan source.Record[order], 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- src.Scan(ctx, ch)
+		close(ch)
+	}()
+	// Drain until we've seen a handful of records, then cancel.
+	seen := 0
+	for r := range ch {
+		_ = r
+		seen++
+		if seen == 3 {
+			cancel()
+		}
+	}
+	err := <-done
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Scan: got %v, want nil or context.Canceled", err)
 	}
 }
 
