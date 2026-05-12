@@ -32,7 +32,26 @@ type Recorder interface {
 	// RecordLatency records the duration of a named operation. Typical names:
 	// "store_merge", "cache_merge", "ack". Histograms expose p50/p95/p99.
 	RecordLatency(pipeline string, op string, d time.Duration)
+
+	// RecordBatch is called once per source batch processed by a runtime. The
+	// mode label distinguishes which runtime emitted the batch (typically
+	// "streaming", "bootstrap", or "replay") so a single dashboard can filter
+	// or stack batch throughput by runtime. n is the number of records in the
+	// batch; d is the wall-clock time spent draining the batch.
+	//
+	// Implementations should be cheap: a counter add and a latency sample is
+	// enough. The Noop implementation is a true no-op so backfills running
+	// without metrics configured pay zero cost.
+	RecordBatch(pipeline string, mode string, n int, d time.Duration)
 }
+
+// Mode labels for RecordBatch. Stable strings runtimes pass so dashboards have a
+// known vocabulary to filter against.
+const (
+	ModeStreaming = "streaming"
+	ModeBootstrap = "bootstrap"
+	ModeReplay    = "replay"
+)
 
 // Noop discards all metrics. Useful as a default and in tests; satisfies
 // Recorder with zero allocations and zero method-call overhead the compiler
@@ -47,6 +66,9 @@ func (Noop) RecordError(string, error) {}
 
 // RecordLatency implements Recorder.RecordLatency.
 func (Noop) RecordLatency(string, string, time.Duration) {}
+
+// RecordBatch implements Recorder.RecordBatch.
+func (Noop) RecordBatch(string, string, int, time.Duration) {}
 
 // PipelineStats is an immutable snapshot of metrics for a single pipeline.
 type PipelineStats struct {
@@ -143,6 +165,38 @@ func (m *InMemory) RecordLatency(pipeline string, op string, d time.Duration) {
 	}
 	rb.push(float64(d.Microseconds()) / 1000.0) // milliseconds
 	pm.latMu.Unlock()
+}
+
+// RecordBatch records n events and a single batch-latency sample under a
+// synthetic op name "batch:<mode>", so dashboards can filter batch
+// throughput by runtime mode without colliding with per-op store_merge /
+// cache_merge histograms.
+//
+// The synthetic pipeline name "<pipeline>:batch:<mode>" carries the event
+// count; the op-named latency belongs to the unmodified pipeline so query
+// tools can find both batch latency and store_merge latency under the same
+// pipeline key.
+func (m *InMemory) RecordBatch(pipeline string, mode string, n int, d time.Duration) {
+	if n > 0 {
+		pm := m.get(pipeline + ":batch:" + mode)
+		// Single Add for the whole batch; the LastEventAt timestamp follows
+		// the last batch flush rather than per-record so an idle pipeline
+		// looks idle in the snapshot.
+		pm.events.Add(uint64(n))
+		pm.lastEventAt.Store(time.Now().UnixNano())
+	}
+	if d > 0 {
+		op := "batch_" + mode
+		pm := m.get(pipeline)
+		pm.latMu.Lock()
+		rb, ok := pm.lats[op]
+		if !ok {
+			rb = newRingBuffer(m.maxLat)
+			pm.lats[op] = rb
+		}
+		rb.push(float64(d.Microseconds()) / 1000.0)
+		pm.latMu.Unlock()
+	}
 }
 
 // Snapshot returns a point-in-time view of all pipeline metrics. Suitable for the

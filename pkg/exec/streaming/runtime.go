@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/exec/processor"
@@ -35,6 +36,18 @@ type runConfig struct {
 	keyDebounceMax   int
 	valueDebounce    time.Duration
 	valueDebounceMax int
+
+	// batchTick is the periodic flush interval for RecordBatch metrics.
+	// Default 1 s. Pass <= 0 to disable. The mode label is ModeStreaming
+	// so a single dashboard can compare streaming / bootstrap / replay
+	// throughput.
+	batchTick time.Duration
+
+	// batchCount accumulates records-since-last-tick across all worker
+	// paths (single, concurrent, aggregator). The tick goroutine swaps
+	// it to zero on each tick and emits the count + elapsed time as a
+	// RecordBatch.
+	batchCount atomic.Int64
 
 	// debouncer is materialized once in Run when keyDebounce > 0 and
 	// reused across the per-record processing path. Concurrency-safe.
@@ -185,6 +198,16 @@ func WithConcurrency(n int) RunOption {
 	}
 }
 
+// WithBatchTick overrides the RecordBatch flush interval. The default 1 s
+// fits most production deployments; raise it to reduce metrics chatter
+// for very slow pipelines, or pass <= 0 to disable periodic batch flushes
+// entirely.
+func WithBatchTick(d time.Duration) RunOption {
+	return func(c *runConfig) {
+		c.batchTick = d
+	}
+}
+
 // WithDedup installs a state.Deduper. Each record's EventID is claimed via
 // MarkSeen before the merge runs; if MarkSeen reports the EventID was
 // already claimed (a duplicate from a worker crash mid-write), the runtime
@@ -223,7 +246,7 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 		return fmt.Errorf("streaming.Run: %w", pipeline.ErrMissingSource)
 	}
 
-	cfg := runConfig{Config: processor.Defaults()}
+	cfg := runConfig{Config: processor.Defaults(), batchTick: time.Second}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -233,6 +256,20 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 	if cfg.valueDebounce > 0 {
 		cfg.valueDebouncer = newValueDebouncer(cfg.valueDebounce, cfg.valueDebounceMax)
 	}
+
+	// Periodic RecordBatch goroutine. Reads batchCount atomically every
+	// batchTick and emits a single RecordBatch call with the pipeline name,
+	// mode=streaming, the records seen since the last tick, and the elapsed
+	// wall time. Stops when batchDone is closed (Run is returning).
+	//
+	// The default metrics.Noop recorder no-ops on RecordBatch, so a pipeline
+	// running without explicit metrics pays a single atomic-load per tick
+	// and nothing more.
+	batchDone := make(chan struct{})
+	if cfg.batchTick > 0 {
+		go runBatchTicker(&cfg, p.Name(), metrics.ModeStreaming, batchDone)
+	}
+	defer close(batchDone)
 
 	name := p.Name()
 	src := p.Source()
@@ -298,6 +335,7 @@ func Run[T any, V any](ctx context.Context, p *pipeline.Pipeline[T, V], opts ...
 			if !ok {
 				return <-srcDone
 			}
+			cfg.batchCount.Add(1)
 			if agg != nil {
 				if dup := agg.accept(ctx, rec); dup && rec.Ack != nil {
 					_ = rec.Ack()
@@ -344,6 +382,7 @@ func runConcurrent[T any, V any](
 		go func(ch <-chan source.Record[T]) {
 			defer wg.Done()
 			for rec := range ch {
+				cfg.batchCount.Add(1)
 				if agg != nil {
 					if dup := agg.accept(ctx, rec); dup && rec.Ack != nil {
 						_ = rec.Ack()
@@ -390,6 +429,33 @@ func runConcurrent[T any, V any](
 	return <-srcDone
 }
 
+// runBatchTicker emits one RecordBatch every cfg.batchTick with the records
+// observed since the last tick and the elapsed wall time. Returns when done
+// is closed; on the way out it flushes any pending records so the final
+// batch isn't lost on graceful shutdown.
+func runBatchTicker(cfg *runConfig, pipelineName, mode string, done <-chan struct{}) {
+	t := time.NewTicker(cfg.batchTick)
+	defer t.Stop()
+	last := time.Now()
+	flush := func() {
+		n := cfg.batchCount.Swap(0)
+		if n == 0 {
+			return
+		}
+		cfg.Recorder.RecordBatch(pipelineName, mode, int(n), time.Since(last))
+		last = time.Now()
+	}
+	for {
+		select {
+		case <-done:
+			flush()
+			return
+		case <-t.C:
+			flush()
+		}
+	}
+}
+
 // routeKey maps the first-emitted key to a worker index. FNV-1a hash
 // over the byte content; cheap and good-enough distribution. No keys
 // → worker 0 (caller's processor.MergeMany no-ops on empty key list).
@@ -431,6 +497,7 @@ func drainAndProcess[T any, V any](
 			if !ok {
 				return
 			}
+			cfg.batchCount.Add(1)
 			if agg != nil {
 				if dup := agg.accept(ctx, r); dup && r.Ack != nil {
 					_ = r.Ack()
