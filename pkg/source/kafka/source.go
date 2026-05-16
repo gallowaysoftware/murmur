@@ -14,12 +14,40 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/gallowaysoftware/murmur/pkg/source"
 )
+
+// slogKgoLogger bridges kgo.Logger to the standard library's log/slog.
+// kgo defaults to a no-op logger which silently swallows broker
+// unreachability, metadata refresh failures, and group-coordinator
+// errors — all of which manifest as "consumer is stuck and produces
+// no error" in production. Wiring it to slog at WARN by default
+// surfaces these the same way the rest of murmur's logging works.
+type slogKgoLogger struct {
+	level kgo.LogLevel
+}
+
+func (l slogKgoLogger) Level() kgo.LogLevel { return l.level }
+
+func (l slogKgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...any) {
+	var slogLevel slog.Level
+	switch level {
+	case kgo.LogLevelError:
+		slogLevel = slog.LevelError
+	case kgo.LogLevelWarn:
+		slogLevel = slog.LevelWarn
+	case kgo.LogLevelInfo:
+		slogLevel = slog.LevelInfo
+	default:
+		slogLevel = slog.LevelDebug
+	}
+	slog.Default().Log(context.Background(), slogLevel, "kgo: "+msg, keyvals...)
+}
 
 // Config configures a Kafka Source.
 type Config[T any] struct {
@@ -122,6 +150,12 @@ func NewSource[T any](cfg Config[T]) (*Source[T], error) {
 		// This is the at-least-once semantics: a record that's not Ack'd before
 		// rebalance or process death is re-delivered.
 		kgo.AutoCommitMarks(),
+		// Bridge kgo's logger to the standard slog so warnings ("can't
+		// reach broker X", "metadata refresh failed", group-coordinator
+		// errors) actually surface in production logs instead of being
+		// silently swallowed. Default level is Warn; bump via Extra
+		// (kgo.WithLogger) for kgo-level debugging.
+		kgo.WithLogger(slogKgoLogger{level: kgo.LogLevelWarn}),
 	}
 	opts = append(opts, cfg.Extra...)
 

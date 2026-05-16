@@ -5,16 +5,11 @@
 //   - TestDeployed_MongoCDC_BootstrapOnly — Mongo replset + DDB-local
 //     + the built bootstrap binary running as a container against
 //     both. Verifies the bootstrap leg of the snapshot-then-stream
-//     pattern in its real deployed shape. Runs by default.
+//     pattern in its real deployed shape.
 //
 //   - TestDeployed_MongoCDC_FullHandoff — adds Kafka and the live
-//     worker, asserts merged totals == bootstrap + delta. Same kafka
-//     sibling-network blocker as TestDeployed_PageViewCounters_RoundTrip
-//     (worker joins kafka:9092 but doesn't observe records produced
-//     from the test process via the host listener; hostname override
-//     is confirmed correct via the kafka_diag investigation, so the
-//     issue is deeper). Skipped by default; opt-in via
-//     MURMUR_RUN_DEPLOYED_ROUNDTRIP=1.
+//     worker, asserts merged totals == bootstrap + delta. Exercises
+//     the full snapshot-then-stream handoff in deployed shape.
 
 //go:build integration
 
@@ -23,7 +18,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -128,10 +122,6 @@ func TestDeployed_MongoCDC_BootstrapOnly(t *testing.T) {
 }
 
 func TestDeployed_MongoCDC_FullHandoff(t *testing.T) {
-	if os.Getenv("MURMUR_RUN_DEPLOYED_ROUNDTRIP") == "" {
-		t.Skip("CDC handoff round-trip skipped pending kafka sibling-network debugging; see TODO in test source. Bootstrap-only variant of this test runs by default and passes.")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -221,9 +211,12 @@ func TestDeployed_MongoCDC_FullHandoff(t *testing.T) {
 		_ = worker.Terminate(context.Background())
 	})
 
-	// Produce CDC deltas via the host bootstrap (the kafka issue's
-	// blast radius is the worker's read path; the producer side works).
-	// Sleep first to give the worker time to join the consumer group.
+	// Sleep so the worker's consumer group joins before we produce —
+	// franz-go's default startOffset is AtStart, but a 0-partition
+	// initial assignment (when the topic doesn't exist yet) doesn't
+	// retrigger until MetadataMaxAge (5 min). Producing first via
+	// auto-create would let the worker see an existing topic on
+	// first join.
 	time.Sleep(5 * time.Second)
 	producer, err := kgo.NewClient(
 		kgo.SeedBrokers(strings.Split(kafkaHost, ",")...),
@@ -276,4 +269,3 @@ func TestDeployed_MongoCDC_FullHandoff(t *testing.T) {
 	}
 	t.Errorf("after 90s, got %v, want %v", got, want)
 }
-
