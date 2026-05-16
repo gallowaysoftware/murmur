@@ -103,7 +103,7 @@ The generic gRPC service exposes `Get` / `GetMany` / `GetWindow` / `GetWindowMan
 
 ## Architecture
 
-The full design is documented in [`doc/architecture.md`](doc/architecture.md). For the canonical "how do I integrate Murmur with text search" question, see [`doc/search-integration.md`](doc/search-integration.md) — three patterns (query-time rescore, bucketed indexing, snapshot+delta), their tradeoffs, and a reference DDB-Streams Lambda projector.
+The full design is documented in [`doc/architecture.md`](doc/architecture.md). For shape-oriented "which monoid / runtime / store fits my problem" guidance, see [`doc/use-cases.md`](doc/use-cases.md) — eight common pipeline shapes plus an end-to-end walkthrough of the CDC + backfill pattern. For the canonical "how do I integrate Murmur with text search" question, see [`doc/search-integration.md`](doc/search-integration.md) — three patterns (query-time rescore, bucketed indexing, snapshot+delta), their tradeoffs, and a reference DDB-Streams Lambda projector.
 
 The headline ideas:
 

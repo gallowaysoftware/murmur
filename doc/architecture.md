@@ -2,6 +2,13 @@
 
 > Repo: `gallowaysoftware/murmur` &middot; License: Apache 2.0
 
+> **Looking for "how do I use this for X?"** This doc covers the
+> rationale and load-bearing concepts. For shape-oriented "which
+> monoid / runtime / state-store fits my problem" guidance — counters,
+> unique cardinality, top-N, membership, trending, multi-source,
+> batch ⊕ realtime, search rerank, and an end-to-end CDC + backfill
+> walkthrough — see [`use-cases.md`](use-cases.md).
+
 ## Context
 
 Kyle is building a Summingbird-spiritual-successor in Go for 2026. The core problem: maintaining stateful aggregations (counters, cardinality, top-K) over Kinesis/Kafka event streams, with the ability to backfill or recompute history, queryable via gRPC. Existing options have gaps:
