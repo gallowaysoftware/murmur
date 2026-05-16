@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valkey-io/valkey-go"
+	rueidis "github.com/redis/rueidis"
 
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
@@ -60,7 +60,7 @@ import (
 // Int64Cache and BytesCache. This means a Windowed[HLL] pipeline's
 // per-bucket accelerator keys are stable across restarts.
 type HLLCache struct {
-	client    valkey.Client
+	client    rueidis.Client
 	keyPrefix string
 }
 
@@ -73,8 +73,8 @@ type HLLConfig struct {
 	// Required.
 	KeyPrefix string
 
-	// Extra lets callers append additional valkey-go options (TLS, auth, etc).
-	Extra []valkey.ClientOption
+	// Extra lets callers append additional rueidis options (TLS, auth, etc).
+	Extra []rueidis.ClientOption
 }
 
 // NewHLLCache constructs an HLLCache. The returned cache owns the
@@ -83,11 +83,11 @@ func NewHLLCache(cfg HLLConfig) (*HLLCache, error) {
 	if cfg.KeyPrefix == "" {
 		return nil, errors.New("valkey HLLCache: KeyPrefix is required")
 	}
-	opts := valkey.ClientOption{InitAddress: []string{cfg.Address}}
+	opts := rueidis.ClientOption{InitAddress: []string{cfg.Address}}
 	if cfg.Address == "" {
 		opts.InitAddress = []string{"localhost:6379"}
 	}
-	client, err := valkey.NewClient(opts)
+	client, err := rueidis.NewClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("valkey new client: %w", err)
 	}

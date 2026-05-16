@@ -28,9 +28,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	pageviews "github.com/gallowaysoftware/murmur/examples/page-view-counters"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/core"
 	mgrpc "github.com/gallowaysoftware/murmur/pkg/query/grpc"
@@ -79,12 +76,18 @@ func run() int {
 	mux := http.NewServeMux()
 	mux.Handle(srv.Handler())
 
-	// h2c gives us HTTP/2 over plaintext on the same port — required for native
-	// gRPC clients. Connect (HTTP+JSON) and gRPC-Web work over plain HTTP/1.1
-	// on the same listener.
+	// HTTP/2-over-plaintext on the same port — required for native gRPC
+	// clients. Connect (HTTP+JSON) and gRPC-Web work over plain HTTP/1.1
+	// on the same listener. http.Server.Protocols is the stdlib's
+	// replacement for the deprecated golang.org/x/net/http2/h2c package
+	// (available since Go 1.24).
+	protocols := &http.Protocols{}
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 	httpSrv := &http.Server{
 		Addr:              cfg.GRPCAddr,
-		Handler:           h2c.NewHandler(mux, &http2.Server{}),
+		Handler:           mux,
+		Protocols:         protocols,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
