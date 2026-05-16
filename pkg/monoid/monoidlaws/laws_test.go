@@ -76,10 +76,17 @@ func TestSet_String(t *testing.T) {
 
 func TestBloom(t *testing.T) {
 	m := bloom.Bloom()
+	// Bloom's Combine is the most expensive monoid in the library:
+	// UnmarshalBinary on two ~120KB filters, a Merge, and a
+	// MarshalBinary on every triple. The default 32-sample
+	// associativity check (16^3 = 4096 triples after the cubic-blowup
+	// stride) tipped over the CI -race + 2-minute budget; 8 samples
+	// (8^3 = 512 triples) preserves the qualitative property check
+	// while fitting comfortably.
 	monoidlaws.TestMonoid(t, m, func(i int) []byte {
 		// One element per generated sketch.
 		return bloom.Single([]byte{byte(i % 251), byte(i / 251)})
-	})
+	}, monoidlaws.WithSamples[[]byte](8))
 }
 
 func TestTopK_K10(t *testing.T) {

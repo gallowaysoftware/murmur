@@ -295,7 +295,7 @@ func TestS3_DecodeErrorCallback(t *testing.T) {
 	var seenRows []int
 	src, _ := parquet.NewS3Source(parquet.S3Config[countEvent]{
 		Prefix: key,
-		Decode: func(rec arrow.Record, row int) (countEvent, error) {
+		Decode: func(rec arrow.RecordBatch, row int) (countEvent, error) {
 			if row == 0 {
 				return countEvent{}, errors.New("synthetic poison")
 			}

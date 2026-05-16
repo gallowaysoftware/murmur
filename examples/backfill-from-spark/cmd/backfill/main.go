@@ -46,6 +46,12 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run wraps the body so deferred cleanups (signal-NotifyContext cancel)
+// fire before os.Exit. Returns a process exit code.
+func run() int {
 	var (
 		bucket      = flag.String("bucket", "", "S3 bucket holding the Spark output (required)")
 		prefix      = flag.String("prefix", "", "S3 key prefix to scan (required)")
@@ -58,7 +64,7 @@ func main() {
 	flag.Parse()
 	if *bucket == "" || *prefix == "" || *table == "" || *name == "" {
 		flag.Usage()
-		os.Exit(2)
+		return 2
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -74,7 +80,7 @@ func main() {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
 		slog.Error("load aws config", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	s3Client := awss3.NewFromConfig(awsCfg)
@@ -104,7 +110,7 @@ func main() {
 	})
 	if err != nil {
 		slog.Error("new s3 source", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	slog.Info("bootstrap starting",
@@ -118,12 +124,18 @@ func main() {
 	token, err := bootstrap.Run(ctx, pipe, src)
 	if err != nil {
 		slog.Error("bootstrap.Run", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	slog.Info("bootstrap complete",
 		"pipeline", *name,
 		"handoff_token_len", len(token),
 	)
-	fmt.Fprintln(os.Stdout, "ok")
+	if _, err := fmt.Fprintln(os.Stdout, "ok"); err != nil {
+		// Stdout write failure isn't worth a non-zero exit (the
+		// bootstrap itself succeeded), but errcheck wants explicit
+		// acknowledgement that the result was considered.
+		slog.Warn("stdout write", "err", err)
+	}
+	return 0
 }

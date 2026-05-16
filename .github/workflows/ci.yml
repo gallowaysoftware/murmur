@@ -85,6 +85,11 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - name: generate proto bindings
+        # web/src/gen/ is .gitignored — TS bindings are regenerated from
+        # ../proto via the buf config in web/buf.gen.yaml. Must run before
+        # tsc / lint / build so the generated module paths exist.
+        run: npx buf generate
       - name: typecheck
         run: npx tsc -b --noEmit
       - name: lint
