@@ -2,7 +2,8 @@
 #
 # `make help` for the full list. Key entry points:
 #   make test-unit         — fast Go unit tests, no infra
-#   make test-integration  — Go tests against docker-compose stack
+#   make test-integration  — library-shape E2E against docker-compose stack
+#   make test-deployed     — deployed-shape integration (testcontainers, needs Docker)
 #   make web-build         — build the web UI into pkg/admin/dist (embedded)
 #   make ui                — web-build + run cmd/murmur-ui --demo
 #   make compose-up        — bring up the docker-compose stack
@@ -69,7 +70,7 @@ test-unit: ## Fast unit tests — no docker, no AWS. Skips integration/e2e.
 	@for d in $(SUBMODULES); do (cd $$d && $(GO) test -short -timeout 60s ./...) || exit 1; done
 
 .PHONY: test-integration
-test-integration: compose-up ## Full test suite including E2E. Requires docker-compose stack.
+test-integration: compose-up ## Library-shape E2E (test/e2e). Brings up docker-compose first.
 	DDB_LOCAL_ENDPOINT=http://localhost:8000 \
 	KAFKA_BROKERS=localhost:9092 \
 	VALKEY_ADDRESS=localhost:6379 \
@@ -78,6 +79,10 @@ test-integration: compose-up ## Full test suite including E2E. Requires docker-c
 	SPARK_CONNECT_REMOTE=sc://localhost:15002 \
 	MONGO_URI="mongodb://localhost:27017/?replicaSet=rs0&directConnection=true" \
 	$(GO) test -timeout 240s $(GO_PACKAGES)
+
+.PHONY: test-deployed
+test-deployed: ## Deployed-shape integration (test/integration; testcontainers-driven). Requires a working Docker daemon.
+	$(GO) test -tags=integration -timeout 15m -v ./test/integration/...
 
 # ----------------------------------------------------------------------------
 # Web UI
