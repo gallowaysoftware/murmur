@@ -102,3 +102,53 @@ func (s *TopProductsServiceServer) GetTopWindowMany(ctx context.Context, req *co
 		Entries: entries,
 	}), nil
 }
+
+// GetTopMany implements the GetTopMany RPC.
+func (s *TopProductsServiceServer) GetTopMany(ctx context.Context, req *connect.Request[pb.GetTopManyRequest]) (*connect.Response[pb.GetTopManyResponse], error) {
+	msg := req.Msg
+	if len(msg.CategoryIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("category_ids is required"))
+	}
+	keys := make([]string, len(msg.CategoryIds))
+	for i, v := range msg.CategoryIds {
+		keys[i] = fmt.Sprintf("category:%s", v)
+	}
+	values, present, err := s.client.GetMany(ctx, keys)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	entries := make([]*pb.TopKItemList, len(values))
+	for i, v := range values {
+		items := make([]*pb.TopKItem, len(v))
+		for j, it := range v {
+			items[j] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+		}
+		entries[i] = &pb.TopKItemList{Items: items}
+	}
+	return connect.NewResponse(&pb.GetTopManyResponse{
+		Entries: entries,
+		Present: present,
+	}), nil
+}
+
+// GetTopRange implements the GetTopRange RPC.
+func (s *TopProductsServiceServer) GetTopRange(ctx context.Context, req *connect.Request[pb.GetTopRangeRequest]) (*connect.Response[pb.GetTopRangeResponse], error) {
+	msg := req.Msg
+	if strings.TrimSpace(msg.CategoryId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("category_id is required"))
+	}
+	key := fmt.Sprintf("category:%s", msg.CategoryId)
+	start := time.Unix(msg.StartUnix, 0)
+	end := time.Unix(msg.EndUnix, 0)
+	val, err := s.client.GetRange(ctx, key, start, end)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	items := make([]*pb.TopKItem, len(val))
+	for i, it := range val {
+		items[i] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+	}
+	return connect.NewResponse(&pb.GetTopRangeResponse{
+		Items: items,
+	}), nil
+}

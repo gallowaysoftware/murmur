@@ -152,6 +152,67 @@ Notable optionals: `valkey_uri`, `worker_env`, `query_env`, `bootstrap_env`,
 | `query_alb_security_group_id`   | Internal ALB SG.                                             |
 | `bootstrap_security_group_id`   | Bootstrap-task ENI SG.                                       |
 
+## Atomic state-table swap (optional)
+
+Enable `swap_enabled = true` to provision a [`pkg/swap`](../../../../pkg/swap)
+control table and inject `SWAP_CONTROL_TABLE` + `SWAP_ALIAS` env vars into all
+three tasks. The state table at `var.name` remains the active table for
+day-to-day reads; subsequent backfill versions (`<name>_v2`, `<name>_v3`, …)
+are created outside the module by the backfill workflow, and atomically
+cut-over via `swap.Manager.SetActive(ctx, alias, newVersion)`.
+
+```hcl
+module "page_views" {
+  source = "github.com/gallowaysoftware/murmur//deploy/terraform/modules/pipeline-counter"
+
+  name = "page_views"
+  # ...everything else as before...
+
+  swap_enabled         = true
+  swap_initial_version = 1   # seed the alias pointer at deploy time
+}
+```
+
+What the module does in swap mode:
+
+1. Creates `<name>_swap` (override via `swap_control_table_name`) — a tiny DDB
+   table with one row per alias (`pk: <alias>, ver: <int>, at: <unix-ms>`).
+2. If `swap_initial_version` is set, seeds the alias row to that version. After
+   that, Terraform stops tracking the row — `SetActive` updates from the
+   application are NOT treated as drift.
+3. Adds DDB `GetItem` to the worker + query task roles on the control table,
+   and `GetItem` + `UpdateItem` to the bootstrap task role (so the backfill
+   runner can advance the pointer when its replay completes).
+4. Adds `SWAP_CONTROL_TABLE` + `SWAP_ALIAS` to every task's environment. The
+   binaries are expected to call `swap.New(client, SWAP_CONTROL_TABLE)` and
+   `Manager.Resolve(ctx, SWAP_ALIAS)` at startup (and on a refresh cadence,
+   for query servers that should pick up cutovers without a redeploy).
+
+Cutover from v1 → v2:
+
+```bash
+# 1. Provision the new state table out-of-module (or via a second instance of
+#    this module with a different `name`).
+# 2. Run the backfill workload writing into <name>_v2 in parallel with the
+#    live v1 worker.
+# 3. When the backfill catches up, advance the pointer:
+
+aws dynamodb update-item \
+  --table-name "$(terraform output -raw swap_control_table_name)" \
+  --key '{"pk":{"S":"page_views"}}' \
+  --update-expression "SET ver = :v, at = :now" \
+  --condition-expression "attribute_not_exists(ver) OR ver < :v" \
+  --expression-attribute-values '{":v":{"N":"2"},":now":{"N":"1715731200000"}}'
+
+# Or from Go inside a one-shot cutover binary:
+#   m := swap.New(ddb, os.Getenv("SWAP_CONTROL_TABLE"))
+#   _ = m.SetActive(ctx, os.Getenv("SWAP_ALIAS"), 2)
+```
+
+Query servers pick up the new pointer on their next refresh (or restart).
+The old v1 table can be deleted after a grace period — typically once the
+oldest live read against v1 has settled.
+
 ## File layout
 
 ```
@@ -160,6 +221,7 @@ deploy/terraform/modules/pipeline-counter/
   ecs.tf         # streaming worker task + service
   query.tf       # query task + service + ALB + target group + listener
   bootstrap.tf   # bootstrap-runner task definition
+  swap.tf        # optional pkg/swap control table + IAM + seed
   variables.tf   # all inputs
   outputs.tf     # all outputs
   README.md      # this file

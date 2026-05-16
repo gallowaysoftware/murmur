@@ -105,12 +105,10 @@ type Method struct {
 }
 
 // MethodKind tags which typed-client method (Get / GetMany / GetWindow /
-// GetWindowMany / GetRange) the generated handler will call.
-//
-// kind=get_many and kind=get_range only support pipeline_kind=sum today,
-// because the typed clients in pkg/query/typed only expose GetMany /
-// GetRange on SumClient. If HLLClient / TopKClient / BloomClient grow
-// those methods, lift the restriction in validate().
+// GetWindowMany / GetRange) the generated handler will call. All four
+// pipeline kinds (sum / hll / topk / bloom) now support every method
+// kind — the typed clients in pkg/query/typed expose GetMany / GetRange
+// on every client.
 type MethodKind string
 
 const (
@@ -171,14 +169,14 @@ func (s *Spec) validate() error {
 		return errors.New("service.methods is empty")
 	}
 	for i, m := range s.Service.Methods {
-		if err := m.validate(s.Service.PipelineKind); err != nil {
+		if err := m.validate(); err != nil {
 			return fmt.Errorf("methods[%d] (%s): %w", i, m.Name, err)
 		}
 	}
 	return nil
 }
 
-func (m *Method) validate(serviceKind PipelineKind) error {
+func (m *Method) validate() error {
 	if m.Name == "" {
 		return errors.New("method.name is required")
 	}
@@ -252,11 +250,6 @@ func (m *Method) validate(serviceKind PipelineKind) error {
 		if fe == nil || fe.Type != "int64" {
 			return fmt.Errorf("range_end_field %q must be an int64 request field", m.RangeEndField)
 		}
-	}
-	// GetMany / GetRange only exist on SumClient today; reject other kinds
-	// loudly so users don't ship a generated server that fails at compile time.
-	if (m.Kind == MethodGetMany || m.Kind == MethodGetRange) && serviceKind != PipelineSum {
-		return fmt.Errorf("kind=%s is only supported on pipeline_kind=sum (got %q); HLL/TopK/Bloom typed clients lack the underlying method", m.Kind, serviceKind)
 	}
 	return nil
 }

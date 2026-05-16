@@ -37,7 +37,8 @@ type Server struct {
 	mu             sync.RWMutex
 	pipelines      map[string]registered
 	recorder       *metrics.InMemory
-	allowedOrigins []string // empty → no CORS headers; "*" → permissive
+	allowedOrigins []string      // empty → no CORS headers; "*" → permissive
+	authn          Authenticator // nil → auth off (default)
 }
 
 // Option configures a Server. Apply via NewServer(rec, opts...).
@@ -106,11 +107,19 @@ func (s *Server) Register(info PipelineInfo, query QueryFn) {
 
 // Handler returns an http.Handler implementing the AdminService routes. Mount
 // at "/" or under a subpath via http.StripPrefix.
+//
+// Middleware order (outer-most first):
+//  1. CORS — sets Access-Control-* headers and short-circuits OPTIONS
+//     preflight before the auth middleware sees it.
+//  2. Auth — when WithAuth / WithAuthToken / WithJWTVerifier is configured,
+//     enforces the Authorization header; rejects with 401 on missing or
+//     invalid credentials.
+//  3. AdminService handler (Connect-RPC).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	path, h := adminv1connect.NewAdminServiceHandler(s)
 	mux.Handle(path, h)
-	return s.corsMiddleware(mux)
+	return s.corsMiddleware(s.authMiddleware(mux))
 }
 
 // --- AdminServiceHandler implementation ---

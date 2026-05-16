@@ -38,6 +38,10 @@ func main() {
 	allowOrigins := flag.String("allow-origin", "",
 		"comma-separated list of CORS-allowed origins; pass \"*\" for permissive (dev only). "+
 			"Default empty = same-origin only, which is correct for the embedded UI.")
+	authToken := flag.String("auth-token", "",
+		"if set, require Authorization: Bearer <token> on every admin request. "+
+			"Comma-separated list for rotation (any matching token is accepted). "+
+			"Falls back to MURMUR_ADMIN_TOKEN env var when the flag is empty.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -52,6 +56,18 @@ func main() {
 			origins[i] = strings.TrimSpace(origins[i])
 		}
 		serverOpts = append(serverOpts, admin.WithAllowedOrigins(origins...))
+	}
+	tokenSource := *authToken
+	if tokenSource == "" {
+		tokenSource = os.Getenv("MURMUR_ADMIN_TOKEN")
+	}
+	if tokenSource != "" {
+		tokens := strings.Split(tokenSource, ",")
+		for i := range tokens {
+			tokens[i] = strings.TrimSpace(tokens[i])
+		}
+		serverOpts = append(serverOpts, admin.WithAuthToken(tokens...))
+		logger.Info("admin auth enabled", "tokens", len(tokens))
 	}
 	srv := admin.NewServer(rec, serverOpts...)
 

@@ -6,6 +6,99 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v1 readiness pass
+
+A focused push closing the remaining gaps before tagging `v1.0.0`. Each
+entry below references a real package or commit; for the per-commit
+history use `git log v1-prep`.
+
+#### Valkey-native Bloom acceleration
+
+- **`pkg/state/valkey.BloomCache`** mirrors `HLLCache` for Bloom filters
+  using the `valkey-bloom` / RedisBloom `BF.*` command surface
+  (`BF.ADD` / `BF.MADD` / `BF.EXISTS` / `BF.MEXISTS` / `BF.RESERVE` /
+  `BF.INFO`). Side-by-side with the BytesStore-authoritative
+  bits-and-blooms sketch; independent FPR realizations. Integration
+  tests gate on `VALKEY_BLOOM_ENABLED` and skip cleanly when the module
+  isn't loaded. Closes the only explicit roadmap row in `README.md`.
+
+#### Kafka source: DLQ producer + per-partition concurrency
+
+- **`pkg/source/kafka.NewDLQProducer`** — convenience wiring of a
+  franz-go producer into the existing `OnDecodeError` / `OnFetchError`
+  callbacks so poison pills land on a dead-letter topic with diagnostic
+  headers (`x-murmur-source-topic` / `-partition` / `-offset` /
+  `-error` / `-error-kind`).
+- **`pkg/source/kafka.Config.Concurrency`** — N decoder goroutines plus
+  one fetcher; each partition pinned to worker `partition mod N` so
+  per-partition order is preserved while decode-heavy formats
+  (Protobuf with schema lookups, encrypted payloads) saturate multiple
+  cores. Default `Concurrency=1` keeps the historical single-goroutine
+  path verbatim. Lifts the "no per-partition parallelism" line.
+
+#### Typed-client parity (HLL / TopK / Bloom)
+
+- **`pkg/query/typed`** — `HLLClient`, `TopKClient`, `BloomClient` all
+  grew `GetMany` + `GetRange` methods to match `SumClient`. Per-entity
+  present flags on `GetMany` (the underlying `GetMany` RPC surfaces
+  them); merged response on `GetRange` (the RPC merges before
+  returning).
+- **`cmd/murmur-codegen-typed`** — dropped the Sum-only gate on
+  `get_many` / `get_range`; new per-kind render branches emit shape-
+  appropriate response messages and server-stub Go code. The
+  `top-products` and `recent-visitors` example specs grew
+  `GetTopMany` / `GetTopRange` / `GetFilterShapeMany` /
+  `GetFilterShapeRange` methods so the new render paths are covered by
+  the existing golden tests.
+
+#### Admin auth middleware
+
+- **`pkg/admin.WithAuthToken`** — static-bearer-token Authenticator
+  with constant-time comparison and multi-token rotation. Tokens that
+  don't match yield 401 with a `WWW-Authenticate: Bearer realm=...`
+  hint and no body.
+- **`pkg/admin.WithJWTVerifier`** — wraps a user-supplied `JWTVerifier`
+  (OIDC / JWKS / JWT library of choice) as an Authenticator.
+- **`pkg/admin.Authenticator`** — pluggable interface for callers
+  wiring their own auth schemes.
+- Middleware ordering: CORS (with OPTIONS short-circuit) outside Auth
+  outside the Connect handler. Auth is off by default — unchanged for
+  same-origin / network-isolated deploys.
+- **`cmd/murmur-ui --auth-token`** + `MURMUR_ADMIN_TOKEN` env fallback
+  makes the bundled UI auth-aware without code changes.
+
+#### Parquet S3 replay driver
+
+- **`pkg/replay/s3.ParquetDriver`** pairs with the existing JSON-Lines
+  `Driver`: list S3 objects under a prefix, GetObject, read each as
+  Parquet via apache/arrow-go/v18, emit one `source.Record` per row via
+  a user-supplied `ParquetDecoder(arrow.Record, row int) -> T`. Same
+  archive can hold both formats; the default `KeyFilter` selects only
+  `*.parquet`. No new direct dependencies — arrow-go was already
+  pulled in by `pkg/source/snapshot/parquet`.
+
+#### Atomic state-table swap wired into Terraform
+
+- **`deploy/terraform/modules/pipeline-counter`** — opt-in
+  `swap_enabled = true` provisions a [`pkg/swap`](pkg/swap) control DDB
+  table, seeds the alias pointer when `swap_initial_version` is set,
+  grants the worker / query / bootstrap task roles the right IAM
+  (read on worker+query, read+write on bootstrap), and injects
+  `SWAP_CONTROL_TABLE` + `SWAP_ALIAS` env vars into every task
+  definition. Module README gains a v1 → v2 cutover recipe. Default
+  behavior is unchanged (`swap_enabled = false`).
+
+#### Closed STABILITY rows
+
+- `pkg/source/kafka` — DLQ hook + per-partition parallelism both
+  shipped.
+- `pkg/state/valkey` — Bloom accelerator shipped.
+- `pkg/replay/s3` — Parquet shipped.
+- `pkg/admin` — auth middleware shipped.
+- `pkg/swap` — Terraform integration shipped.
+- `pkg/query/typed` + `cmd/murmur-codegen-typed` — Sum-only restriction
+  on `get_many` / `get_range` lifted.
+
 ### Changed — Kinesis is Lambda-only in production
 
 - **`pkg/source/kinesis`** is now flagged "dev / demo only" in `STABILITY.md`. It's a single-instance polling consumer with no checkpointing — fine for integration tests and local one-shot consumers, not for production. Production Kinesis ingest goes through **`pkg/exec/lambda/kinesis`**, which lets AWS Lambda's event-source mapping own shard discovery, lease coordination, autoscaling (via `ParallelizationFactor`), checkpointing, and partial-batch retry (`BatchItemFailures`).

@@ -388,6 +388,209 @@ func TestBloomClient_GetWindowMany(t *testing.T) {
 	}
 }
 
+func TestHLLClient_GetMany(t *testing.T) {
+	mon := hll.HLL()
+	store := fakeBytesStore{}
+	for entity, n := range map[string]int{"page-A": 20, "page-C": 60} {
+		sketch := mon.Identity()
+		for i := 0; i < n; i++ {
+			sketch = mon.Combine(sketch, hll.Single([]byte(entity+":"+string(rune(i)))))
+		}
+		store[state.Key{Entity: entity}] = sketch
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Encode: grpc.BytesIdentity(),
+	})
+	defer cleanup()
+
+	c := typed.NewHLLClient(rawClient)
+	got, present, err := c.GetMany(context.Background(), []string{"page-A", "missing", "page-C"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if !present[0] || got[0].Cardinality < 18 || got[0].Cardinality > 22 {
+		t.Errorf("page-A: present=%v card=%d, want present=true card≈20", present[0], got[0].Cardinality)
+	}
+	if present[1] || got[1].Cardinality != 0 {
+		t.Errorf("missing: present=%v card=%d, want present=false card=0", present[1], got[1].Cardinality)
+	}
+	if !present[2] || got[2].Cardinality < 55 || got[2].Cardinality > 65 {
+		t.Errorf("page-C: present=%v card=%d, want present=true card≈60", present[2], got[2].Cardinality)
+	}
+}
+
+func TestHLLClient_GetRange(t *testing.T) {
+	mon := hll.HLL()
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	// 10 daily buckets, each with 100 distinct elements; the per-bucket
+	// elements partially overlap (shift of 50 across buckets) so the
+	// merged cardinality across all 10 buckets is 100 + 9*50 = 550.
+	encode := func(n int) []byte {
+		return []byte{byte(n & 0xff), byte((n >> 8) & 0xff)}
+	}
+	for i := 0; i < 10; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		sketch := mon.Identity()
+		for j := 0; j < 100; j++ {
+			sketch = mon.Combine(sketch, hll.Single(encode(i*50+j)))
+		}
+		store[state.Key{Entity: "page-A", Bucket: bucket}] = sketch
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewHLLClient(rawClient)
+	// Range covers all 10 buckets.
+	got, err := c.GetRange(context.Background(), "page-A",
+		now.Add(-10*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("GetRange: %v", err)
+	}
+	// HLL ~1-2% error at 550 elements → ±15.
+	if got.Cardinality < 500 || got.Cardinality > 600 {
+		t.Errorf("GetRange cardinality: got %d, want ~550 ±50", got.Cardinality)
+	}
+}
+
+func TestTopKClient_GetMany(t *testing.T) {
+	mon := topk.New(5)
+	store := fakeBytesStore{}
+	for entity, hits := range map[string]map[string]int{
+		"feed-A": {"post-X": 10, "post-Y": 3},
+		"feed-B": {"post-Z": 7},
+	} {
+		sketch := mon.Identity()
+		for k, n := range hits {
+			for i := 0; i < n; i++ {
+				sketch = mon.Combine(sketch, topk.SingleN(5, k, 1))
+			}
+		}
+		store[state.Key{Entity: entity}] = sketch
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Encode: grpc.BytesIdentity(),
+	})
+	defer cleanup()
+
+	c := typed.NewTopKClient(rawClient)
+	got, present, err := c.GetMany(context.Background(), []string{"feed-A", "missing", "feed-B"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if !present[0] || len(got[0]) == 0 || got[0][0].Key != "post-X" {
+		t.Errorf("feed-A: present=%v top=%+v, want present=true top=post-X", present[0], got[0])
+	}
+	if present[1] || got[1] != nil {
+		t.Errorf("missing: present=%v got=%+v, want present=false got=nil", present[1], got[1])
+	}
+	if !present[2] || len(got[2]) == 0 || got[2][0].Key != "post-Z" {
+		t.Errorf("feed-B: present=%v top=%+v, want present=true top=post-Z", present[2], got[2])
+	}
+}
+
+func TestTopKClient_GetRange(t *testing.T) {
+	mon := topk.New(5)
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	// 3 daily buckets, post-X dominant across all of them.
+	for i := 0; i < 3; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		sketch := mon.Identity()
+		for j := 0; j < 10; j++ {
+			sketch = mon.Combine(sketch, topk.SingleN(5, "post-X", 1))
+		}
+		for j := 0; j < 2; j++ {
+			sketch = mon.Combine(sketch, topk.SingleN(5, "post-Y", 1))
+		}
+		store[state.Key{Entity: "feed-A", Bucket: bucket}] = sketch
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewTopKClient(rawClient)
+	got, err := c.GetRange(context.Background(), "feed-A",
+		now.Add(-3*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("GetRange: %v", err)
+	}
+	if len(got) == 0 || got[0].Key != "post-X" {
+		t.Errorf("GetRange top: got %+v, want post-X first", got)
+	}
+}
+
+func TestBloomClient_GetMany(t *testing.T) {
+	mon := bloomMon()
+	store := fakeBytesStore{}
+	for entity, n := range map[string]int{"campaign-A": 30, "campaign-B": 100} {
+		filter := mon.Identity()
+		for i := 0; i < n; i++ {
+			filter = mon.Combine(filter, bloomSingle(byte(i), entity))
+		}
+		store[state.Key{Entity: entity}] = filter
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Encode: grpc.BytesIdentity(),
+	})
+	defer cleanup()
+
+	c := typed.NewBloomClient(rawClient)
+	got, present, err := c.GetMany(context.Background(), []string{"campaign-A", "missing", "campaign-B"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if !present[0] || got[0].CapacityBits == 0 {
+		t.Errorf("campaign-A: present=%v cap=%d, want present=true cap>0", present[0], got[0].CapacityBits)
+	}
+	if present[1] || got[1].ApproxSize != 0 {
+		t.Errorf("missing: present=%v approx=%d, want present=false approx=0", present[1], got[1].ApproxSize)
+	}
+	if !present[2] || got[2].CapacityBits == 0 {
+		t.Errorf("campaign-B: present=%v cap=%d, want present=true cap>0", present[2], got[2].CapacityBits)
+	}
+}
+
+func TestBloomClient_GetRange(t *testing.T) {
+	mon := bloomMon()
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	store := fakeBytesStore{}
+
+	for i := 0; i < 3; i++ {
+		bucket := w.BucketID(now.Add(-time.Duration(i) * 24 * time.Hour))
+		filter := mon.Identity()
+		for j := 0; j < 25; j++ {
+			filter = mon.Combine(filter, bloomSingle(byte(i*100+j), "campaign-A"))
+		}
+		store[state.Key{Entity: "campaign-A", Bucket: bucket}] = filter
+	}
+	rawClient, cleanup := startServer(t, grpc.Config[[]byte]{
+		Store: store, Monoid: mon, Window: &w, Encode: grpc.BytesIdentity(),
+		Now: func() time.Time { return now },
+	})
+	defer cleanup()
+
+	c := typed.NewBloomClient(rawClient)
+	got, err := c.GetRange(context.Background(), "campaign-A",
+		now.Add(-3*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("GetRange: %v", err)
+	}
+	if got.CapacityBits == 0 {
+		t.Errorf("GetRange: capacity_bits=0, want > 0 from merged filter")
+	}
+}
+
 func TestSumClient_FreshReadOption(t *testing.T) {
 	// Smoke test: WithFreshRead is plumbed through the typed client to
 	// the underlying request. The bypass-coalescing semantics are

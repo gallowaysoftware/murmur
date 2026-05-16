@@ -20,15 +20,21 @@ import (
 //	hll   / get_window_many               → { repeated int64 values } (parallel cardinalities)
 //	topk  / get_window_many               → { repeated TopKItemList entries }
 //	bloom / get_window_many               → { repeated BloomShape entries }
-//	sum   / get_many                      → { repeated int64 values, repeated bool present } (sum-only)
-//	sum   / get_range                     → { int64 value }                                   (sum-only)
+//	sum   / get_many                      → { repeated int64 values, repeated bool present }
+//	hll   / get_many                      → { repeated int64 values, repeated bool present } (parallel cardinalities)
+//	topk  / get_many                      → { repeated TopKItemList entries, repeated bool present }
+//	bloom / get_many                      → { repeated BloomShape entries, repeated bool present }
+//	sum   / get_range                     → { int64 value }
+//	hll   / get_range                     → { int64 value } (merged cardinality)
+//	topk  / get_range                     → { repeated TopKItem items } (merged ranking)
+//	bloom / get_range                     → { int64 capacity_bits, int32 hash_functions, int64 approx_size } (merged shape)
 //
-// Top-of-file message emissions (driven by service kind + presence of
-// get_window_many methods):
+// Top-of-file message emissions (driven by service kind + the set of
+// method kinds present):
 //
 //	TopKItem      — emitted for every topk pipeline (singleton + batched responses both need it)
-//	TopKItemList  — emitted only when a topk pipeline has a get_window_many method
-//	BloomShape    — emitted only when a bloom pipeline has a get_window_many method
+//	TopKItemList  — emitted when a topk pipeline has a get_window_many OR get_many method
+//	BloomShape    — emitted when a bloom pipeline has a get_window_many OR get_many method
 //
 // The batched shapes intentionally omit a `present` flag — the underlying
 // typed clients in pkg/query/typed don't surface presence per-entity today, so
@@ -133,12 +139,29 @@ func responseBody(serviceKind PipelineKind, methodKind MethodKind) string {
 			return "  // unsupported pipeline kind\n"
 		}
 	case MethodGetMany:
-		// Sum-only at the spec layer; the typed client surfaces both the
-		// merged value and the per-entity present flag, so we expose both.
-		return "  repeated int64 values = 1;\n  repeated bool present = 2;\n"
+		// Every typed client now surfaces both the merged value and a
+		// per-entity present flag, so we expose both for all kinds.
+		switch serviceKind {
+		case PipelineSum, PipelineHLL:
+			return "  repeated int64 values = 1;\n  repeated bool present = 2;\n"
+		case PipelineTopK:
+			return "  repeated TopKItemList entries = 1;\n  repeated bool present = 2;\n"
+		case PipelineBloom:
+			return "  repeated BloomShape entries = 1;\n  repeated bool present = 2;\n"
+		default:
+			return "  // unsupported pipeline kind\n"
+		}
 	case MethodGetRange:
-		// Sum-only; SumClient.GetRange returns just the merged value.
-		return "  int64 value = 1;\n"
+		switch serviceKind {
+		case PipelineSum, PipelineHLL:
+			return "  int64 value = 1;\n"
+		case PipelineTopK:
+			return "  repeated TopKItem items = 1;\n"
+		case PipelineBloom:
+			return "  int64 capacity_bits = 1;\n  int32 hash_functions = 2;\n  int64 approx_size = 3;\n"
+		default:
+			return "  // unsupported pipeline kind\n"
+		}
 	}
 	// get_all_time / get_window
 	switch serviceKind {
@@ -154,23 +177,24 @@ func responseBody(serviceKind PipelineKind, methodKind MethodKind) string {
 }
 
 // emitTopKItemList reports whether the .proto needs a top-of-file
-// TopKItemList message. Only emitted when a topk pipeline has at least
-// one get_window_many method.
+// TopKItemList message. Emitted when a topk pipeline has at least one
+// get_window_many or get_many method — both shapes wrap per-entity
+// item lists.
 func emitTopKItemList(s *Spec) bool {
 	if s.Service.PipelineKind != PipelineTopK {
 		return false
 	}
-	return hasMethodKind(s, MethodGetWindowMany)
+	return hasMethodKind(s, MethodGetWindowMany) || hasMethodKind(s, MethodGetMany)
 }
 
 // emitBloomShape reports whether the .proto needs a top-of-file
-// BloomShape message. Only emitted when a bloom pipeline has at least
-// one get_window_many method.
+// BloomShape message. Emitted when a bloom pipeline has at least one
+// get_window_many or get_many method.
 func emitBloomShape(s *Spec) bool {
 	if s.Service.PipelineKind != PipelineBloom {
 		return false
 	}
-	return hasMethodKind(s, MethodGetWindowMany)
+	return hasMethodKind(s, MethodGetWindowMany) || hasMethodKind(s, MethodGetMany)
 }
 
 func hasMethodKind(s *Spec, k MethodKind) bool {

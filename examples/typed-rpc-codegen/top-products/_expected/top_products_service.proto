@@ -50,8 +50,29 @@ message GetTopWindowManyResponse {
   repeated TopKItemList entries = 1;
 }
 
+message GetTopManyRequest {
+  repeated string category_ids = 1;
+}
+
+message GetTopManyResponse {
+  repeated TopKItemList entries = 1;
+  repeated bool present = 2;
+}
+
+message GetTopRangeRequest {
+  string category_id = 1;
+  int64 start_unix = 2;
+  int64 end_unix = 3;
+}
+
+message GetTopRangeResponse {
+  repeated TopKItem items = 1;
+}
+
 service TopProductsService {
   rpc GetTop(GetTopRequest) returns (GetTopResponse);
   rpc GetTopWindow(GetTopWindowRequest) returns (GetTopWindowResponse);
   rpc GetTopWindowMany(GetTopWindowManyRequest) returns (GetTopWindowManyResponse);
+  rpc GetTopMany(GetTopManyRequest) returns (GetTopManyResponse);
+  rpc GetTopRange(GetTopRangeRequest) returns (GetTopRangeResponse);
 }

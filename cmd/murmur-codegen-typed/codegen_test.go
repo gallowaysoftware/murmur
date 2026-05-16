@@ -149,7 +149,7 @@ func TestMethod_ValidateRejectsBadKeyTemplate(t *testing.T) {
 		KeyTemplate: "x:{undefined_field}",
 		Request:     []Field{{Name: "bot_id", Type: "string"}},
 	}
-	err := m.validate(PipelineSum)
+	err := m.validate()
 	if err == nil {
 		t.Fatal("validate: nil error, want failure on undefined template ref")
 	}
@@ -162,7 +162,7 @@ func TestMethod_ValidateRequiresWindowDurationField(t *testing.T) {
 		KeyTemplate: "x:{bot_id}",
 		Request:     []Field{{Name: "bot_id", Type: "string"}},
 	}
-	err := m.validate(PipelineSum)
+	err := m.validate()
 	if err == nil {
 		t.Fatal("validate: nil error, want window_duration_field requirement")
 	}
@@ -181,7 +181,7 @@ func TestMethod_ValidateGetWindowManyRequiresManyFieldRef(t *testing.T) {
 			{Name: "duration_seconds", Type: "int64"},
 		},
 	}
-	err := m.validate(PipelineSum)
+	err := m.validate()
 	if err == nil {
 		t.Fatal("validate: nil error, want failure when template omits the many field")
 	}
@@ -190,7 +190,11 @@ func TestMethod_ValidateGetWindowManyRequiresManyFieldRef(t *testing.T) {
 	}
 }
 
-func TestMethod_ValidateGetManyRejectsNonSumPipelineKind(t *testing.T) {
+// TestMethod_ValidateGetMany pins that get_many passes validation for
+// the shipped configuration; per-kind dispatch lives in the proto /
+// server templates rather than at validate time (the Sum-only gate was
+// lifted alongside the typed-client parity work).
+func TestMethod_ValidateGetMany(t *testing.T) {
 	m := Method{
 		Name:         "GetX",
 		Kind:         MethodGetMany,
@@ -198,13 +202,26 @@ func TestMethod_ValidateGetManyRejectsNonSumPipelineKind(t *testing.T) {
 		ManyKeyField: "ids",
 		Request:      []Field{{Name: "ids", Type: "repeated string"}},
 	}
-	for _, k := range []PipelineKind{PipelineHLL, PipelineTopK, PipelineBloom} {
-		if err := m.validate(k); err == nil {
-			t.Errorf("validate(%s): nil error, want sum-only restriction", k)
-		}
+	if err := m.validate(); err != nil {
+		t.Errorf("validate: %v, want nil — typed clients now cover get_many for every kind", err)
 	}
-	if err := m.validate(PipelineSum); err != nil {
-		t.Errorf("validate(sum): %v, want nil", err)
+}
+
+func TestMethod_ValidateGetRange(t *testing.T) {
+	m := Method{
+		Name:            "GetX",
+		Kind:            MethodGetRange,
+		KeyTemplate:     "x:{id}",
+		RangeStartField: "start_unix",
+		RangeEndField:   "end_unix",
+		Request: []Field{
+			{Name: "id", Type: "string"},
+			{Name: "start_unix", Type: "int64"},
+			{Name: "end_unix", Type: "int64"},
+		},
+	}
+	if err := m.validate(); err != nil {
+		t.Errorf("validate: %v, want nil — typed clients now cover get_range for every kind", err)
 	}
 }
 
@@ -215,7 +232,7 @@ func TestMethod_ValidateGetRangeRequiresStartEndFields(t *testing.T) {
 		KeyTemplate: "x:{id}",
 		Request:     []Field{{Name: "id", Type: "string"}},
 	}
-	if err := m.validate(PipelineSum); err == nil {
+	if err := m.validate(); err == nil {
 		t.Fatal("validate: nil error, want range_start_field requirement")
 	}
 }

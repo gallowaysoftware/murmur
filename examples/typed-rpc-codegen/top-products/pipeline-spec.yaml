@@ -50,3 +50,30 @@ service:
           type: repeated string
         - name: duration_seconds
           type: int64
+
+    # Batched all-time read with per-entity presence — delegates to
+    # typed.TopKClient.GetMany. Response wraps each entity's ranking in
+    # a TopKItemList plus a parallel present[] so callers can
+    # distinguish "no entries" from "category not seen yet".
+    - name: GetTopMany
+      kind: get_many
+      key_template: "category:{category_ids}"
+      many_key_field: category_ids
+      request:
+        - name: category_ids
+          type: repeated string
+
+    # Merged ranking over an absolute time range. Delegates to
+    # typed.TopKClient.GetRange; response is `repeated TopKItem items`.
+    - name: GetTopRange
+      kind: get_range
+      key_template: "category:{category_id}"
+      range_start_field: start_unix
+      range_end_field: end_unix
+      request:
+        - name: category_id
+          type: string
+        - name: start_unix
+          type: int64
+        - name: end_unix
+          type: int64
