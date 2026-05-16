@@ -6,11 +6,6 @@
 // aggregation pattern from the worked example: a single TopK sketch
 // fed by independent input streams, with the DDB store's CAS-retry
 // semantics keeping concurrent writers from clobbering each other.
-//
-// Skipped by default for the same reason as the other kafka-dependent
-// deployed-shape tests: worker container can join Kafka but doesn't
-// observe records produced via the host listener. Opt-in via
-// MURMUR_RUN_DEPLOYED_ROUNDTRIP=1.
 
 //go:build integration
 
@@ -19,7 +14,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -30,21 +24,18 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
+	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 	mddb "github.com/gallowaysoftware/murmur/pkg/state/dynamodb"
 )
 
 type interaction struct {
-	UserID string `json:"user_id"`
-	ItemID string `json:"item_id"`
-	Source string `json:"source"`
+	EntityID string `json:"entity_id"`
+	UserID   string `json:"user_id"`
+	Source   string `json:"source"`
 }
 
 func TestDeployed_RecentlyInteractedTopK_TwoSources(t *testing.T) {
-	if os.Getenv("MURMUR_RUN_DEPLOYED_ROUNDTRIP") == "" {
-		t.Skip("multi-source TopK round-trip skipped pending kafka sibling-network debugging; see TODO in test source")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -112,26 +103,31 @@ func TestDeployed_RecentlyInteractedTopK_TwoSources(t *testing.T) {
 
 	// Topic kafka: items A (heavy), B (light)
 	produceInteractions(t, ctx, producer, "interactions.kafka", []interaction{
-		{UserID: "u1", ItemID: "A", Source: "kafka"},
-		{UserID: "u2", ItemID: "A", Source: "kafka"},
-		{UserID: "u3", ItemID: "A", Source: "kafka"},
-		{UserID: "u4", ItemID: "A", Source: "kafka"},
-		{UserID: "u5", ItemID: "B", Source: "kafka"},
+		{UserID: "u1", EntityID: "A", Source: "kafka"},
+		{UserID: "u2", EntityID: "A", Source: "kafka"},
+		{UserID: "u3", EntityID: "A", Source: "kafka"},
+		{UserID: "u4", EntityID: "A", Source: "kafka"},
+		{UserID: "u5", EntityID: "B", Source: "kafka"},
 	})
 	// Topic kinesis: items A (more), C (only)
 	produceInteractions(t, ctx, producer, "interactions.kinesis", []interaction{
-		{UserID: "u6", ItemID: "A", Source: "kinesis"},
-		{UserID: "u7", ItemID: "A", Source: "kinesis"},
-		{UserID: "u8", ItemID: "C", Source: "kinesis"},
+		{UserID: "u6", EntityID: "A", Source: "kinesis"},
+		{UserID: "u7", EntityID: "A", Source: "kinesis"},
+		{UserID: "u8", EntityID: "C", Source: "kinesis"},
 	})
 	_ = producer.Flush(ctx)
 
 	// Expected merged top: A=6 (4 kafka + 2 kinesis), B=1, C=1.
-	// All three workers write to the same DDB row keyed by the
-	// pipeline's KeyBy function — typically "global" or per-bucket.
+	// The pipeline is Daily-windowed (per the example's pipeline.go),
+	// so the workers write to today's bucket — not bucket 0. Compute
+	// today's bucket ID with the same windowed.Daily config the
+	// workers use and read that key explicitly.
+	w := windowed.Daily(30 * 24 * time.Hour)
+	todayBucket := w.BucketID(time.Now())
+
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		raw, ok, err := store.Get(ctx, state.Key{Entity: "global"})
+		raw, ok, err := store.Get(ctx, state.Key{Entity: "global", Bucket: todayBucket})
 		if err != nil {
 			t.Fatalf("store Get: %v", err)
 		}
@@ -185,7 +181,7 @@ func produceInteractions(t *testing.T, ctx context.Context, p *kgo.Client, topic
 		body, _ := json.Marshal(e)
 		p.ProduceSync(ctx, &kgo.Record{
 			Topic: topic,
-			Key:   []byte(e.ItemID),
+			Key:   []byte(e.EntityID),
 			Value: body,
 		})
 	}
