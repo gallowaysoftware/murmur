@@ -204,8 +204,19 @@ func startDynamoDBLocal(ctx context.Context, t *testing.T, net *testcontainers.D
 		Image:        "amazon/dynamodb-local:latest",
 		ExposedPorts: []string{"8000/tcp"},
 		Cmd:          []string{"-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"},
-		WaitingFor:   wait.ForListeningPort("8000/tcp").WithStartupTimeout(60 * time.Second),
-		Networks:     []string{net.Name},
+		// Port-listen returns the moment Java binds the socket, which
+		// is BEFORE the SDK can complete a request — CI runners on
+		// busy Linux Docker hosts trip a "connection reset by peer"
+		// on the first CreateTable. Layer an HTTP probe on top: any
+		// response (DDB returns 400 on a bare GET) proves the server
+		// is actually accepting requests.
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("8000/tcp").WithStartupTimeout(60*time.Second),
+			wait.ForHTTP("/").WithPort("8000/tcp").
+				WithStatusCodeMatcher(func(int) bool { return true }).
+				WithStartupTimeout(30*time.Second),
+		),
+		Networks: []string{net.Name},
 		NetworkAliases: map[string][]string{
 			net.Name: {alias},
 		},
