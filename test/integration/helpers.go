@@ -117,6 +117,68 @@ func startKafka(ctx context.Context, t *testing.T, net *testcontainers.DockerNet
 	return
 }
 
+// startMongoReplset launches a single-node Mongo container in replset
+// mode (rs0) on the given network. Returns the in-container URI
+// (mongodb://<alias>:27017/?replicaSet=rs0&directConnection=true) and
+// the host-side URI (for the test process to seed data). Both reach
+// the same underlying Mongo. Cleanup registered.
+//
+// Initiating the replset requires running rs.initiate() after start;
+// done via an Exec into the container after Mongo's port is ready.
+func startMongoReplset(ctx context.Context, t *testing.T, net *testcontainers.DockerNetwork, alias string) (inContainerURI, hostURI string) {
+	t.Helper()
+
+	req := testcontainers.ContainerRequest{
+		Image:        "mongo:7",
+		ExposedPorts: []string{"27017/tcp"},
+		Cmd:          []string{"mongod", "--replSet", "rs0", "--bind_ip_all"},
+		Networks:     []string{net.Name},
+		NetworkAliases: map[string][]string{
+			net.Name: {alias},
+		},
+		WaitingFor: wait.ForListeningPort("27017/tcp").WithStartupTimeout(60 * time.Second),
+	}
+	mc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	if err != nil {
+		t.Fatalf("mongo start: %v", err)
+	}
+	t.Cleanup(func() { _ = mc.Terminate(context.Background()) })
+
+	// rs.initiate. The replSet member's `host` must match what
+	// connectors will use to dial — for sibling containers this is
+	// <alias>:27017; for the test process it's host:<mapped-port>.
+	// We initiate with the in-network address since both bootstrap
+	// (test process via directConnection bypass) and live worker
+	// reach Mongo, and Change Streams require a replset to be
+	// initiated regardless of how the client connects.
+	initCmd := []string{"mongosh", "--quiet", "--eval",
+		fmt.Sprintf(`rs.initiate({_id:"rs0",members:[{_id:0,host:"%s:27017"}]})`, alias)}
+	// Retry a few times — mongod can take a moment after the port
+	// opens before accepting commands.
+	var lastErr error
+	for range 5 {
+		ec, _, err := mc.Exec(ctx, initCmd)
+		if err == nil && ec == 0 {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		time.Sleep(time.Second)
+	}
+	if lastErr != nil {
+		t.Fatalf("mongo rs.initiate: %v", lastErr)
+	}
+
+	host, _ := mc.Host(ctx)
+	port, _ := mc.MappedPort(ctx, "27017/tcp")
+	hostURI = fmt.Sprintf("mongodb://%s:%s/?replicaSet=rs0&directConnection=true", host, port.Port())
+	inContainerURI = fmt.Sprintf("mongodb://%s:27017/?replicaSet=rs0&directConnection=true", alias)
+	return
+}
+
 // network_alias attaches the given network + alias to a container
 // request. Used by startKafka (via the kafka module's customizer
 // interface) and other helpers.
