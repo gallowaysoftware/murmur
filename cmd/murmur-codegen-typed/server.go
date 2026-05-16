@@ -33,6 +33,8 @@ func renderServer(s *Spec) ([]byte, error) {
 		"clientCtor":           clientCtor,
 		"buildResponse":        buildResponse,
 		"buildResponseMany":    buildResponseMany,
+		"buildResponseGetMany": buildResponseGetMany,
+		"buildResponseRange":   buildResponseRange,
 		"goPkgName":            goPkgName,
 		"protoPkgAlias":        protoPkgAlias,
 		"isTopK":               func(k PipelineKind) bool { return k == PipelineTopK },
@@ -113,10 +115,7 @@ func (s *{{$.Service.Name}}Server) {{$m.Name}}(ctx context.Context, req *connect
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.{{$m.Name}}Response{
-		Values:  values,
-		Present: present,
-	}), nil
+{{buildResponseGetMany $.Service.PipelineKind $m.Name}}
 {{- else if eq $m.Kind "get_range"}}
 	key := {{renderKey $m}}
 	start := time.Unix(msg.{{goFieldName $m.RangeStartField}}, 0)
@@ -125,9 +124,7 @@ func (s *{{$.Service.Name}}Server) {{$m.Name}}(ctx context.Context, req *connect
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&pb.{{$m.Name}}Response{
-		Value: val,
-	}), nil
+{{buildResponseRange $.Service.PipelineKind $m.Name}}
 {{- else}}
 	key := {{renderKey $m}}
 {{- if eq $m.Kind "get_all_time"}}
@@ -278,6 +275,95 @@ func buildResponseMany(k PipelineKind, methodName string) string {
 	}
 	return connect.NewResponse(&%s{
 		Entries: entries,
+	}), nil`, respType)
+	default:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{}), nil`, respType)
+	}
+}
+
+// buildResponseGetMany returns the Go statement(s) that construct and
+// return the get_many response for a method, per pipeline kind. The
+// locals `values` and `present` come from the typed-client GetMany
+// call: `values` is whatever the per-kind client returns ([]int64 for
+// Sum, []HLLValue for HLL, [][]TopKItem for TopK, []BloomValue for
+// Bloom), and `present` is the parallel []bool.
+func buildResponseGetMany(k PipelineKind, methodName string) string {
+	respType := "pb." + methodName + "Response"
+	switch k {
+	case PipelineSum:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Values:  values,
+		Present: present,
+	}), nil`, respType)
+	case PipelineHLL:
+		return fmt.Sprintf(`	out := make([]int64, len(values))
+	for i, v := range values {
+		out[i] = int64(v.Cardinality)
+	}
+	return connect.NewResponse(&%s{
+		Values:  out,
+		Present: present,
+	}), nil`, respType)
+	case PipelineTopK:
+		return fmt.Sprintf(`	entries := make([]*pb.TopKItemList, len(values))
+	for i, v := range values {
+		items := make([]*pb.TopKItem, len(v))
+		for j, it := range v {
+			items[j] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+		}
+		entries[i] = &pb.TopKItemList{Items: items}
+	}
+	return connect.NewResponse(&%s{
+		Entries: entries,
+		Present: present,
+	}), nil`, respType)
+	case PipelineBloom:
+		return fmt.Sprintf(`	entries := make([]*pb.BloomShape, len(values))
+	for i, v := range values {
+		entries[i] = &pb.BloomShape{
+			CapacityBits:  int64(v.CapacityBits),
+			HashFunctions: int32(v.HashFunctions),
+			ApproxSize:    int64(v.ApproxSize),
+		}
+	}
+	return connect.NewResponse(&%s{
+		Entries: entries,
+		Present: present,
+	}), nil`, respType)
+	default:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{}), nil`, respType)
+	}
+}
+
+// buildResponseRange returns the Go statement(s) that construct and
+// return the get_range response for a method, per pipeline kind. The
+// local `val` is whatever the typed-client GetRange returned (int64
+// for Sum, HLLValue for HLL, []TopKItem for TopK, BloomValue for
+// Bloom).
+func buildResponseRange(k PipelineKind, methodName string) string {
+	respType := "pb." + methodName + "Response"
+	switch k {
+	case PipelineSum:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Value: val,
+	}), nil`, respType)
+	case PipelineHLL:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		Value: int64(val.Cardinality),
+	}), nil`, respType)
+	case PipelineTopK:
+		return fmt.Sprintf(`	items := make([]*pb.TopKItem, len(val))
+	for i, it := range val {
+		items[i] = &pb.TopKItem{Key: it.Key, Count: int64(it.Count)}
+	}
+	return connect.NewResponse(&%s{
+		Items: items,
+	}), nil`, respType)
+	case PipelineBloom:
+		return fmt.Sprintf(`	return connect.NewResponse(&%s{
+		CapacityBits:  int64(val.CapacityBits),
+		HashFunctions: int32(val.HashFunctions),
+		ApproxSize:    int64(val.ApproxSize),
 	}), nil`, respType)
 	default:
 		return fmt.Sprintf(`	return connect.NewResponse(&%s{}), nil`, respType)

@@ -255,6 +255,68 @@ func (c *HLLClient) GetWindow(ctx context.Context, entity string, duration time.
 	return HLLValue{Cardinality: est, ByteLen: len(data)}, nil
 }
 
+// GetMany batches Get for many entities (all-time, non-windowed).
+// Order matches input order; missing entities return a zero-valued
+// HLLValue plus the corresponding bool false in the present slice.
+// Use this when you need to distinguish "absent" from "present-and-empty"
+// — GetWindowMany cannot, since the underlying generic RPC returns the
+// merged value without a per-entity present flag.
+func (c *HLLClient) GetMany(ctx context.Context, entities []string, opts ...Option) ([]HLLValue, []bool, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetMany(ctx, connect.NewRequest(&pb.GetManyRequest{
+		Entities: entities, FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return nil, nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([]HLLValue, len(entities))
+	present := make([]bool, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		if !v.GetPresent() {
+			continue
+		}
+		data := v.GetData()
+		est, err := hll.Estimate(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("typed HLL[%d] decode: %w", i, err)
+		}
+		out[i] = HLLValue{Cardinality: est, ByteLen: len(data)}
+		present[i] = true
+	}
+	return out, present, nil
+}
+
+// GetRange returns the cardinality estimate over the absolute time
+// range [start, end] for the given entity. Pipeline must be windowed.
+// The server merges the buckets falling in range via HLL union before
+// the estimate is taken, so the result is the merged cardinality, not
+// the sum of per-bucket cardinalities.
+func (c *HLLClient) GetRange(ctx context.Context, entity string, start, end time.Time, opts ...Option) (HLLValue, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetRange(ctx, connect.NewRequest(&pb.GetRangeRequest{
+		Entity:    entity,
+		StartUnix: start.Unix(),
+		EndUnix:   end.Unix(),
+		FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return HLLValue{}, err
+	}
+	data := resp.Msg.GetValue().GetData()
+	if len(data) == 0 {
+		return HLLValue{}, nil
+	}
+	est, err := hll.Estimate(data)
+	if err != nil {
+		return HLLValue{}, fmt.Errorf("typed HLL decode: %w", err)
+	}
+	return HLLValue{Cardinality: est, ByteLen: len(data)}, nil
+}
+
 // GetWindowMany is the batched analog of GetWindow — fetches windowed
 // cardinalities for N entities in one round-trip. Returns parallel
 // arrays: out[i] is the cardinality estimate for entities[i]; missing
@@ -346,6 +408,72 @@ func (c *TopKClient) GetWindow(ctx context.Context, entity string, duration time
 		return nil, err
 	}
 	items, err := topk.Items(resp.Msg.GetValue().GetData())
+	if err != nil {
+		return nil, fmt.Errorf("typed TopK decode: %w", err)
+	}
+	out := make([]TopKItem, len(items))
+	for i, it := range items {
+		out[i] = TopKItem{Key: it.Key, Count: it.Count}
+	}
+	return out, nil
+}
+
+// GetMany batches Get for many entities (all-time, non-windowed).
+// Order matches input order; missing entities return a nil slice plus
+// the corresponding bool false in the present slice.
+func (c *TopKClient) GetMany(ctx context.Context, entities []string, opts ...Option) ([][]TopKItem, []bool, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetMany(ctx, connect.NewRequest(&pb.GetManyRequest{
+		Entities: entities, FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return nil, nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([][]TopKItem, len(entities))
+	present := make([]bool, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		if !v.GetPresent() {
+			continue
+		}
+		items, err := topk.Items(v.GetData())
+		if err != nil {
+			return nil, nil, fmt.Errorf("typed TopK[%d] decode: %w", i, err)
+		}
+		entry := make([]TopKItem, len(items))
+		for j, it := range items {
+			entry[j] = TopKItem{Key: it.Key, Count: it.Count}
+		}
+		out[i] = entry
+		present[i] = true
+	}
+	return out, present, nil
+}
+
+// GetRange returns the ranked top-K items over the absolute time range
+// [start, end] for the given entity. Pipeline must be windowed. The
+// server merges per-bucket Misra-Gries summaries before returning, so
+// the ranking reflects merged-summary order — not a simple union of
+// per-bucket rankings.
+func (c *TopKClient) GetRange(ctx context.Context, entity string, start, end time.Time, opts ...Option) ([]TopKItem, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetRange(ctx, connect.NewRequest(&pb.GetRangeRequest{
+		Entity:    entity,
+		StartUnix: start.Unix(),
+		EndUnix:   end.Unix(),
+		FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	data := resp.Msg.GetValue().GetData()
+	if len(data) == 0 {
+		return nil, nil
+	}
+	items, err := topk.Items(data)
 	if err != nil {
 		return nil, fmt.Errorf("typed TopK decode: %w", err)
 	}
@@ -449,6 +577,72 @@ func (c *BloomClient) GetWindow(ctx context.Context, entity string, duration tim
 	o := applyOpts(opts)
 	resp, err := c.inner.GetWindow(ctx, connect.NewRequest(&pb.GetWindowRequest{
 		Entity: entity, DurationSeconds: int64(duration / time.Second), FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return BloomValue{}, err
+	}
+	data := resp.Msg.GetValue().GetData()
+	if len(data) == 0 {
+		return BloomValue{}, nil
+	}
+	capacity, hashes, approxSize, err := bloom.Inspect(data)
+	if err != nil {
+		return BloomValue{}, fmt.Errorf("typed Bloom decode: %w", err)
+	}
+	return BloomValue{
+		CapacityBits:  capacity,
+		HashFunctions: hashes,
+		ApproxSize:    approxSize,
+	}, nil
+}
+
+// GetMany batches Get for many entities (all-time, non-windowed).
+// Order matches input order; missing entities yield a zero-valued
+// BloomValue with the corresponding bool false in the present slice.
+func (c *BloomClient) GetMany(ctx context.Context, entities []string, opts ...Option) ([]BloomValue, []bool, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetMany(ctx, connect.NewRequest(&pb.GetManyRequest{
+		Entities: entities, FreshRead: o.freshRead,
+	}))
+	if err != nil {
+		return nil, nil, err
+	}
+	values := resp.Msg.GetValues()
+	out := make([]BloomValue, len(entities))
+	present := make([]bool, len(entities))
+	for i, v := range values {
+		if i >= len(out) {
+			break
+		}
+		if !v.GetPresent() {
+			continue
+		}
+		capacity, hashes, approxSize, err := bloom.Inspect(v.GetData())
+		if err != nil {
+			return nil, nil, fmt.Errorf("typed Bloom[%d] decode: %w", i, err)
+		}
+		out[i] = BloomValue{
+			CapacityBits:  capacity,
+			HashFunctions: hashes,
+			ApproxSize:    approxSize,
+		}
+		present[i] = true
+	}
+	return out, present, nil
+}
+
+// GetRange returns the merged Bloom-filter shape over the absolute time
+// range [start, end] for the given entity. Pipeline must be windowed.
+// CapacityBits and HashFunctions reflect the per-bucket filter shape
+// (stable filter-construction constants); ApproxSize is the union over
+// the buckets in range.
+func (c *BloomClient) GetRange(ctx context.Context, entity string, start, end time.Time, opts ...Option) (BloomValue, error) {
+	o := applyOpts(opts)
+	resp, err := c.inner.GetRange(ctx, connect.NewRequest(&pb.GetRangeRequest{
+		Entity:    entity,
+		StartUnix: start.Unix(),
+		EndUnix:   end.Unix(),
+		FreshRead: o.freshRead,
 	}))
 	if err != nil {
 		return BloomValue{}, err

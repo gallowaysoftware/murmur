@@ -190,7 +190,7 @@ func TestMethod_ValidateGetWindowManyRequiresManyFieldRef(t *testing.T) {
 	}
 }
 
-func TestMethod_ValidateGetManyRejectsNonSumPipelineKind(t *testing.T) {
+func TestMethod_ValidateGetManyAcceptsAllPipelineKinds(t *testing.T) {
 	m := Method{
 		Name:         "GetX",
 		Kind:         MethodGetMany,
@@ -198,13 +198,30 @@ func TestMethod_ValidateGetManyRejectsNonSumPipelineKind(t *testing.T) {
 		ManyKeyField: "ids",
 		Request:      []Field{{Name: "ids", Type: "repeated string"}},
 	}
-	for _, k := range []PipelineKind{PipelineHLL, PipelineTopK, PipelineBloom} {
-		if err := m.validate(k); err == nil {
-			t.Errorf("validate(%s): nil error, want sum-only restriction", k)
+	for _, k := range []PipelineKind{PipelineSum, PipelineHLL, PipelineTopK, PipelineBloom} {
+		if err := m.validate(k); err != nil {
+			t.Errorf("validate(%s): %v, want nil — typed clients now cover get_many for every kind", k, err)
 		}
 	}
-	if err := m.validate(PipelineSum); err != nil {
-		t.Errorf("validate(sum): %v, want nil", err)
+}
+
+func TestMethod_ValidateGetRangeAcceptsAllPipelineKinds(t *testing.T) {
+	m := Method{
+		Name:            "GetX",
+		Kind:            MethodGetRange,
+		KeyTemplate:     "x:{id}",
+		RangeStartField: "start_unix",
+		RangeEndField:   "end_unix",
+		Request: []Field{
+			{Name: "id", Type: "string"},
+			{Name: "start_unix", Type: "int64"},
+			{Name: "end_unix", Type: "int64"},
+		},
+	}
+	for _, k := range []PipelineKind{PipelineSum, PipelineHLL, PipelineTopK, PipelineBloom} {
+		if err := m.validate(k); err != nil {
+			t.Errorf("validate(%s): %v, want nil — typed clients now cover get_range for every kind", k, err)
+		}
 	}
 }
 

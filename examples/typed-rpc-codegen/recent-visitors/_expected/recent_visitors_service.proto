@@ -38,7 +38,30 @@ message GetFilterShapeWindowManyResponse {
   repeated BloomShape entries = 1;
 }
 
+message GetFilterShapeManyRequest {
+  repeated string campaign_ids = 1;
+}
+
+message GetFilterShapeManyResponse {
+  repeated BloomShape entries = 1;
+  repeated bool present = 2;
+}
+
+message GetFilterShapeRangeRequest {
+  string campaign_id = 1;
+  int64 start_unix = 2;
+  int64 end_unix = 3;
+}
+
+message GetFilterShapeRangeResponse {
+  int64 capacity_bits = 1;
+  int32 hash_functions = 2;
+  int64 approx_size = 3;
+}
+
 service RecentVisitorsService {
   rpc GetFilterShape(GetFilterShapeRequest) returns (GetFilterShapeResponse);
   rpc GetFilterShapeWindowMany(GetFilterShapeWindowManyRequest) returns (GetFilterShapeWindowManyResponse);
+  rpc GetFilterShapeMany(GetFilterShapeManyRequest) returns (GetFilterShapeManyResponse);
+  rpc GetFilterShapeRange(GetFilterShapeRangeRequest) returns (GetFilterShapeRangeResponse);
 }

@@ -78,3 +78,51 @@ func (s *RecentVisitorsServiceServer) GetFilterShapeWindowMany(ctx context.Conte
 		Entries: entries,
 	}), nil
 }
+
+// GetFilterShapeMany implements the GetFilterShapeMany RPC.
+func (s *RecentVisitorsServiceServer) GetFilterShapeMany(ctx context.Context, req *connect.Request[pb.GetFilterShapeManyRequest]) (*connect.Response[pb.GetFilterShapeManyResponse], error) {
+	msg := req.Msg
+	if len(msg.CampaignIds) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("campaign_ids is required"))
+	}
+	keys := make([]string, len(msg.CampaignIds))
+	for i, v := range msg.CampaignIds {
+		keys[i] = fmt.Sprintf("campaign:%s", v)
+	}
+	values, present, err := s.client.GetMany(ctx, keys)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	entries := make([]*pb.BloomShape, len(values))
+	for i, v := range values {
+		entries[i] = &pb.BloomShape{
+			CapacityBits:  int64(v.CapacityBits),
+			HashFunctions: int32(v.HashFunctions),
+			ApproxSize:    int64(v.ApproxSize),
+		}
+	}
+	return connect.NewResponse(&pb.GetFilterShapeManyResponse{
+		Entries: entries,
+		Present: present,
+	}), nil
+}
+
+// GetFilterShapeRange implements the GetFilterShapeRange RPC.
+func (s *RecentVisitorsServiceServer) GetFilterShapeRange(ctx context.Context, req *connect.Request[pb.GetFilterShapeRangeRequest]) (*connect.Response[pb.GetFilterShapeRangeResponse], error) {
+	msg := req.Msg
+	if strings.TrimSpace(msg.CampaignId) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("campaign_id is required"))
+	}
+	key := fmt.Sprintf("campaign:%s", msg.CampaignId)
+	start := time.Unix(msg.StartUnix, 0)
+	end := time.Unix(msg.EndUnix, 0)
+	val, err := s.client.GetRange(ctx, key, start, end)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&pb.GetFilterShapeRangeResponse{
+		CapacityBits:  int64(val.CapacityBits),
+		HashFunctions: int32(val.HashFunctions),
+		ApproxSize:    int64(val.ApproxSize),
+	}), nil
+}
