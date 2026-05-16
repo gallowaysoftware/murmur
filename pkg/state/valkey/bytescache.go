@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valkey-io/valkey-go"
+	rueidis "github.com/redis/rueidis"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/state"
@@ -49,7 +49,7 @@ import (
 // runtime-incompatible encoding choice; native Valkey acceleration is a
 // future Phase 3 on top of the same interface.
 type BytesCache struct {
-	client    valkey.Client
+	client    rueidis.Client
 	keyPrefix string
 	monoid    monoid.Monoid[[]byte]
 }
@@ -68,8 +68,8 @@ type BytesConfig struct {
 	// store boundary.
 	Monoid monoid.Monoid[[]byte]
 
-	// Extra lets callers append additional valkey-go options (TLS, auth, etc).
-	Extra []valkey.ClientOption
+	// Extra lets callers append additional rueidis options (TLS, auth, etc).
+	Extra []rueidis.ClientOption
 }
 
 // NewBytesCache constructs a BytesCache. The returned Cache owns the
@@ -81,11 +81,11 @@ func NewBytesCache(cfg BytesConfig) (*BytesCache, error) {
 	if cfg.Monoid == nil {
 		return nil, errors.New("valkey BytesCache: Monoid is required")
 	}
-	opts := valkey.ClientOption{InitAddress: []string{cfg.Address}}
+	opts := rueidis.ClientOption{InitAddress: []string{cfg.Address}}
 	if cfg.Address == "" {
 		opts.InitAddress = []string{"localhost:6379"}
 	}
-	client, err := valkey.NewClient(opts)
+	client, err := rueidis.NewClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("valkey new client: %w", err)
 	}
@@ -97,7 +97,7 @@ func (c *BytesCache) Get(ctx context.Context, k state.Key) ([]byte, bool, error)
 	key := c.cacheKey(k)
 	resp := c.client.Do(ctx, c.client.B().Get().Key(key).Build())
 	if resp.Error() != nil {
-		if valkey.IsValkeyNil(resp.Error()) {
+		if rueidis.IsRedisNil(resp.Error()) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("valkey GET %s: %w", key, resp.Error())

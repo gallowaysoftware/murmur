@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valkey-io/valkey-go"
+	rueidis "github.com/redis/rueidis"
 
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
@@ -64,7 +64,7 @@ import (
 // Cache keys are "<keyPrefix>:<entity>:<bucket>" — same scheme as
 // Int64Cache / BytesCache / HLLCache.
 type BloomCache struct {
-	client          valkey.Client
+	client          rueidis.Client
 	keyPrefix       string
 	defaultCapacity int64
 	defaultError    float64
@@ -98,8 +98,8 @@ type BloomConfig struct {
 	// for production usage.
 	AutoReserve bool
 
-	// Extra lets callers append additional valkey-go options (TLS, auth, etc).
-	Extra []valkey.ClientOption
+	// Extra lets callers append additional rueidis options (TLS, auth, etc).
+	Extra []rueidis.ClientOption
 }
 
 // NewBloomCache constructs a BloomCache. The returned cache owns the
@@ -114,11 +114,11 @@ func NewBloomCache(cfg BloomConfig) (*BloomCache, error) {
 	if cfg.DefaultErrorRate == 0 {
 		cfg.DefaultErrorRate = 0.01
 	}
-	opts := valkey.ClientOption{InitAddress: []string{cfg.Address}}
+	opts := rueidis.ClientOption{InitAddress: []string{cfg.Address}}
 	if cfg.Address == "" {
 		opts.InitAddress = []string{"localhost:6379"}
 	}
-	client, err := valkey.NewClient(opts)
+	client, err := rueidis.NewClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("valkey new client: %w", err)
 	}
@@ -161,7 +161,7 @@ func (c *BloomCache) Reserve(ctx context.Context, k state.Key, capacity int64, e
 // of truth) but should be logged and counted via metrics.
 func (c *BloomCache) Add(ctx context.Context, k state.Key, element []byte, ttl time.Duration) (bool, error) {
 	key := c.cacheKey(k)
-	var resp valkey.ValkeyResult
+	var resp rueidis.RedisResult
 	if c.autoReserve {
 		// BF.INSERT auto-creates the filter at our preferred shape, then
 		// adds the element. One round-trip; one path; no race with a
@@ -198,7 +198,7 @@ func (c *BloomCache) AddMany(ctx context.Context, k state.Key, elements [][]byte
 	for i, e := range elements {
 		strs[i] = string(e)
 	}
-	var resp valkey.ValkeyResult
+	var resp rueidis.RedisResult
 	if c.autoReserve {
 		resp = c.client.Do(ctx, c.client.B().BfInsert().Key(key).
 			Capacity(c.defaultCapacity).
@@ -317,7 +317,7 @@ func (c *BloomCache) cacheKey(k state.Key) string {
 // the single integer response shape that BF.ADD may return) and treats
 // non-zero as true. BF.ADD returns either 0 or 1; BF.INSERT returns an
 // array of ints.
-func firstBool(r valkey.ValkeyResult) (bool, error) {
+func firstBool(r rueidis.RedisResult) (bool, error) {
 	arr, err := r.ToArray()
 	if err == nil {
 		if len(arr) == 0 {
@@ -336,7 +336,7 @@ func firstBool(r valkey.ValkeyResult) (bool, error) {
 	return n != 0, nil
 }
 
-func boolArray(r valkey.ValkeyResult) ([]bool, error) {
+func boolArray(r rueidis.RedisResult) ([]bool, error) {
 	arr, err := r.ToArray()
 	if err != nil {
 		return nil, err

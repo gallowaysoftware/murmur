@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valkey-io/valkey-go"
+	rueidis "github.com/redis/rueidis"
 
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
@@ -27,7 +27,7 @@ import (
 // at the Valkey side); Get / GetMany use GET / MGET. The cache key encodes the (entity,
 // bucket) pair as "<keyPrefix>:<entity>:<bucket>".
 type Int64Cache struct {
-	client    valkey.Client
+	client    rueidis.Client
 	keyPrefix string
 }
 
@@ -41,8 +41,8 @@ type Config struct {
 	// multiple pipelines to share a Valkey instance without colliding.
 	KeyPrefix string
 
-	// Extra lets callers append additional valkey-go options.
-	Extra []valkey.ClientOption
+	// Extra lets callers append additional rueidis options.
+	Extra []rueidis.ClientOption
 }
 
 // NewInt64Cache constructs an Int64Cache. The returned Cache owns the underlying client;
@@ -51,13 +51,13 @@ func NewInt64Cache(cfg Config) (*Int64Cache, error) {
 	if cfg.KeyPrefix == "" {
 		return nil, errors.New("valkey int64cache: KeyPrefix is required")
 	}
-	opts := valkey.ClientOption{
+	opts := rueidis.ClientOption{
 		InitAddress: []string{cfg.Address},
 	}
 	if cfg.Address == "" {
 		opts.InitAddress = []string{"localhost:6379"}
 	}
-	client, err := valkey.NewClient(opts)
+	client, err := rueidis.NewClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("valkey new client: %w", err)
 	}
@@ -69,8 +69,8 @@ func (c *Int64Cache) Get(ctx context.Context, k state.Key) (int64, bool, error) 
 	key := c.cacheKey(k)
 	resp := c.client.Do(ctx, c.client.B().Get().Key(key).Build())
 	if resp.Error() != nil {
-		// valkey-go returns Nil error for missing keys.
-		if valkey.IsValkeyNil(resp.Error()) {
+		// rueidis returns Nil error for missing keys.
+		if rueidis.IsRedisNil(resp.Error()) {
 			return 0, false, nil
 		}
 		return 0, false, fmt.Errorf("valkey GET %s: %w", key, resp.Error())

@@ -30,7 +30,7 @@ func newBloomCache(t *testing.T, prefix string) *mvalkey.BloomCache {
 
 // skipIfNoBloomModule short-circuits the test when the connected Valkey
 // instance doesn't have the BF.* module loaded. The error shape from
-// valkey-go on an unknown command is "ERR unknown command 'BF.ADD'" or
+// rueidis on an unknown command is "ERR unknown command 'BF.ADD'" or
 // similar; we detect that as a skip rather than a failure so the test
 // suite still passes against vanilla Valkey (without valkey-bloom) used
 // by some users.

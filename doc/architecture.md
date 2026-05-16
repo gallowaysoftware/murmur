@@ -298,7 +298,7 @@ These are the load-bearing files where architectural decisions live and where mo
 - [aws/aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) — AWS SDK
 - [aws/aws-lambda-go](https://github.com/aws/aws-lambda-go) — Lambda event types (`events.KinesisEvent`, `events.DynamoDBEvent`, `events.SQSEvent`) and `lambda.Start` entry point
 - [twmb/franz-go](https://github.com/twmb/franz-go) — Kafka client
-- [valkey-io/valkey-go](https://github.com/valkey-io/valkey-go) — Valkey client (Valkey-native, also Redis-protocol-compatible)
+- [redis/rueidis](https://github.com/redis/rueidis) — Valkey / Redis client. Same author / API as `valkey-io/valkey-go` (the latter is a Valkey-branded fork); rueidis is the upstream and gets new commands first
 - [pequalsnp/spark-connect-go](https://github.com/pequalsnp/spark-connect-go) — Kyle's fork; production-validated at GSS. Upstream is `apache/spark-connect-go` (community-supported in Spark 4.0)
 - [mongodb/mongo-go-driver](https://github.com/mongodb/mongo-go-driver) — Mongo driver for snapshot source
 - [grpc-ecosystem/grpc-gateway](https://github.com/grpc-ecosystem/grpc-gateway) — HTTP/JSON gateway (Phase 2)

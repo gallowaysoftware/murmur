@@ -1733,10 +1733,13 @@ Valkey 8 Bloom-filter primitive natively, and has an actively-maintained
 Linux Foundation governance model. There's no reason to ship with
 Redis as the default.
 
-The `valkey-io/valkey-go` client is the import; its API is similar to
-the popular Redis Go clients. The framework doesn't expose
-client-specific features, so swapping to a Redis-protocol client (if
-some user has a hard requirement) is mechanical.
+The `redis/rueidis` client is the import — same author and API as
+`valkey-io/valkey-go` (which is a Valkey-branded fork of rueidis).
+rueidis is the upstream and gets new commands first, which matters
+for module-backed primitives like BF.* (valkey-bloom / RedisBloom).
+The framework doesn't expose client-specific features, so swapping
+to a different Redis-protocol client (if some user has a hard
+requirement) is mechanical.
 
 ### 7.7 Cache write-through and read fall-through
 
