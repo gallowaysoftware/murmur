@@ -99,10 +99,10 @@ func TestAuth_RejectsMalformedHeader(t *testing.T) {
 	defer hs.Close()
 
 	for _, h := range []string{
-		"real-token",      // no scheme
-		"Basic abc",       // wrong scheme
-		"Bearer ",         // empty token
-		"Bearer\treal",    // tab separator (the prefix is "bearer " exact)
+		"real-token",   // no scheme
+		"Basic abc",    // wrong scheme
+		"Bearer ",      // empty token
+		"Bearer\treal", // tab separator (the prefix is "bearer " exact)
 	} {
 		req, _ := http.NewRequest(http.MethodPost,
 			hs.URL+"/murmur.admin.v1.AdminService/Health",
