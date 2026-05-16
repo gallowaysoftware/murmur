@@ -185,6 +185,19 @@ curl -X POST http://localhost:8080/api/murmur.admin.v1.AdminService/ListPipeline
 # → {"pipelines":[{"name":"page_views","monoidKind":"sum",...}, ...]}
 ```
 
+## Contributing
+
+PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+local-setup, development-loop, PR-process, and what-we-push-back-on
+guides. The repo follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md);
+report conduct issues to `conduct@gallowaysoftware.ca` and security
+issues to `security@gallowaysoftware.ca` (see [`SECURITY.md`](SECURITY.md)).
+
+For first-time orientation, [`AGENTS.md`](AGENTS.md) is the
+canonical project guide (same content as `CLAUDE.md`, vendor-neutral
+[agents.md](https://agents.md) convention). For "which monoid /
+runtime fits my problem," start at [`doc/use-cases.md`](doc/use-cases.md).
+
 ## License
 
 Apache 2.0.
