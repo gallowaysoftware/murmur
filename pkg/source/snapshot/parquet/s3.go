@@ -55,12 +55,12 @@ type Partition struct {
 	Values map[string]string
 }
 
-// PartitionFilter, when non-nil on Config, is invoked once per
-// discovered object. Return false to skip the object entirely (no
-// GetObject, no decode). Use this to prune whole partitions by
-// time-range without listing them out of S3 (S3 ListObjectsV2 is
-// already filtered by prefix, but Hive partitioning typically wants
-// finer-grained pruning).
+// PartitionFilter is invoked once per discovered object when non-nil
+// on Config. Return false to skip the object entirely (no GetObject,
+// no decode). Use this to prune whole partitions by time-range
+// without listing them out of S3 (S3 ListObjectsV2 is already
+// filtered by prefix, but Hive partitioning typically wants finer-
+// grained pruning).
 type PartitionFilter func(p Partition) bool
 
 // S3Config configures an S3-prefix Parquet snapshot Source.

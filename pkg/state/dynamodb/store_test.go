@@ -187,8 +187,8 @@ func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case target == "DynamoDB_20120810.BatchGetItem":
+	switch target {
+	case "DynamoDB_20120810.BatchGetItem":
 		inv := int(f.batchGetCalls.Add(1))
 		var req ddbReq
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -204,7 +204,7 @@ func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			Header:     http.Header{"Content-Type": []string{"application/x-amz-json-1.0"}},
 			Body:       io.NopCloser(bytes.NewReader(buf)),
 		}, nil
-	case target == "DynamoDB_20120810.GetItem":
+	case "DynamoDB_20120810.GetItem":
 		f.getItemCalls.Add(1)
 	default:
 		f.otherCalls.Add(1)

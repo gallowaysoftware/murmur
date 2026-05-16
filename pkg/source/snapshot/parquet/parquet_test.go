@@ -28,7 +28,7 @@ type countEvent struct {
 	Day, Hour        int32
 }
 
-func decodeCountEvent(rec arrow.Record, row int) (countEvent, error) {
+func decodeCountEvent(rec arrow.RecordBatch, row int) (countEvent, error) {
 	sc := rec.Schema()
 	var e countEvent
 
@@ -142,7 +142,7 @@ func buildCountEventParquet(t *testing.T, events []countEvent, compression pqcom
 	hourArr := hourB.NewArray()
 	defer hourArr.Release()
 
-	rec := array.NewRecord(sc, []arrow.Array{entityArr, countArr, tsArr, yearArr, monthArr, dayArr, hourArr}, int64(len(events)))
+	rec := array.NewRecordBatch(sc, []arrow.Array{entityArr, countArr, tsArr, yearArr, monthArr, dayArr, hourArr}, int64(len(events)))
 	defer rec.Release()
 
 	props := pqlib.NewWriterProperties(pqlib.WithCompression(compression))
@@ -153,8 +153,8 @@ func buildCountEventParquet(t *testing.T, events []countEvent, compression pqcom
 	return buf.Bytes()
 }
 
-func arrowTableFromRecord(rec arrow.Record) arrow.Table {
-	return array.NewTableFromRecords(rec.Schema(), []arrow.Record{rec})
+func arrowTableFromRecord(rec arrow.RecordBatch) arrow.Table {
+	return array.NewTableFromRecords(rec.Schema(), []arrow.RecordBatch{rec})
 }
 
 func collect[T any](t *testing.T, ctx context.Context, src *parquet.Source[T]) []source.Record[T] {
@@ -325,7 +325,7 @@ func TestScan_DecodeErrorCallback(t *testing.T) {
 	src, _ := parquet.NewSource(parquet.Config[countEvent]{
 		Reader: bytes.NewReader(body),
 		Name:   "f",
-		Decode: func(rec arrow.Record, row int) (countEvent, error) {
+		Decode: func(rec arrow.RecordBatch, row int) (countEvent, error) {
 			// Fail on the second row.
 			if row == 1 {
 				return countEvent{}, errors.New("synthetic poison row")
@@ -357,11 +357,11 @@ func TestScan_MissingRequiredColumnError(t *testing.T) {
 	b.Append("a")
 	arr := b.NewArray()
 	defer arr.Release()
-	rec := array.NewRecord(sc, []arrow.Array{arr}, 1)
+	rec := array.NewRecordBatch(sc, []arrow.Array{arr}, 1)
 	defer rec.Release()
 
 	var buf bytes.Buffer
-	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.Record{rec}), &buf, 1, nil, pqarrow.DefaultWriterProps()); err != nil {
+	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.RecordBatch{rec}), &buf, 1, nil, pqarrow.DefaultWriterProps()); err != nil {
 		t.Fatalf("WriteTable: %v", err)
 	}
 
@@ -398,7 +398,7 @@ func TestScan_StatsReportRows(t *testing.T) {
 	src, _ := parquet.NewSource(parquet.Config[countEvent]{
 		Reader: bytes.NewReader(body),
 		Name:   "f",
-		Decode: func(rec arrow.Record, row int) (countEvent, error) {
+		Decode: func(rec arrow.RecordBatch, row int) (countEvent, error) {
 			if row == 1 {
 				return countEvent{}, errors.New("poison")
 			}
@@ -575,11 +575,11 @@ func TestScan_MultipleRowGroups(t *testing.T) {
 	defer dayArr.Release()
 	hourArr := hourB.NewArray()
 	defer hourArr.Release()
-	rec := array.NewRecord(sc, []arrow.Array{entityArr, countArr, tsArr, yearArr, monthArr, dayArr, hourArr}, int64(len(events)))
+	rec := array.NewRecordBatch(sc, []arrow.Array{entityArr, countArr, tsArr, yearArr, monthArr, dayArr, hourArr}, int64(len(events)))
 	defer rec.Release()
 
 	var buf bytes.Buffer
-	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.Record{rec}), &buf, 5, nil, pqarrow.DefaultWriterProps()); err != nil {
+	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.RecordBatch{rec}), &buf, 5, nil, pqarrow.DefaultWriterProps()); err != nil {
 		t.Fatalf("WriteTable: %v", err)
 	}
 

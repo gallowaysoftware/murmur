@@ -60,6 +60,7 @@ type Service struct {
 //   - bloom → { capacity_bits int64, hash_functions int32, approx_size int64, present bool }
 type PipelineKind string
 
+// Supported PipelineKind values.
 const (
 	PipelineSum   PipelineKind = "sum"
 	PipelineHLL   PipelineKind = "hll"
@@ -111,6 +112,9 @@ type Method struct {
 // on every client.
 type MethodKind string
 
+// Supported MethodKind values. Each maps to a typed-client call shape;
+// see proto.go responseBody and server.go buildResponse* for the
+// per-kind / per-pipeline-kind render branches.
 const (
 	MethodGetAllTime    MethodKind = "get_all_time"
 	MethodGetWindow     MethodKind = "get_window"

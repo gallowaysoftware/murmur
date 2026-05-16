@@ -24,9 +24,9 @@
 // # Decoding
 //
 // Parquet is columnar, but bootstrap.Run consumes one Record[T] at a
-// time. This source materializes one row group of arrow.Records at a
+// time. This source materializes one row group of arrow.RecordBatchs at a
 // time and walks each row into T via a user-supplied Decoder[T]. The
-// Decoder receives an arrow.Record + row index so it can pull only the
+// Decoder receives an arrow.RecordBatch + row index so it can pull only the
 // columns it needs by name.
 package parquet
 
@@ -52,10 +52,10 @@ import (
 
 // Decoder converts a single Parquet row (column-array + row index) into
 // T. Implementations should pull only the columns they need from the
-// arrow.Record by name; cross-record allocations are the caller's
+// arrow.RecordBatch by name; cross-record allocations are the caller's
 // responsibility (the Record is reused after the call returns when
 // streaming via record batches).
-type Decoder[T any] func(rec arrow.Record, row int) (T, error)
+type Decoder[T any] func(rec arrow.RecordBatch, row int) (T, error)
 
 // EventIDFn extracts a stable per-record dedup key from the decoded
 // value. When unset, the source emits a synthetic
@@ -98,7 +98,7 @@ type Config[T any] struct {
 	// DLQ producer or logger to surface poison rows.
 	OnDecodeError func(rowOrdinal int, err error)
 
-	// BatchSize is the number of rows materialized per arrow.Record
+	// BatchSize is the number of rows materialized per arrow.RecordBatch
 	// pulled out of Parquet. Defaults to 4096. Lower for large rows
 	// (less peak memory), higher for tiny rows (less per-batch
 	// overhead).
@@ -217,7 +217,7 @@ func (s *Source[T]) Scan(ctx context.Context, out chan<- source.Record[T]) error
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		rec := rr.Record()
+		rec := rr.RecordBatch()
 		if rec == nil {
 			continue
 		}
