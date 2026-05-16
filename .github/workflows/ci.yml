@@ -96,3 +96,33 @@ jobs:
         run: npm run lint
       - name: build
         run: npm run build
+
+  integration:
+    name: Deployed-shape integration (testcontainers)
+    runs-on: ubuntu-latest
+    # Parallel to the other jobs above. Builds the example Docker
+    # images and runs them as containers against Kafka + DynamoDB-local
+    # containers; catches what the in-process e2e tests can't see
+    # (broken Dockerfiles, env-var schema drift, container networking
+    # config mistakes).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: stub embed dir
+        # pkg/admin/embed.go's go:embed needs the dist directory to
+        # exist — the example Dockerfiles `go build` into a multi-stage
+        # image that imports pkg/admin transitively.
+        run: |
+          mkdir -p pkg/admin/dist
+          echo placeholder > pkg/admin/dist/README.md
+
+      - name: integration tests
+        # The `integration` build tag gates these tests out of the
+        # default `go test ./...` run. Locally: `make test-deployed`.
+        run: go test -tags=integration -timeout 15m -v ./test/integration/...
