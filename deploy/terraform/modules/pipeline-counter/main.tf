@@ -174,6 +174,10 @@ locals {
       AWS_REGION = data.aws_region.current.region
     },
     var.valkey_uri == null ? {} : { VALKEY_ADDRESS = var.valkey_uri },
+    var.swap_enabled ? {
+      SWAP_CONTROL_TABLE = aws_dynamodb_table.swap_control[0].name
+      SWAP_ALIAS         = var.name
+    } : {},
   )
 
   worker_env_merged    = merge(local.base_env, var.worker_env)

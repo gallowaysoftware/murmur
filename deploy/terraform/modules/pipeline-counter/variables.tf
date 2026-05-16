@@ -174,3 +174,25 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+# ----------------------------------------------------------------------------
+# Atomic state-table swap (pkg/swap)
+# ----------------------------------------------------------------------------
+
+variable "swap_enabled" {
+  description = "When true, provision a pkg/swap control table and inject SWAP_CONTROL_TABLE / SWAP_ALIAS into all three tasks' environments. The state table at var.name continues to exist (and serves as v1 of the alias by convention); subsequent versions are created outside the module by the backfill workflow. Default false — single-table mode."
+  type        = bool
+  default     = false
+}
+
+variable "swap_control_table_name" {
+  description = "Override the control-table name. Defaults to \"<name>_swap\". Honored only when swap_enabled is true."
+  type        = string
+  default     = null
+}
+
+variable "swap_initial_version" {
+  description = "Seed the alias pointer to this version on first apply. Set to 1 to make var.name the active table at deploy time; leave null to defer pointer initialization until the application calls swap.Manager.SetActive. Honored only when swap_enabled is true."
+  type        = number
+  default     = null
+}

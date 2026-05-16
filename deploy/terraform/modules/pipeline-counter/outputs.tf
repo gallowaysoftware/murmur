@@ -67,3 +67,22 @@ output "bootstrap_security_group_id" {
   description = "Security group attached to bootstrap-runner tasks."
   value       = aws_security_group.bootstrap.id
 }
+
+# ----------------------------------------------------------------------------
+# pkg/swap outputs (populated only when swap_enabled = true)
+# ----------------------------------------------------------------------------
+
+output "swap_control_table_name" {
+  description = "Name of the pkg/swap control table. null when swap_enabled = false."
+  value       = var.swap_enabled ? aws_dynamodb_table.swap_control[0].name : null
+}
+
+output "swap_control_table_arn" {
+  description = "ARN of the pkg/swap control table. null when swap_enabled = false."
+  value       = var.swap_enabled ? aws_dynamodb_table.swap_control[0].arn : null
+}
+
+output "swap_alias" {
+  description = "Alias name applications pass to swap.Manager (== var.name). null when swap_enabled = false."
+  value       = var.swap_enabled ? var.name : null
+}
