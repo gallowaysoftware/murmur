@@ -330,6 +330,15 @@ func TestScan_BoundedConcurrencyAllRecords(t *testing.T) {
 					break
 				}
 			}
+			// Yield so peer workers have a chance to enter OpenObject
+			// before we release the in-flight slot. Without this hold,
+			// the synthetic workload (NopCloser over a tiny string) can
+			// finish faster than the dispatcher pushes the next key,
+			// leaving maxInFlight at 1 on slow runners under -race —
+			// the spurious-failure mode that bit CI on 2026-05-16. The
+			// sibling TestScan_BoundedConcurrencyCapsAtConfig uses the
+			// same trick (2 ms).
+			time.Sleep(2 * time.Millisecond)
 			// Build a tiny body unique to this key.
 			var b strings.Builder
 			for i := 0; i < linesPerKey; i++ {
