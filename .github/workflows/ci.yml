@@ -9,9 +9,13 @@ permissions:
   contents: read
 
 jobs:
-  go-lint-and-test:
-    name: Go (lint + unit tests)
+  go-build-and-test:
+    name: Go (build + unit tests)
     runs-on: ubuntu-latest
+    # Build + tests only; all linting (incl. gofmt + go vet) is the
+    # golangci-lint job's responsibility. Previously this job ran
+    # gofmt-check + go vet too, but those duplicate the golangci-lint
+    # `gofmt` formatter + `govet` linter — see .golangci.yml.
     steps:
       - uses: actions/checkout@v6
 
@@ -20,28 +24,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: gofmt check
-        run: |
-          out=$(gofmt -l .)
-          if [ -n "$out" ]; then
-            echo "gofmt diff:"
-            echo "$out"
-            exit 1
-          fi
-
-      - name: go vet
-        # Workspace mode: go.work composes the root module with
-        # pkg/exec/batch/sparkconnect (its own module so non-Spark
-        # consumers don't have to mirror the spark-connect-go fork-replace).
-        # `go vet ./...` from root only sees the current module; we vet
-        # the submodule separately.
-        run: |
-          go vet ./...
-          (cd pkg/exec/batch/sparkconnect && go vet ./...)
-
       - name: go build
         # The web/ build pipeline isn't run in CI; place a stub so
         # pkg/admin/embed.go's go:embed directive resolves to a known path.
+        # Workspace mode: go.work composes the root module with
+        # pkg/exec/batch/sparkconnect (its own module so non-Spark
+        # consumers don't have to mirror the spark-connect-go fork-replace).
         run: |
           mkdir -p pkg/admin/dist
           [ -f pkg/admin/dist/README.md ] || echo placeholder > pkg/admin/dist/README.md
@@ -56,6 +44,12 @@ jobs:
   golangci-lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    # Sole lint authority: runs the v2 lint surface (govet, errcheck,
+    # ineffassign, revive, staticcheck, unused, unparam, misspell,
+    # gocritic) plus the gofmt formatter, covering what the old Go
+    # job used to duplicate. Run twice: once for the root module,
+    # once for the sparkconnect submodule (golangci-lint doesn't
+    # follow go.work).
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -66,9 +60,16 @@ jobs:
         run: |
           mkdir -p pkg/admin/dist
           echo placeholder > pkg/admin/dist/README.md
-      - uses: golangci/golangci-lint-action@v9
+      - name: lint root module
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+          args: --timeout=5m
+      - name: lint sparkconnect submodule
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: pkg/exec/batch/sparkconnect
           args: --timeout=5m
 
   web:

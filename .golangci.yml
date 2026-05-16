@@ -45,3 +45,16 @@ linters:
           - revive
           - staticcheck
           - unused
+
+# Formatters are separate from linters in golangci-lint v2. gofmt
+# folds in the gofmt-check step the CI used to run as a standalone
+# pre-step; with this enabled, `golangci-lint run` is the lint
+# authority and the CI workflow can drop its duplicate `go vet` /
+# gofmt steps.
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - web/node_modules
+      - proto/gen/

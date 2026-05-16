@@ -49,7 +49,7 @@ func (s *fakeStore) MergeUpdate(_ context.Context, k state.Key, d int64, _ time.
 func (*fakeStore) Close() error { return nil }
 
 func TestInstrumented_NilRecorderPassthrough(t *testing.T) {
-	inner := &fakeStore{m: map[state.Key]int64{state.Key{Entity: "x"}: 42}}
+	inner := &fakeStore{m: map[state.Key]int64{{Entity: "x"}: 42}}
 	wrapped := state.NewInstrumented[int64](inner, nil, "test")
 	// nil recorder → wrapper returns the inner store directly. Same
 	// pointer identity isn't guaranteed by the API, but behavior must
@@ -61,7 +61,7 @@ func TestInstrumented_NilRecorderPassthrough(t *testing.T) {
 }
 
 func TestInstrumented_RecordsGetLatency(t *testing.T) {
-	inner := &fakeStore{m: map[state.Key]int64{state.Key{Entity: "x"}: 42}}
+	inner := &fakeStore{m: map[state.Key]int64{{Entity: "x"}: 42}}
 	rec := metrics.NewInMemory()
 	wrapped := state.NewInstrumented[int64](inner, rec, "page_views")
 
@@ -75,7 +75,7 @@ func TestInstrumented_RecordsGetLatency(t *testing.T) {
 }
 
 func TestInstrumented_RecordsGetManyLatency(t *testing.T) {
-	inner := &fakeStore{m: map[state.Key]int64{state.Key{Entity: "x"}: 1}}
+	inner := &fakeStore{m: map[state.Key]int64{{Entity: "x"}: 1}}
 	rec := metrics.NewInMemory()
 	wrapped := state.NewInstrumented[int64](inner, rec, "p")
 

@@ -75,7 +75,9 @@ func RunInt64Sum(ctx context.Context, cfg Config, store state.Store[int64], ttl 
 	if err != nil {
 		return fmt.Errorf("spark connect session: %w", err)
 	}
-	defer session.Stop()
+	// session.Stop's error is purely cleanup (release the Spark
+	// Connect session); ignore it.
+	defer func() { _ = session.Stop() }()
 
 	df, err := session.Sql(ctx, cfg.SQL)
 	if err != nil {
