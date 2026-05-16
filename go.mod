@@ -17,6 +17,7 @@ require (
 	github.com/axiomhq/hyperloglog v0.2.6
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/twmb/franz-go v1.21.1
+	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/valkey-io/valkey-go v1.0.74
 	go.mongodb.org/mongo-driver/v2 v2.6.0
 	golang.org/x/net v0.53.0

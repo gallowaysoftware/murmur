@@ -12,8 +12,14 @@ services:
       - "8000:8000"
     command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
 
+  # valkey-bundle ships the official Valkey server plus the
+  # valkey-bloom / valkey-json / valkey-search modules pre-loaded, so the
+  # BF.* commands BloomCache uses are available out of the box. Plain
+  # `valkey/valkey:8-alpine` works for Int64Cache / BytesCache / HLLCache
+  # but rejects BF.ADD with "unknown command", which makes the BloomCache
+  # tests skip rather than run.
   valkey:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey-bundle:8
     container_name: murmur-valkey
     ports:
       - "6379:6379"

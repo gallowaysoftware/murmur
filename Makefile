@@ -73,6 +73,7 @@ test-integration: compose-up ## Full test suite including E2E. Requires docker-c
 	DDB_LOCAL_ENDPOINT=http://localhost:8000 \
 	KAFKA_BROKERS=localhost:9092 \
 	VALKEY_ADDRESS=localhost:6379 \
+	VALKEY_BLOOM_ENABLED=1 \
 	S3_ENDPOINT=http://localhost:9000 \
 	SPARK_CONNECT_REMOTE=sc://localhost:15002 \
 	MONGO_URI="mongodb://localhost:27017/?replicaSet=rs0&directConnection=true" \
