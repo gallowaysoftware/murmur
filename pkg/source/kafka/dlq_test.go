@@ -26,25 +26,22 @@ func TestNewDLQProducer_RequiresSource(t *testing.T) {
 	}
 }
 
-// TestDLQProducer_OnDecodeErrorCallbackShape ensures the callback matches
-// the signature consumed by Config[T].OnDecodeError — i.e., a DLQProducer's
-// method value is assignable to that field directly. The body is exercised
-// in the integration tests against a real broker.
-func TestDLQProducer_OnDecodeErrorCallbackShape(t *testing.T) {
-	var assign func(raw []byte, partition int32, offset int64, err error)
+// TestDLQProducer_CallbackShape pins the DLQProducer's method-value types
+// against the Config[T] callback fields at compile time. If either method
+// signature drifts, the package stops compiling — which is exactly what we
+// want, since downstream wiring (Config.OnDecodeError = dlq.OnDecodeError)
+// would otherwise break silently for users until they upgraded.
+func TestDLQProducer_CallbackShape(t *testing.T) {
 	d := &DLQProducer{topic: "x.dlq", source: "x"}
-	assign = d.OnDecodeError
-	if assign == nil {
-		t.Fatal("OnDecodeError method value is nil")
-	}
-}
 
-func TestDLQProducer_OnFetchErrorCallbackShape(t *testing.T) {
-	var assign func(topic string, partition int32, err error)
-	d := &DLQProducer{topic: "x.dlq", source: "x"}
-	assign = d.OnFetchError
-	if assign == nil {
-		t.Fatal("OnFetchError method value is nil")
+	// Compile-time pins. The package fails to compile if the method-value
+	// shapes don't match the Config[T] field types.
+	cfg := Config[struct{}]{
+		OnDecodeError: d.OnDecodeError,
+		OnFetchError:  d.OnFetchError,
+	}
+	if cfg.OnDecodeError == nil || cfg.OnFetchError == nil {
+		t.Fatal("callback fields not populated")
 	}
 }
 

@@ -169,14 +169,14 @@ func (s *Spec) validate() error {
 		return errors.New("service.methods is empty")
 	}
 	for i, m := range s.Service.Methods {
-		if err := m.validate(s.Service.PipelineKind); err != nil {
+		if err := m.validate(); err != nil {
 			return fmt.Errorf("methods[%d] (%s): %w", i, m.Name, err)
 		}
 	}
 	return nil
 }
 
-func (m *Method) validate(serviceKind PipelineKind) error {
+func (m *Method) validate() error {
 	if m.Name == "" {
 		return errors.New("method.name is required")
 	}

@@ -20,9 +20,9 @@ import (
 
 // ParquetDecoder converts a single Parquet row (column-array + row index)
 // into T. Implementations should pull only the columns they need from
-// the arrow.Record by name; cross-record allocations are the caller's
+// the arrow.RecordBatch by name; cross-record allocations are the caller's
 // responsibility because the Record is reused after the call returns.
-type ParquetDecoder[T any] func(rec arrow.Record, row int) (T, error)
+type ParquetDecoder[T any] func(rec arrow.RecordBatch, row int) (T, error)
 
 // ParquetConfig configures a Parquet S3 replay driver.
 type ParquetConfig[T any] struct {
@@ -45,7 +45,7 @@ type ParquetConfig[T any] struct {
 	// ("only files newer than X").
 	KeyFilter func(key string) bool
 
-	// BatchSize is the number of rows materialized per arrow.Record
+	// BatchSize is the number of rows materialized per arrow.RecordBatch
 	// pulled out of Parquet. Defaults to 4096.
 	BatchSize int64
 
@@ -203,7 +203,7 @@ func (d *ParquetDriver[T]) replayOne(ctx context.Context, key string, out chan<-
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		rec := rr.Record()
+		rec := rr.RecordBatch()
 		if rec == nil {
 			continue
 		}
