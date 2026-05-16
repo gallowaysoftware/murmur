@@ -56,9 +56,14 @@ fmt-check: ## fail if any Go file isn't gofmt'd (CI gate, non-mutating)
 	if [ -n "$$out" ]; then echo "gofmt diff in:"; echo "$$out"; exit 1; fi
 
 .PHONY: lint
-lint: vet fmt-check ## go vet + gofmt check (golangci-lint via tool)
-	@which golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || \
-		echo "golangci-lint not installed; run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
+lint: ## golangci-lint v2 (root + sparkconnect submodule). Covers gofmt + govet too.
+	@gcl=$$(command -v golangci-lint || echo "$$($(GO) env GOPATH)/bin/golangci-lint"); \
+	if [ ! -x "$$gcl" ]; then \
+		echo "golangci-lint not installed; run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
+		exit 1; \
+	fi; \
+	"$$gcl" run ./... && \
+	for d in $(SUBMODULES); do (cd $$d && "$$gcl" run ./...) || exit 1; done
 
 # go list ./... walks node_modules under web/ if it has any Go files (some npm
 # packages ship Go example code). Filter explicitly to keep CI output clean.
@@ -162,7 +167,7 @@ seed-ddb: ## Create the page_views DDB table on dynamodb-local for the example
 # ----------------------------------------------------------------------------
 
 .PHONY: ci
-ci: fmt-check vet test-unit ## CI gate: format, vet, unit tests. Web typecheck via web-typecheck.
+ci: lint test-unit ## CI gate: golangci-lint (gofmt + govet + everything) + unit tests. Web typecheck via web-typecheck.
 
 .PHONY: clean
 clean: ## Remove built artifacts
