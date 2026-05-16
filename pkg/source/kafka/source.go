@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -56,6 +57,21 @@ type Config[T any] struct {
 	// Default: drop. Wire to logging / metrics to surface persistent failures.
 	OnFetchError func(topic string, partition int32, err error)
 
+	// Concurrency controls per-partition decode parallelism. When N > 1, the
+	// Source spawns N decoder goroutines plus one fetcher; each partition is
+	// pinned to worker (partition mod N), so per-partition order is preserved
+	// while decode-heavy formats (Protobuf with schema lookups, encrypted
+	// payloads) can saturate multiple cores. Default 1 — the single-goroutine
+	// path is identical to the historical behavior. There is no benefit to
+	// setting Concurrency above the partition count assigned to this consumer.
+	Concurrency int
+
+	// PartitionQueueSize is the per-worker channel depth used when Concurrency
+	// > 1. Each fetch batch's per-partition slice is enqueued onto the
+	// matching worker's channel; if a slow downstream backs up, the fetcher
+	// blocks. Defaults to 256.
+	PartitionQueueSize int
+
 	// Extra lets callers append additional franz-go options (TLS, SASL, etc).
 	Extra []kgo.Opt
 }
@@ -76,12 +92,14 @@ func JSONDecoder[T any]() Decoder[T] {
 
 // Source reads from a Kafka topic and yields source.Records.
 type Source[T any] struct {
-	client        *kgo.Client
-	topic         string
-	decode        Decoder[T]
-	eventID       func(T) string
-	onDecodeError func(raw []byte, partition int32, offset int64, err error)
-	onFetchError  func(topic string, partition int32, err error)
+	client             *kgo.Client
+	topic              string
+	decode             Decoder[T]
+	eventID            func(T) string
+	onDecodeError      func(raw []byte, partition int32, offset int64, err error)
+	onFetchError       func(topic string, partition int32, err error)
+	concurrency        int
+	partitionQueueSize int
 }
 
 // NewSource constructs a Kafka Source. The returned Source owns the underlying franz-go
@@ -111,19 +129,41 @@ func NewSource[T any](cfg Config[T]) (*Source[T], error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka new client: %w", err)
 	}
+	concurrency := cfg.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	queueSize := cfg.PartitionQueueSize
+	if queueSize <= 0 {
+		queueSize = 256
+	}
 	return &Source[T]{
-		client:        cl,
-		topic:         cfg.Topic,
-		decode:        cfg.Decode,
-		eventID:       cfg.EventID,
-		onDecodeError: cfg.OnDecodeError,
-		onFetchError:  cfg.OnFetchError,
+		client:             cl,
+		topic:              cfg.Topic,
+		decode:             cfg.Decode,
+		eventID:            cfg.EventID,
+		onDecodeError:      cfg.OnDecodeError,
+		onFetchError:       cfg.OnFetchError,
+		concurrency:        concurrency,
+		partitionQueueSize: queueSize,
 	}, nil
 }
 
 // Read polls the consumer group and yields decoded records into out until ctx is canceled.
 // Returns nil on graceful shutdown; non-nil only on a fatal client error.
+//
+// When Config.Concurrency > 1, decode work fans out across N goroutines, with
+// each partition pinned to worker (partition mod N) so per-partition order is
+// preserved. The single-goroutine path (the default) is unchanged.
 func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error {
+	if s.concurrency <= 1 {
+		return s.readSerial(ctx, out)
+	}
+	return s.readConcurrent(ctx, out)
+}
+
+// readSerial is the historical single-goroutine path.
+func (s *Source[T]) readSerial(ctx context.Context, out chan<- source.Record[T]) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -132,8 +172,6 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 		if fetches.IsClientClosed() {
 			return nil
 		}
-		// Surface fetch errors but keep going — most are retriable (broker bounce, etc).
-		// Fatal errors are caught at PollFetches return path.
 		fetches.EachError(func(t string, p int32, err error) {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -146,40 +184,127 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 		iter := fetches.RecordIter()
 		for !iter.Done() {
 			rec := iter.Next()
-			value, err := s.decode(rec.Value)
-			if err != nil {
-				// Poison pill: surface via callback so the worker can DLQ / log /
-				// metric. Without a callback the record is dropped silently —
-				// fine for dev, dangerous in production. STABILITY.md flags this.
-				if s.onDecodeError != nil {
-					s.onDecodeError(rec.Value, rec.Partition, rec.Offset, err)
-				}
-				// Mark for commit so we don't loop forever on the same poison pill.
-				s.client.MarkCommitRecords(rec)
-				continue
-			}
-			eventID := fmt.Sprintf("%s:%d:%d", rec.Topic, rec.Partition, rec.Offset)
-			if s.eventID != nil {
-				if id := s.eventID(value); id != "" {
-					eventID = id
-				}
-			}
-			r := source.Record[T]{
-				EventID:      eventID,
-				EventTime:    rec.Timestamp,
-				PartitionKey: string(rec.Key),
-				Value:        value,
-				Ack: func() error {
-					s.client.MarkCommitRecords(rec)
-					return nil
-				},
-			}
-			select {
-			case out <- r:
-			case <-ctx.Done():
+			if err := s.dispatchRecord(ctx, rec, out); err != nil {
 				return nil
 			}
 		}
+	}
+}
+
+// readConcurrent is the per-partition-parallel path. One fetcher goroutine
+// polls the client; per-partition record slices are routed to N decoder
+// workers via per-worker channels; each worker decodes and emits to out.
+//
+// Per-partition order is preserved because every record for partition P
+// always lands in worker (P mod N), processed FIFO from its inbound channel.
+// Cross-partition order is not preserved (and was never preserved by the
+// single-goroutine path either — franz-go's RecordIter interleaves
+// partitions in arbitrary order across calls).
+func (s *Source[T]) readConcurrent(ctx context.Context, out chan<- source.Record[T]) error {
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type job struct {
+		recs []*kgo.Record
+	}
+	queues := make([]chan job, s.concurrency)
+	for i := range queues {
+		queues[i] = make(chan job, s.partitionQueueSize)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < s.concurrency; i++ {
+		wg.Add(1)
+		go func(in <-chan job) {
+			defer wg.Done()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case j, ok := <-in:
+					if !ok {
+						return
+					}
+					for _, rec := range j.recs {
+						if err := s.dispatchRecord(workerCtx, rec, out); err != nil {
+							return
+						}
+					}
+				}
+			}
+		}(queues[i])
+	}
+
+	// Fetcher loop: serial PollFetches, dispatch by partition mod N.
+	defer func() {
+		for _, q := range queues {
+			close(q)
+		}
+		wg.Wait()
+	}()
+	for {
+		if err := workerCtx.Err(); err != nil {
+			return nil
+		}
+		fetches := s.client.PollFetches(workerCtx)
+		if fetches.IsClientClosed() {
+			return nil
+		}
+		fetches.EachError(func(t string, p int32, err error) {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if s.onFetchError != nil {
+				s.onFetchError(t, p, err)
+			}
+		})
+		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+			if len(p.Records) == 0 {
+				return
+			}
+			idx := int(uint32(p.Partition)) % s.concurrency
+			select {
+			case queues[idx] <- job{recs: p.Records}:
+			case <-workerCtx.Done():
+			}
+		})
+	}
+}
+
+// dispatchRecord decodes one Kafka record and emits a source.Record to out.
+// Returns an error when ctx is canceled (the caller should exit) or nil to
+// continue. The "error" is just a signal — the caller doesn't propagate it.
+func (s *Source[T]) dispatchRecord(ctx context.Context, rec *kgo.Record, out chan<- source.Record[T]) error {
+	value, err := s.decode(rec.Value)
+	if err != nil {
+		if s.onDecodeError != nil {
+			s.onDecodeError(rec.Value, rec.Partition, rec.Offset, err)
+		}
+		// Mark for commit so we don't loop forever on the same poison pill.
+		s.client.MarkCommitRecords(rec)
+		return nil
+	}
+	eventID := fmt.Sprintf("%s:%d:%d", rec.Topic, rec.Partition, rec.Offset)
+	if s.eventID != nil {
+		if id := s.eventID(value); id != "" {
+			eventID = id
+		}
+	}
+	r := source.Record[T]{
+		EventID:      eventID,
+		EventTime:    rec.Timestamp,
+		PartitionKey: string(rec.Key),
+		Value:        value,
+		Ack: func() error {
+			s.client.MarkCommitRecords(rec)
+			return nil
+		},
+	}
+	select {
+	case out <- r:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
