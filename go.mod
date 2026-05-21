@@ -3,7 +3,7 @@ module github.com/gallowaysoftware/murmur
 go 1.26.2
 
 require (
-	connectrpc.com/connect v1.19.2
+	connectrpc.com/connect v1.20.0
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/aws/aws-lambda-go v1.54.0
 	github.com/aws/aws-sdk-go-v2 v1.41.7
