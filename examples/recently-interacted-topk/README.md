@@ -108,7 +108,17 @@ The response's `data` is a serialized Misra-Gries summary (raw bytes); decode
 via `pkg/monoid/sketch/topk.Decode`, or use the embedded admin UI which
 renders the items + counts directly.
 
-## Production deployment
+## Deploy to real AWS
+
+End-to-end Terraform composition lives at [`terraform/`](./terraform). It
+composes [`pipeline-counter`](../../deploy/terraform/modules/pipeline-counter)
+(ECS worker + query + state DDB + dedup DDB) with
+[`pipeline-lambda-kinesis`](../../deploy/terraform/modules/pipeline-lambda-kinesis)
+(Kinesis stream + Lambda + event-source mapping), plus CloudWatch alarms for
+the Lambda + DDB + Kinesis side. See
+[`terraform/README.md`](./terraform/README.md) for the full runbook.
+
+## Production deployment notes
 
 - The Lambda binary builds for `provided.al2` / arm64 — see the comment block
   in `cmd/lambda/main.go` for the exact `go build` invocation.

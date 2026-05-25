@@ -176,6 +176,22 @@ variable "tags" {
 }
 
 # ----------------------------------------------------------------------------
+# At-least-once dedup table (pkg/state/dynamodb.Deduper)
+# ----------------------------------------------------------------------------
+
+variable "dedup_enabled" {
+  description = "When true, provision a sibling DDB table for at-least-once dedup (pk string hash key, native TTL on the `ttl` attribute), grant the worker and bootstrap task roles read+write on it, and inject DDB_DEDUP_TABLE into all three tasks' environments. Strongly recommended for any source that may redeliver records (Kinesis Lambda BatchItemFailures, Kafka rebalance, SQS visibility timeout). Default false — single-table mode."
+  type        = bool
+  default     = false
+}
+
+variable "dedup_table_name" {
+  description = "Override the dedup-table name. Defaults to \"<name>_dedup\". Honored only when dedup_enabled is true."
+  type        = string
+  default     = null
+}
+
+# ----------------------------------------------------------------------------
 # Atomic state-table swap (pkg/swap)
 # ----------------------------------------------------------------------------
 

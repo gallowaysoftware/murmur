@@ -47,7 +47,6 @@ to exact pins.
   loss), `testcontainers-go` 0.42 → 0.44, and the aws-sdk group forward
   three minors.
 
-
 ### Fixed
 
 #### Build failure on Go 1.27 (`undefined: http2.TrailerPrefix`)
@@ -184,6 +183,34 @@ succeeded, releasing lets the redelivery re-apply it, so a hierarchical
 rollup can over-count that key. That is the correct trade — at-least-once
 permits re-application but never permits loss, and dedup is a best-effort
 mitigation layered on top, not a stronger guarantee.
+
+### Added — real-AWS deploy composition for `recently-interacted-topk`
+
+End-to-end Terraform under [`examples/recently-interacted-topk/terraform/`](examples/recently-interacted-topk/terraform/)
+that stands up the canonical multi-source TopK example on real AWS in one
+`terraform apply`. Targeted at the v1 real-AWS soak; exercises every
+`experimental`-flagged package gated on operational evidence (Lambda runtimes,
+processor core, Kafka per-partition concurrency).
+
+Module-side additions:
+
+- **`pipeline-counter`** grew an optional `dedup_enabled` flag that
+  provisions a sibling DDB dedup table (pk:S hash key, native TTL on `ttl`),
+  grants the worker + bootstrap roles read+write, and injects
+  `DDB_DEDUP_TABLE` into all three task environments. Exposed as
+  `dedup_table_arn` / `dedup_table_name` outputs so sibling modules can share
+  the same table.
+- **`pipeline-lambda-kinesis`** is a new sibling module: Kinesis data stream
+  (or BYO via `kinesis_stream_arn`), Lambda function (provided.al2, arm64 by
+  default), event-source mapping with `BatchItemFailures` +
+  `bisect_batch_on_function_error`, Lambda IAM with Kinesis consumer perms +
+  DDB state + optional dedup grants + optional SQS/SNS on-failure
+  destination, CloudWatch log group with caller-controlled retention.
+- **`examples/recently-interacted-topk/terraform/`** composes both modules,
+  provisions CloudWatch alarms (Lambda Errors / IteratorAge / Throttles, DDB
+  WriteThrottles on state+dedup, Kinesis WriteThrottles), and ships a
+  `terraform.tfvars.example` plus a runbook covering build → push → apply →
+  smoke-test → teardown.
 
 ### Added — v1 readiness pass
 
