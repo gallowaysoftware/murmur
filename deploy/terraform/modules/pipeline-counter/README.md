@@ -152,6 +152,40 @@ Notable optionals: `valkey_uri`, `worker_env`, `query_env`, `bootstrap_env`,
 | `query_alb_security_group_id`   | Internal ALB SG.                                             |
 | `bootstrap_security_group_id`   | Bootstrap-task ENI SG.                                       |
 
+## At-least-once dedup table (optional)
+
+Enable `dedup_enabled = true` to provision a sibling DDB table for
+[`pkg/state/dynamodb.Deduper`](../../../../pkg/state/dynamodb/dedup.go) and
+inject `DDB_DEDUP_TABLE` into all three tasks' environments.
+
+```hcl
+module "page_views" {
+  source = "github.com/gallowaysoftware/murmur//deploy/terraform/modules/pipeline-counter"
+
+  name = "page_views"
+  # ...everything else as before...
+
+  dedup_enabled = true
+}
+```
+
+What the module does in dedup mode:
+
+1. Creates `<name>_dedup` (override via `dedup_table_name`) — `pk` (S) hash key,
+   no range key, native TTL on the `ttl` attribute.
+2. Grants the worker and bootstrap task roles `GetItem` / `PutItem` /
+   `DeleteItem` on the dedup table. The query role does NOT get dedup access
+   (reads don't traverse it).
+3. Injects `DDB_DEDUP_TABLE` into worker / query / bootstrap environments. The
+   binaries are expected to construct a `dynamodb.NewDeduper(client, table)` at
+   startup and wire it into the runtime via `streaming.WithDedup(d)`.
+
+Recommended for any source that may redeliver records — Kinesis Lambda
+BatchItemFailures, Kafka rebalance, SQS visibility timeout. The dedup table's
+`arn` is exported via `dedup_table_arn` so sibling modules (e.g.
+[`pipeline-lambda-kinesis`](../pipeline-lambda-kinesis)) that share state with
+this pipeline can attach their own IAM grants to the same table.
+
 ## Atomic state-table swap (optional)
 
 Enable `swap_enabled = true` to provision a [`pkg/swap`](../../../../pkg/swap)
@@ -217,7 +251,7 @@ oldest live read against v1 has settled.
 
 ```
 deploy/terraform/modules/pipeline-counter/
-  main.tf        # provider, DDB, IAM, log groups, locals
+  main.tf        # provider, DDB state, optional DDB dedup, IAM, log groups
   ecs.tf         # streaming worker task + service
   query.tf       # query task + service + ALB + target group + listener
   bootstrap.tf   # bootstrap-runner task definition
