@@ -6,6 +6,44 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — STABILITY.md promotions (experimental → mostly stable)
+
+Thirteen packages move off the `experimental` row. Promotion criteria:
+the package's feature surface has been exercised by integration / e2e
+tests, the STABILITY rows tracked against it in earlier passes have
+all closed, and there are no open known sharp edges in the package's
+notes column.
+
+Promoted:
+
+- **State**: `pkg/state/dynamodb`, `pkg/state/valkey`.
+- **Streaming runtime**: `pkg/exec/streaming`, `pkg/exec/bootstrap`,
+  `pkg/exec/replay`.
+- **Sources**: `pkg/source/snapshot/jsonl`, `pkg/source/snapshot/s3`.
+- **Replay**: `pkg/replay/s3`.
+- **Query**: `pkg/query/grpc`, `pkg/query/typed`.
+- **Admin**: `pkg/admin`.
+- **Algebra**: `pkg/monoid/compose`.
+- **Tools**: `cmd/murmur-codegen-typed`.
+
+Holding `experimental` on purpose:
+
+- `pkg/source/kafka` — per-partition concurrency is fresh; needs soak.
+- `pkg/exec/processor` + `pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`
+  — processor's docstring ties its stability to the Lambda runtimes,
+  which haven't been exercised against real (non-`local`) AWS yet.
+  Promote the four together after the real-AWS soak.
+- `pkg/source/snapshot/mongo`, `pkg/source/snapshot/dynamodb` —
+  known sharp edges still documented in the notes column.
+- `pkg/monoid/sketch/{hll,topk,bloom}` — cross-runtime encoding
+  portability not yet proven.
+- `pkg/projection`, `pkg/observability/autoscale` — too new.
+- `pkg/pipeline`, `pkg/murmur` — author-flagged "expect renames
+  before v1."
+- `pkg/exec/batch/sparkconnect` — `replace`-directive gotcha persists
+  until the fork is upstreamed.
+- `cmd/murmur-ui` — explicitly "demo-grade dashboard."
+
 ### Added — v1 readiness pass
 
 A focused push closing the remaining gaps before tagging `v1.0.0`. Each
