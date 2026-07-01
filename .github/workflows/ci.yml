@@ -17,7 +17,7 @@ jobs:
     # gofmt-check + go vet too, but those duplicate the golangci-lint
     # `gofmt` formatter + `govet` linter — see .golangci.yml.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -51,7 +51,7 @@ jobs:
     # once for the sparkconnect submodule (golangci-lint doesn't
     # follow go.work).
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -79,7 +79,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: 20
@@ -108,7 +108,7 @@ jobs:
     # config mistakes).
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
