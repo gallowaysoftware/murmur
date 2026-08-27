@@ -6,6 +6,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Node 24 toolchain
+
+- **Node 20 → 24 (active LTS)** in CI, and now pinned in one more place than
+  before so the three cannot drift apart: `.nvmrc` (new), `engines` in
+  `web/package.json` (new), and `node-version` in `ci.yml`.
+- **`@types/node` 25.x → `^24.13.3`**, deliberately *down* a major to match
+  the runtime. Typing against a newer Node than the one that executes lets
+  `tsc` accept APIs that do not exist at runtime — the repo was typed against
+  Node 25 while CI ran Node 20, so the type-checker was two majors ahead of
+  reality. Node 20 also passed end-of-life.
+- Every toolchain package accepts Node 24: vite and `@vitejs/plugin-react`
+  want `^20.19.0 || >=22.12.0`, eslint wants `^20.19.0 || ^22.13.0 || >=24`.
+- **`actions/checkout`, `actions/setup-go`, `actions/setup-node` v6 → v7.**
+  Folded in here because they touch the same lines as the Node bump and would
+  otherwise conflict — and because they arrived as three separate Dependabot
+  PRs whose diff hunks overlapped each other. Checked each breaking change
+  against every call site: checkout v7 only changes fork-PR behaviour under
+  `pull_request_target` / `workflow_run` (this workflow uses neither),
+  setup-go v7 is an ESM migration with no input changes, and setup-node v7
+  drops a dummy `NODE_AUTH_TOKEN` export used only for registry publishing,
+  which this workflow does not do.
+
+
 ### Security
 
 #### Dependency refresh (round 3) — closes two Go advisories and seven npm ones
