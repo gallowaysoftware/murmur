@@ -53,6 +53,35 @@ what is closed, what remains, and that properly closing it means giving
 `Monoid.Combine` an error return — a v1-scoped decision affecting every
 implementation and call site.
 
+### Added — real health endpoints on the query server
+
+Nothing in the tree implemented `grpc.health.v1.Health`, yet
+`pipeline-counter` provisioned an ALB target group probing
+`/grpc.health.v1.Health/Check`. That probe "passed" only because ALB read the
+gRPC `UNIMPLEMENTED` status (12) and the matcher was a permissive `0-99`. It
+proved the port was open and nothing else — a task that could not reach
+DynamoDB stayed healthy and kept receiving traffic.
+
+- **`Server.HealthHandler`** serves the standard `grpc.health.v1.Health`
+  service via `connectrpc.com/grpchealth` (**new direct dependency**; it
+  requires only `connect` and `protobuf`, both already direct, so it adds no
+  new transitive dependencies).
+- **`Server.HealthzHandler`** serves plain HTTP for callers that cannot speak
+  gRPC health — an HTTP1 target group, a Kubernetes probe, curl. It separates
+  the two questions orchestrators actually ask, which one endpoint conflates:
+  `/healthz` is **liveness** and is always 200, because answering 503 there
+  makes the orchestrator restart a healthy task and turns a store blip into a
+  crash loop; `/readyz` is **readiness** and reports whether the store
+  answered.
+- **Readiness results are cached** (`DefaultHealthCacheTTL`, 10s). An ALB
+  probes every 15s per target and Kubernetes often tighter, so an uncached
+  probe turns health checking into steady billed reads and couples probe
+  latency to store latency — a slow-but-working table would start failing
+  health checks. `WithHealthCacheTTL`, `WithHealthProbe` and
+  `WithHealthSentinelKey` override the defaults.
+- **The Terraform matchers are correspondingly tightened**, `0-99` → `0` and
+  `200-499` → `200`, and the HTTP1 path moves from `/` to `/readyz`. The old
+  values passed on gRPC `UNIMPLEMENTED` and on an HTTP 404.
 
 ### Added — CloudWatch EMF metrics recorder
 
@@ -87,7 +116,6 @@ quarter with every alarm green.
   flushes per invocation — Lambda freezes the execution environment on return,
   so a background ticker is not guaranteed to fire and a low-traffic function
   would otherwise emit nothing at all.
-
 
 ### Changed — Node 24 toolchain
 

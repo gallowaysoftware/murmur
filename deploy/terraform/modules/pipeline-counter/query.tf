@@ -113,15 +113,16 @@ resource "aws_lb_target_group" "query" {
     interval          = 15
     protocol          = "HTTP"
     timeout           = 5
-    # NOTE: pkg/query/grpc does not register a health service. In GRPC mode
-    # the probe still succeeds because ALB reads the gRPC status code and
-    # UNIMPLEMENTED (12) falls inside the 0-99 matcher. In HTTP1 mode there is
-    # no health path either — Connect endpoints are POST-only, so a GET
-    # returns 404/405 — hence the widened matcher. Both are liveness proxies
-    # ("the port answers"), not readiness. Registering a real health service
-    # is tracked as a follow-up.
-    matcher = local.query_grpc_mode ? "0-99" : "200-499"
-    path    = local.query_grpc_mode ? "/grpc.health.v1.Health/Check" : "/"
+    # `pkg/query/grpc` now serves a real grpc.health.v1.Health service and a
+    # plain /readyz, both of which check that the backing store actually
+    # answers (cached, so probe traffic does not become billed reads).
+    #
+    # The matchers are correspondingly strict. They used to be "0-99" and
+    # "200-499", which passed on gRPC UNIMPLEMENTED and on an HTTP 404 — i.e.
+    # they proved the port was open and nothing else. A task that could not
+    # reach DynamoDB stayed "healthy" and kept receiving traffic.
+    matcher = local.query_grpc_mode ? "0" : "200"
+    path    = local.query_grpc_mode ? "/grpc.health.v1.Health/Check" : "/readyz"
 
     unhealthy_threshold = 3
   }

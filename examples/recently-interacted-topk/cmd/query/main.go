@@ -74,6 +74,14 @@ func run() int {
 	mux := http.NewServeMux()
 	mux.Handle(srv.Handler())
 
+	// Health endpoints. Without these an ALB target group probing
+	// /grpc.health.v1.Health/Check was only ever matching on the gRPC
+	// UNIMPLEMENTED status falling inside a permissive matcher — it proved the
+	// port was open and nothing more.
+	mux.Handle(srv.HealthHandler())
+	mux.Handle("/healthz", srv.HealthzHandler()) // liveness: process is up
+	mux.Handle("/readyz", srv.HealthzHandler())  // readiness: store answered
+
 	// http.Server.Protocols enables HTTP/2-over-plaintext (replacement
 	// for the deprecated golang.org/x/net/http2/h2c package; Go 1.24+).
 	protocols := &http.Protocols{}
