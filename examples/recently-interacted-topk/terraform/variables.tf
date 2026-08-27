@@ -5,14 +5,26 @@ variable "name" {
 }
 
 variable "ecs_cluster_name" {
-  description = "ECS cluster NAME (not ARN) — CloudWatch alarm dimensions need the bare name. Must refer to the same cluster as ecs_cluster_arn."
+  description = "ECS cluster NAME (not ARN) — CloudWatch alarm dimensions need the bare name. Must refer to the same cluster as ecs_cluster_arn. The cluster must have Container Insights ENABLED, or the worker/query liveness alarms will sit in ALARM forever (see alarms.tf)."
   type        = string
+}
+
+variable "require_container_insights" {
+  description = "Fail the plan when the ECS cluster has Container Insights disabled. The worker/query liveness alarms depend on ECS/ContainerInsights metrics; without it they alarm permanently on missing data. Set false only if you have removed those two alarms."
+  type        = bool
+  default     = true
 }
 
 variable "ddb_write_capacity_alarm_threshold" {
   description = "Alarm when the state table consumes more than this many WCUs in a 5-minute period. Default 9000 ~= 30 WCU/s sustained, comfortably above a ~1-10 event/sec soak but low enough to catch a CAS retry storm before it shows up on the bill."
   type        = number
   default     = 9000
+}
+
+variable "query_alb_enabled" {
+  description = "Provision the internal ALB in front of the query service (~$17-22/mo standing). Off for the soak: nothing external queries it, and the query task is reachable on its private IP from inside the VPC."
+  type        = bool
+  default     = true
 }
 
 variable "assign_public_ip" {

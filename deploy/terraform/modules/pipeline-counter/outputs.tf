@@ -20,12 +20,12 @@ output "query_service_name" {
 
 output "query_service_dns" {
   description = "DNS name of the internal query ALB. gRPC clients dial \"<dns>:<grpc_port>\"."
-  value       = aws_lb.query.dns_name
+  value       = var.query_alb_enabled ? aws_lb.query[0].dns_name : null
 }
 
 output "query_service_endpoint" {
   description = "Convenience host:port string for gRPC clients."
-  value       = "${aws_lb.query.dns_name}:${var.grpc_port}"
+  value       = var.query_alb_enabled ? "${aws_lb.query[0].dns_name}:${var.grpc_port}" : null
 }
 
 output "bootstrap_task_definition_arn" {
@@ -60,7 +60,7 @@ output "worker_security_group_id" {
 
 output "query_alb_security_group_id" {
   description = "Security group attached to the internal query ALB."
-  value       = aws_security_group.query_alb.id
+  value       = var.query_alb_enabled ? aws_security_group.query_alb[0].id : null
 }
 
 output "bootstrap_security_group_id" {

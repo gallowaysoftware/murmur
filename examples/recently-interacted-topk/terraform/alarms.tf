@@ -208,6 +208,19 @@ resource "aws_cloudwatch_metric_alarm" "kinesis_silent" {
 # Kafka source can be dead for the whole soak while the Kinesis path keeps the
 # query service returning a healthy-looking Top-N — and the soak would then
 # certify exactly one of the two sources it exists to exercise.
+#
+# PREREQUISITE: `ECS/ContainerInsights` only publishes when Container Insights
+# is enabled on the cluster, and the cluster is caller-owned so this module
+# cannot enable it. With it off the metric does not exist, and because these
+# alarms treat missing data as breaching — deliberately, so a dead service
+# alarms rather than looking healthy — they sit in ALARM forever and train the
+# operator to ignore them. Enable it before applying:
+#
+#   aws ecs update-cluster-settings --cluster <name> \
+#       --settings name=containerInsights,value=enabled
+#   # then force a redeploy so running tasks begin reporting
+#
+# `var.ecs_container_insights_required` asserts this at plan time.
 
 resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
   alarm_name          = "${var.name}-worker-not-running"
