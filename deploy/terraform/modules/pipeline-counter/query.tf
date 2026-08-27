@@ -8,6 +8,16 @@
 # (the gRPC server has no built-in auth).
 # ----------------------------------------------------------------------------
 
+locals {
+  # ELBv2 names accept only alphanumerics and hyphens. `var.name` doubles as
+  # the DynamoDB table name, where underscores ARE legal and idiomatic, so it
+  # is sanitized here rather than constrained globally. Without this, a
+  # perfectly valid name like "recently_interacted" fails the plan with
+  # `only alphanumeric characters and hyphens allowed in "name"`.
+  elb_name_base = replace(var.name, "_", "-")
+}
+
+
 resource "aws_security_group" "query_alb" {
   name        = "${var.name}-query-alb"
   description = "${var.name} internal query ALB"
@@ -54,7 +64,7 @@ resource "aws_security_group" "query_task" {
 }
 
 resource "aws_lb" "query" {
-  name               = substr("${var.name}-q", 0, 32)
+  name               = substr("${local.elb_name_base}-q", 0, 32)
   internal           = true
   load_balancer_type = "application"
   security_groups    = [aws_security_group.query_alb.id]
@@ -64,7 +74,7 @@ resource "aws_lb" "query" {
 }
 
 resource "aws_lb_target_group" "query" {
-  name             = substr("${var.name}-q", 0, 32)
+  name             = substr("${local.elb_name_base}-q", 0, 32)
   port             = var.grpc_port
   protocol         = "HTTP"
   protocol_version = "GRPC"
@@ -140,7 +150,7 @@ resource "aws_ecs_service" "query" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = concat([aws_security_group.query_task.id], var.extra_query_security_group_ids)
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
 
   load_balancer {

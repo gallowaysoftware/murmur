@@ -1,0 +1,44 @@
+# Copy to terraform.tfvars and fill in the values for your environment.
+# Anything not set here picks up the default from variables.tf.
+
+aws_region = "us-west-2"
+
+# Networking — caller-owned. The module does not provision the VPC.
+vpc_id             = "vpc-0123456789abcdef0"
+private_subnet_ids = ["subnet-aaaa", "subnet-bbbb", "subnet-cccc"]
+ecs_cluster_arn    = "arn:aws:ecs:us-west-2:123456789012:cluster/murmur-prod"
+
+# SG that grants ECS-worker ENIs ingress to the MSK clients.
+extra_worker_security_group_ids = ["sg-0123456789abcdef0"]
+
+# Container image — build from examples/recently-interacted-topk/Dockerfile and
+# push to a registry the cluster's task-execution role can pull from.
+image = "123456789012.dkr.ecr.us-west-2.amazonaws.com/murmur-recently-interacted:v1"
+
+# Lambda zip — see examples/recently-interacted-topk/cmd/lambda/main.go for the
+# exact `go build` invocation.
+lambda_zip_path = "../cmd/lambda/lambda.zip"
+
+# Kafka source (MSK or self-managed).
+kafka_brokers  = "b-1.msk.example.com:9094,b-2.msk.example.com:9094,b-3.msk.example.com:9094"
+kafka_topic    = "interactions"
+consumer_group = "recently_interacted_worker_prod"
+
+# Kinesis source.
+kinesis_shard_count           = 2
+lambda_batch_size             = 100
+lambda_parallelization_factor = 2
+
+# Sizing.
+worker_desired_count = 2
+query_desired_count  = 2
+
+# Observability — wire to an SNS topic so the alarms actually page during the
+# soak. Set to null to keep the alarms as silent metric watchers.
+alarm_sns_topic_arn = "arn:aws:sns:us-west-2:123456789012:murmur-soak-alerts"
+
+tags = {
+  Service = "recently_interacted"
+  Env     = "soak"
+  Owner   = "platform"
+}

@@ -69,6 +69,20 @@ output "bootstrap_security_group_id" {
 }
 
 # ----------------------------------------------------------------------------
+# Dedup-table outputs (populated only when dedup_enabled = true)
+# ----------------------------------------------------------------------------
+
+output "dedup_table_name" {
+  description = "Name of the at-least-once dedup table. null when dedup_enabled = false."
+  value       = var.dedup_enabled ? aws_dynamodb_table.dedup[0].name : null
+}
+
+output "dedup_table_arn" {
+  description = "ARN of the at-least-once dedup table. null when dedup_enabled = false. Pass to sibling modules (e.g. pipeline-lambda-kinesis) that share state with this pipeline."
+  value       = var.dedup_enabled ? aws_dynamodb_table.dedup[0].arn : null
+}
+
+# ----------------------------------------------------------------------------
 # pkg/swap outputs (populated only when swap_enabled = true)
 # ----------------------------------------------------------------------------
 

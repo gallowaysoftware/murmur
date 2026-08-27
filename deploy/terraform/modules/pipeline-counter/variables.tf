@@ -1,6 +1,34 @@
+variable "assign_public_ip" {
+  description = <<-EOT
+    Whether Fargate tasks get a public IP.
+
+    `false` (the default) requires the tasks' subnets to have a route to the
+    internet — a NAT gateway, or interface VPC endpoints for ECR/S3/DDB/logs.
+    Without one, `terraform apply` still SUCCEEDS and the tasks then loop
+    forever on CannotPullContainerError, which is a silent failure: the module
+    emits no ECS alarms, so a dead worker looks identical to a healthy one.
+
+    `true` places tasks in a subnet with an internet gateway and skips the NAT
+    entirely. Roughly $14.60/mo in public IPv4 charges for four tasks versus
+    $32.85+ for one NAT gateway, and the tasks stay unreachable inbound — the
+    worker SG has no ingress and the query SG admits only the ALB.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "name" {
-  description = "Pipeline name. Used as the DDB table name and as a prefix for ECS resources."
+  description = "Pipeline name. Used as the DDB table name and as a prefix for ECS resources. Underscores are fine — they are legal in DynamoDB table names and are sanitized to hyphens where AWS forbids them (ELBv2)."
   type        = string
+
+  validation {
+    # A `validation` block evaluates even when the provider's own ValidateFunc
+    # is skipped. That matters: during `terraform validate` root variables are
+    # unknown, so the provider skips its name checks entirely and a bad name
+    # sails through validate only to fail at plan. This catches it either way.
+    condition     = can(regex("^[a-zA-Z0-9_-]+$", var.name)) && length(var.name) <= 30
+    error_message = "name must be alphanumerics, hyphens or underscores, and at most 30 characters (ELBv2 names are capped at 32 and this module appends \"-q\")."
+  }
 }
 
 # ----------------------------------------------------------------------------
@@ -173,6 +201,22 @@ variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)
   default     = {}
+}
+
+# ----------------------------------------------------------------------------
+# At-least-once dedup table (pkg/state/dynamodb.Deduper)
+# ----------------------------------------------------------------------------
+
+variable "dedup_enabled" {
+  description = "When true, provision a sibling DDB table for at-least-once dedup (pk string hash key, native TTL on the `ttl` attribute), grant the worker and bootstrap task roles read+write on it, and inject DDB_DEDUP_TABLE into all three tasks' environments. Strongly recommended for any source that may redeliver records (Kinesis Lambda BatchItemFailures, Kafka rebalance, SQS visibility timeout). Default false — single-table mode."
+  type        = bool
+  default     = false
+}
+
+variable "dedup_table_name" {
+  description = "Override the dedup-table name. Defaults to \"<name>_dedup\". Honored only when dedup_enabled is true."
+  type        = string
+  default     = null
 }
 
 # ----------------------------------------------------------------------------

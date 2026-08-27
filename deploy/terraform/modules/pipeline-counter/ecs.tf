@@ -62,7 +62,7 @@ resource "aws_ecs_service" "worker" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = concat([aws_security_group.worker.id], var.extra_worker_security_group_ids)
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
 
   deployment_minimum_healthy_percent = 50

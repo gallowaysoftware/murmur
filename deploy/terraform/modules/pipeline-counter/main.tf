@@ -3,7 +3,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -27,6 +27,41 @@ resource "aws_dynamodb_table" "state" {
   attribute {
     name = "sk"
     type = "N"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  tags = var.tags
+}
+
+# ----------------------------------------------------------------------------
+# Dedup table (optional; pkg/state/dynamodb.Deduper)
+#
+# Schema: pk (string) hash key + ttl (N) attribute for DDB native TTL eviction.
+# No range key. Atomic claim via PutItem with attribute_not_exists(pk).
+# ----------------------------------------------------------------------------
+
+locals {
+  dedup_table_name_effective = coalesce(var.dedup_table_name, "${var.name}_dedup")
+}
+
+resource "aws_dynamodb_table" "dedup" {
+  count = var.dedup_enabled ? 1 : 0
+
+  name         = local.dedup_table_name_effective
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
   }
 
   ttl {
@@ -137,6 +172,36 @@ resource "aws_iam_role_policy" "bootstrap_ddb" {
   policy = data.aws_iam_policy_document.ddb_rw.json
 }
 
+# Dedup-table IAM. Worker + bootstrap need PutItem-with-condition + GetItem.
+# Query never reads the dedup table.
+
+data "aws_iam_policy_document" "dedup_rw" {
+  count = var.dedup_enabled ? 1 : 0
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+    ]
+    resources = [aws_dynamodb_table.dedup[0].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "worker_dedup" {
+  count  = var.dedup_enabled ? 1 : 0
+  name   = "${var.name}-worker-dedup"
+  role   = aws_iam_role.worker_task.id
+  policy = data.aws_iam_policy_document.dedup_rw[0].json
+}
+
+resource "aws_iam_role_policy" "bootstrap_dedup" {
+  count  = var.dedup_enabled ? 1 : 0
+  name   = "${var.name}-bootstrap-dedup"
+  role   = aws_iam_role.bootstrap_task.id
+  policy = data.aws_iam_policy_document.dedup_rw[0].json
+}
+
 # ----------------------------------------------------------------------------
 # CloudWatch log groups
 # ----------------------------------------------------------------------------
@@ -174,6 +239,7 @@ locals {
       AWS_REGION = data.aws_region.current.region
     },
     var.valkey_uri == null ? {} : { VALKEY_ADDRESS = var.valkey_uri },
+    var.dedup_enabled ? { DDB_DEDUP_TABLE = aws_dynamodb_table.dedup[0].name } : {},
     var.swap_enabled ? {
       SWAP_CONTROL_TABLE = aws_dynamodb_table.swap_control[0].name
       SWAP_ALIAS         = var.name

@@ -1,0 +1,62 @@
+# Soak configuration — the low-cost shape used to start STABILITY.md's
+# "exercised against real (non-`local`) AWS for at least one full quarter"
+# clock. Copy to soak.tfvars and fill in the account-specific values.
+#
+#   terraform apply -var-file=soak.tfvars
+#
+# Target: ~$60-80/mo. See the Cost section in README.md for the bottom-up
+# arithmetic and for what the production-shape defaults cost instead
+# (~$180-225/mo).
+#
+# The point of the soak is operational evidence — that the Lambda runtime,
+# the processor core, the Kafka source, and the multi-source DDB merge all
+# behave over a quarter. One task exercises the same code as two, so
+# everything here is scaled to the floor that still exercises every path.
+
+aws_region = "ca-central-1"
+
+# Networking. `assign_public_ip = true` puts the Fargate tasks in a subnet
+# with an internet gateway and skips the NAT gateway entirely (~$18/mo).
+# Use the default VPC's subnets — they already route via an IGW.
+# Tasks remain unreachable inbound: the worker SG has no ingress and the
+# query SG admits only the ALB.
+vpc_id             = "vpc-REPLACE"
+private_subnet_ids = ["subnet-REPLACE-a", "subnet-REPLACE-b"]
+assign_public_ip   = true
+
+ecs_cluster_arn  = "arn:aws:ecs:ca-central-1:REPLACE:cluster/murmur-soak"
+ecs_cluster_name = "murmur-soak"
+
+image           = "REPLACE.dkr.ecr.ca-central-1.amazonaws.com/murmur-recently-interacted:soak"
+lambda_zip_path = "../cmd/lambda/lambda.zip"
+
+# Kafka source.
+kafka_brokers  = "REPLACE:9092"
+kafka_topic    = "interactions"
+consumer_group = "recently_interacted_soak"
+
+# Kinesis source — one shard is 1 MB/s in, far beyond a ~1 event/sec soak.
+kinesis_shard_count           = 1
+lambda_batch_size             = 100
+lambda_parallelization_factor = 1
+
+# Sizing — one of each. Two tasks would exercise no additional code path.
+worker_desired_count = 1
+query_desired_count  = 1
+
+# Observability. Leave this null and the alarms exist but notify NOBODY —
+# they still record state transitions in the console, but a failure in week 3
+# reaches you only if you happen to look. For an unattended soak, wire it.
+#
+# After apply, CONFIRM the SNS subscription (it starts as PendingConfirmation)
+# and then prove the path end to end:
+#
+#   aws sns list-subscriptions-by-topic --topic-arn <arn>
+#   aws cloudwatch set-alarm-state --alarm-name recently_interacted-lambda-silent \
+#       --state-value ALARM --state-reason "notification path test"
+alarm_sns_topic_arn = "arn:aws:sns:ca-central-1:REPLACE:murmur-soak-alerts"
+
+tags = {
+  Service = "recently_interacted"
+  Env     = "soak"
+}
