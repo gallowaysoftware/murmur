@@ -64,7 +64,13 @@ CI runs them on every PR" — which was false; it ran only via
 `make test-integration`, which as of the entry above did not work either.
 
 The new `Library-shape E2E (test/e2e)` job stands up the compose stack and runs
-it. It also **fails on a skip**: these tests gate themselves on infra env vars,
+it. Getting it green surfaced a third bug: `make compose-up` ran
+`init-mongo-replset.sh` immediately after `docker compose up -d`, but `up -d`
+returns when containers are *created*, not when the daemons inside them accept
+connections — so `rs.initiate()` ran against a still-starting mongod and
+failed. It was invisible because the call was `|| true`, so a failed replica-set
+init was silent and the Mongo CDC tests simply skipped. Both the Makefile and
+the CI job now wait for mongod, then for the set to elect a primary. It also **fails on a skip**: these tests gate themselves on infra env vars,
 so "ran nothing" and "everything passed" are the same exit code — exactly the
 property that let the suite rot unnoticed. `scripts/assert-tests-ran.py`
 enforces it.

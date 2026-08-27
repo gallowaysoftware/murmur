@@ -111,12 +111,15 @@ jobs:
         # own e2e lives in the sparkconnect submodule.
         run: docker compose up -d kafka dynamodb-local mongo minio
 
-      - name: init mongo replica set
-        # Change Streams require a replica set; pkg/source/snapshot/mongo's
-        # HandoffToken capture depends on it. The script is idempotent.
-        run: ./scripts/init-mongo-replset.sh
-
       - name: wait for infra
+        # MUST come before the replset init: `docker compose up -d` returns as
+        # soon as the containers are created, not when the daemons inside them
+        # accept connections. Running rs.initiate() against a mongod that is
+        # still starting fails.
+        #
+        # (`make compose-up` has the same ordering bug but hides it behind
+        # `|| true`, so a failed replset init is silent there and the Mongo CDC
+        # tests just skip.)
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
@@ -134,6 +137,27 @@ jobs:
           echo "::error::infra did not become ready"
           docker compose ps
           docker compose logs --tail=50
+          exit 1
+
+      - name: init mongo replica set
+        # Change Streams require a replica set; pkg/source/snapshot/mongo's
+        # HandoffToken capture depends on it. The script is idempotent.
+        run: ./scripts/init-mongo-replset.sh
+
+      - name: wait for replica set to elect a primary
+        # rs.initiate() returns before the election completes. Connecting with
+        # replicaSet=rs0 against a set with no primary yet fails, and the CDC
+        # tests would skip rather than run.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if docker exec murmur-mongo mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+              echo "replica set has a primary after $i attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::replica set never elected a primary"
+          docker exec murmur-mongo mongosh --quiet --eval 'rs.status()' || true
           exit 1
 
       - name: e2e tests
