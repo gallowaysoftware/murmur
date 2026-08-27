@@ -24,6 +24,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pins `go-version-file: go.mod`, so a dependency that breaks only under a
   newer toolchain could never be caught. The new lane builds and unit-tests
   against current Go as a hard gate.
+- **`golangci-lint` pinned to v2.13.1** in CI (was `version: latest`). A
+  floating linter makes CI non-reproducible — an untouched commit can go red
+  months later because the action pulled a release with new checks. Pinning it
+  surfaced one such pre-existing finding, `unparam` on
+  `kafka.(*Source).readSerial`, now documented with a `//nolint` explaining
+  why the always-nil error result is deliberate signature symmetry with
+  `readConcurrent`.
 
 ### Added — v1 readiness pass
 
