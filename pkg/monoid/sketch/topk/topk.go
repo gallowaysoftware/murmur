@@ -40,14 +40,44 @@ const DefaultK = 10
 func TopK() monoid.Monoid[[]byte] { return New(DefaultK) }
 
 // New returns a Misra-Gries top-K monoid with capacity k.
-func New(k uint32) monoid.Monoid[[]byte] {
+func New(k uint32, opts ...Option) monoid.Monoid[[]byte] {
 	if k == 0 {
 		k = DefaultK
 	}
-	return topKMonoid{k: k}
+	mo := topKMonoid{k: k}
+	for _, o := range opts {
+		o(&mo)
+	}
+	return mo
 }
 
-type topKMonoid struct{ k uint32 }
+// Option configures the top-K monoid.
+type Option func(*topKMonoid)
+
+// WithDecodeErrorHandler installs a callback invoked when Combine cannot
+// decode one of its operands.
+//
+// Combine returns no error — the contract is Combine(a, b) V — so the only
+// recovery on a decode failure is to return the operand that DID decode,
+// silently discarding the other. That recovery is deliberate; doing it
+// silently is not. Without this hook the affected key quietly loses counts
+// with no error, no metric, and no log line.
+//
+// The handler must be cheap and non-blocking; it runs on the merge path.
+func WithDecodeErrorHandler(fn func(error)) Option {
+	return func(m *topKMonoid) { m.onDecodeErr = fn }
+}
+
+type topKMonoid struct {
+	k           uint32
+	onDecodeErr func(error)
+}
+
+func (m topKMonoid) reportDecodeError(err error) {
+	if m.onDecodeErr != nil {
+		m.onDecodeErr(err)
+	}
+}
 
 func (m topKMonoid) Identity() []byte {
 	return encode(m.k, nil)
@@ -63,9 +93,12 @@ func (m topKMonoid) Combine(a, b []byte) []byte {
 	sa, errA := decode(a)
 	sb, errB := decode(b)
 	if errA != nil {
+		// Keep the operand that decoded; report the one that didn't.
+		m.reportDecodeError(fmt.Errorf("topk: decode left operand (%d bytes): %w", len(a), errA))
 		return b
 	}
 	if errB != nil {
+		m.reportDecodeError(fmt.Errorf("topk: decode right operand (%d bytes): %w", len(b), errB))
 		return a
 	}
 	// Sum on key collision.

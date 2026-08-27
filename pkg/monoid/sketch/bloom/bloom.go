@@ -12,6 +12,7 @@ package bloom
 
 import (
 	"bytes"
+	"fmt"
 
 	"github.com/bits-and-blooms/bloom/v3"
 
@@ -33,18 +34,49 @@ func Bloom() monoid.Monoid[[]byte] {
 // NewWithCapacity returns a Bloom-filter monoid sized for the expected number of
 // distinct elements n and target false-positive rate p. The shape is fixed for the
 // lifetime of the monoid; all sketches it merges must share these parameters.
-func NewWithCapacity(n uint, p float64) monoid.Monoid[[]byte] {
+func NewWithCapacity(n uint, p float64, opts ...Option) monoid.Monoid[[]byte] {
 	probe := bloom.NewWithEstimates(n, p)
 	mBits := probe.Cap()
 	kHashes := probe.K()
-	return bloomMonoid{n: n, p: p, m: mBits, k: kHashes}
+	bm := bloomMonoid{n: n, p: p, m: mBits, k: kHashes}
+	for _, o := range opts {
+		o(&bm)
+	}
+	return bm
+}
+
+// Option configures the Bloom monoid.
+type Option func(*bloomMonoid)
+
+// WithDecodeErrorHandler installs a callback invoked when Combine cannot
+// decode one of its operands.
+//
+// Combine returns no error — the contract is Combine(a, b) V — so the only
+// recovery on a decode failure is to return the operand that DID decode,
+// silently discarding the other. That recovery is deliberate; doing it
+// silently is not. For Bloom the silent case is especially easy to hit: every
+// sketch merged must share the (m, k) shape, so a single caller constructing
+// the monoid with different capacity parameters produces filters that fail to
+// decode against each other — and without this hook, membership answers just
+// quietly go wrong.
+//
+// The handler must be cheap and non-blocking; it runs on the merge path.
+func WithDecodeErrorHandler(fn func(error)) Option {
+	return func(m *bloomMonoid) { m.onDecodeErr = fn }
 }
 
 type bloomMonoid struct {
-	n uint
-	p float64
-	m uint
-	k uint
+	n           uint
+	p           float64
+	m           uint
+	k           uint
+	onDecodeErr func(error)
+}
+
+func (bm bloomMonoid) reportDecodeError(err error) {
+	if bm.onDecodeErr != nil {
+		bm.onDecodeErr(err)
+	}
 }
 
 func (bm bloomMonoid) Identity() []byte {
@@ -62,10 +94,13 @@ func (bm bloomMonoid) Combine(a, b []byte) []byte {
 	}
 	ba := bloom.New(bm.m, bm.k)
 	if err := ba.UnmarshalBinary(a); err != nil {
+		// Keep the operand that decoded; report the one that didn't.
+		bm.reportDecodeError(fmt.Errorf("bloom: decode left operand (%d bytes): %w", len(a), err))
 		return b
 	}
 	bb := bloom.New(bm.m, bm.k)
 	if err := bb.UnmarshalBinary(b); err != nil {
+		bm.reportDecodeError(fmt.Errorf("bloom: decode right operand (%d bytes): %w", len(b), err))
 		return a
 	}
 	// Cap or K mismatch: return left operand. In practice this happens when sketches

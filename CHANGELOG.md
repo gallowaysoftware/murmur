@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — sketch decode failures are reportable
+
+`hll`, `topk` and `bloom` each recover from a `Combine` decode failure by
+returning whichever operand decoded and discarding the other. `Monoid.Combine`
+is `Combine(a, b) V` with no error return, so that recovery is the only option
+short of corrupting merged state or panicking a worker mid-batch — but it was
+**silent**, and the affected key just quietly lost cardinality or counts.
+
+- All three constructors now take `WithDecodeErrorHandler(func(error))`.
+  Errors name the sketch and which operand failed, and wrap the underlying
+  cause so callers can `errors.Unwrap` rather than string-match. Variadic, so
+  no existing call site changes.
+- Bloom is the easiest to hit silently: every merged sketch must share the
+  `(m, k)` shape, so one caller constructing the monoid with different
+  capacity parameters produces filters that fail to decode against each other
+  — and membership answers just quietly go wrong.
+
+### Fixed — STABILITY.md claimed a sharp edge was closed when it was not
+
+Sharp edge #1 struck through "sources, caches, and sketch `Combine` swallow
+real failures" and declared it closed. It was closed for sources and runtimes,
+but all three sketch monoids still dropped an operand with no error, no metric
+and no log line. A sharp-edges list that wrongly reads "closed" is worse than
+the bug it hides, because it tells readers not to look. Now states plainly
+what is closed, what remains, and that properly closing it means giving
+`Monoid.Combine` an error return — a v1-scoped decision affecting every
+implementation and call site.
+
+
 ### Added — CloudWatch EMF metrics recorder
 
 **`pkg/metrics/emf`** implements `metrics.Recorder` on top of the CloudWatch

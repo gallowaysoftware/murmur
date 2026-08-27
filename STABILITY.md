@@ -11,7 +11,7 @@ edges callers should plan around.
 | `pkg/pipeline` | experimental | DSL surface is likely to gain `Validate()` (renamed from `Build()`) and per-stage type narrowing |
 | `pkg/murmur` | experimental | Builder presets are the recommended entry point; expect renames before v1 |
 | `pkg/monoid/core` | mostly stable | `Min` / `Max` use `Bounded[V]` for a proper Identity; lift inputs via `core.NewBounded(v)`. `Monotonic[V](identity)` is the raw-V counterpart that pairs with conditional-update stores like `pkg/state/dynamodb.Int64MaxStore` for the SetCountIfGreater pattern (out-of-order absolute-value safety) |
-| `pkg/monoid/sketch/{hll,topk,bloom}` | experimental | `Combine` returning the wrong operand on decode error is tracked; cross-runtime encoding portability not yet proven |
+| `pkg/monoid/sketch/{hll,topk,bloom}` | experimental | On a decode error `Combine` returns the operand that decoded and discards the other — unavoidable while `Monoid.Combine` has no error return, but now reportable via `WithDecodeErrorHandler`; wire it to a `metrics.Recorder` or the loss stays invisible. Cross-runtime encoding portability not yet proven |
 | `pkg/monoid/compose` | mostly stable | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1. `state.NewInstrumented` / `state.NewInstrumentedCache` decorate any store/cache with metrics.Recorder hooks (store_get / store_get_many / store_merge_update / cache_get / cache_repopulate latencies + errors) |
@@ -46,12 +46,28 @@ edges callers should plan around.
 
 ## Known sharp edges (priority order)
 
-1. **Silent error paths.** ~~Many `_ = err` sites across sources, caches, and sketch
-   `Combine` swallow real failures.~~ Closed by the `pkg/exec/processor` consolidation
-   (streaming, bootstrap, replay, and every Lambda handler now share one
-   retry/dedup/metrics core) plus per-source `OnDecodeError` and `OnFetchError`
-   callbacks for poison-pill routing. The remaining `_ = err` sites are documented
-   non-fatal cleanup paths (e.g. franz-go `CommitMarkedOffsets` during Close).
+1. **Silent error paths.** Mostly closed, with one caveat that was previously
+   struck through in error.
+
+   Closed for sources and runtimes by the `pkg/exec/processor` consolidation
+   (streaming, bootstrap, replay, and every Lambda handler share one
+   retry/dedup/metrics core) plus per-source `OnDecodeError` / `OnFetchError`
+   callbacks for poison-pill routing. The remaining `_ = err` sites are
+   documented non-fatal cleanup paths (e.g. franz-go `CommitMarkedOffsets`
+   during Close).
+
+   **Still open by design in the sketch monoids.** `Monoid.Combine` is
+   `Combine(a, b) V` with no error return, so when `hll` / `topk` / `bloom`
+   cannot decode an operand the only recovery is to return the one that did
+   and discard the other. That recovery is deliberate — it beats corrupting
+   the merged state or panicking a worker mid-batch — but the loss is real:
+   the affected key silently loses cardinality or counts.
+
+   It is now at least *observable*. Each constructor takes
+   `WithDecodeErrorHandler(func(error))`; wire it to a `metrics.Recorder` so
+   dropped operands are counted and alarmable. Closing this properly means
+   changing the `Monoid` interface to return an error, which is a v1-scoped
+   decision affecting every implementation and every call site.
 
 2. ~~**Monoid laws.**~~ Fixed in PR-3: `Min` / `Max` now use `core.Bounded[V]`
    so Identity is the unset wrapper rather than the zero value of `V`. `Decayed`

@@ -10,6 +10,8 @@
 package hll
 
 import (
+	"fmt"
+
 	"github.com/axiomhq/hyperloglog"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
@@ -21,16 +23,53 @@ import (
 // To feed an element into a pipeline using this monoid, the pipeline's value extractor
 // should return Single(element) — a marshaled HLL containing exactly that one element.
 // The streaming runtime then merges singletons into the running state via Combine.
-func HLL() monoid.Monoid[[]byte] { return hllMonoid{} }
+func HLL(opts ...Option) monoid.Monoid[[]byte] {
+	m := hllMonoid{}
+	for _, o := range opts {
+		o(&m)
+	}
+	return m
+}
 
-type hllMonoid struct{}
+// Option configures the HLL monoid.
+type Option func(*hllMonoid)
+
+// WithDecodeErrorHandler installs a callback invoked when Combine cannot
+// decode one of its operands.
+//
+// Combine's signature returns no error — the Monoid contract is
+// Combine(a, b) V — so on a decode failure the only recovery available is to
+// return the operand that DID decode, silently discarding the other. That
+// recovery is deliberate (dropping one sketch beats corrupting the merged
+// state or panicking a worker mid-batch), but doing it silently is not: the
+// affected keys quietly lose cardinality with no error, no metric, and no log
+// line.
+//
+// Wire this to a metrics.Recorder so the loss is at least countable:
+//
+//	hll.HLL(hll.WithDecodeErrorHandler(func(err error) {
+//	    rec.RecordError("my_pipeline:sketch_decode", err)
+//	}))
+//
+// The handler must be cheap and non-blocking; it runs on the merge path.
+func WithDecodeErrorHandler(fn func(error)) Option {
+	return func(m *hllMonoid) { m.onDecodeErr = fn }
+}
+
+type hllMonoid struct{ onDecodeErr func(error) }
+
+func (m hllMonoid) reportDecodeError(err error) {
+	if m.onDecodeErr != nil {
+		m.onDecodeErr(err)
+	}
+}
 
 func (hllMonoid) Identity() []byte {
 	b, _ := hyperloglog.New().MarshalBinary()
 	return b
 }
 
-func (hllMonoid) Combine(a, b []byte) []byte {
+func (m hllMonoid) Combine(a, b []byte) []byte {
 	switch {
 	case len(a) == 0:
 		return b
@@ -39,10 +78,13 @@ func (hllMonoid) Combine(a, b []byte) []byte {
 	}
 	ha := hyperloglog.New()
 	if err := ha.UnmarshalBinary(a); err != nil {
+		// Keep the operand that decoded; report the one that didn't.
+		m.reportDecodeError(fmt.Errorf("hll: decode left operand (%d bytes): %w", len(a), err))
 		return b
 	}
 	hb := hyperloglog.New()
 	if err := hb.UnmarshalBinary(b); err != nil {
+		m.reportDecodeError(fmt.Errorf("hll: decode right operand (%d bytes): %w", len(b), err))
 		return a
 	}
 	if err := ha.Merge(hb); err != nil {
