@@ -9,6 +9,21 @@
 # ----------------------------------------------------------------------------
 
 locals {
+  # The ALB is optional. It is a standing ~$17-22/mo charge that exists purely
+  # to front the query service, and a soak or a batch-only deployment often
+  # doesn't need it — reach the task on its private IP or via
+  # `aws ecs execute-command` instead.
+  query_alb_enabled = var.query_alb_enabled
+
+  # ALB will not accept a GRPC target group behind an HTTP listener:
+  #   InvalidLoadBalancerAction: Listener protocol 'HTTP' is not supported
+  #   with a target group with the protocol-version 'GRPC'
+  # gRPC over ALB requires TLS, so GRPC mode is gated on a certificate. With
+  # no certificate we fall back to HTTP1, which still serves Connect's
+  # HTTP+JSON interface on the same port — `pkg/query/grpc` speaks gRPC,
+  # gRPC-Web and Connect from one handler.
+  query_grpc_mode = var.query_certificate_arn != null
+
   # ELBv2 names accept only alphanumerics and hyphens. `var.name` doubles as
   # the DynamoDB table name, where underscores ARE legal and idiomatic, so it
   # is sanitized here rather than constrained globally. Without this, a
@@ -19,6 +34,7 @@ locals {
 
 
 resource "aws_security_group" "query_alb" {
+  count       = local.query_alb_enabled ? 1 : 0
   name        = "${var.name}-query-alb"
   description = "${var.name} internal query ALB"
   vpc_id      = var.vpc_id
@@ -46,11 +62,19 @@ resource "aws_security_group" "query_task" {
   description = "${var.name} query task"
   vpc_id      = var.vpc_id
 
-  ingress {
-    from_port       = var.grpc_port
-    to_port         = var.grpc_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.query_alb.id]
+  # `dynamic`, not an inline block with a conditional `security_groups`. With
+  # the ALB disabled that list is empty, and an ingress rule with no source is
+  # meaningless — AWS refuses to store it, so Terraform re-proposes it on every
+  # plan and the configuration never converges. Omitting the block entirely is
+  # the only shape that settles.
+  dynamic "ingress" {
+    for_each = local.query_alb_enabled ? [1] : []
+    content {
+      from_port       = var.grpc_port
+      to_port         = var.grpc_port
+      protocol        = "tcp"
+      security_groups = [aws_security_group.query_alb[0].id]
+    }
   }
 
   egress {
@@ -64,31 +88,41 @@ resource "aws_security_group" "query_task" {
 }
 
 resource "aws_lb" "query" {
+  count              = local.query_alb_enabled ? 1 : 0
   name               = substr("${local.elb_name_base}-q", 0, 32)
   internal           = true
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.query_alb.id]
+  security_groups    = [aws_security_group.query_alb[0].id]
   subnets            = var.private_subnet_ids
 
   tags = var.tags
 }
 
 resource "aws_lb_target_group" "query" {
+  count            = local.query_alb_enabled ? 1 : 0
   name             = substr("${local.elb_name_base}-q", 0, 32)
   port             = var.grpc_port
   protocol         = "HTTP"
-  protocol_version = "GRPC"
+  protocol_version = local.query_grpc_mode ? "GRPC" : "HTTP1"
   target_type      = "ip"
   vpc_id           = var.vpc_id
 
   health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    interval            = 15
-    matcher             = "0-99"
-    path                = "/grpc.health.v1.Health/Check"
-    protocol            = "HTTP"
-    timeout             = 5
+    enabled           = true
+    healthy_threshold = 2
+    interval          = 15
+    protocol          = "HTTP"
+    timeout           = 5
+    # NOTE: pkg/query/grpc does not register a health service. In GRPC mode
+    # the probe still succeeds because ALB reads the gRPC status code and
+    # UNIMPLEMENTED (12) falls inside the 0-99 matcher. In HTTP1 mode there is
+    # no health path either — Connect endpoints are POST-only, so a GET
+    # returns 404/405 — hence the widened matcher. Both are liveness proxies
+    # ("the port answers"), not readiness. Registering a real health service
+    # is tracked as a follow-up.
+    matcher = local.query_grpc_mode ? "0-99" : "200-499"
+    path    = local.query_grpc_mode ? "/grpc.health.v1.Health/Check" : "/"
+
     unhealthy_threshold = 3
   }
 
@@ -96,13 +130,19 @@ resource "aws_lb_target_group" "query" {
 }
 
 resource "aws_lb_listener" "query" {
-  load_balancer_arn = aws_lb.query.arn
+  count             = local.query_alb_enabled ? 1 : 0
+  load_balancer_arn = aws_lb.query[0].arn
   port              = var.grpc_port
-  protocol          = "HTTP"
+
+  # HTTPS is mandatory when the target group is GRPC; AWS rejects the pair
+  # outright otherwise.
+  protocol        = local.query_grpc_mode ? "HTTPS" : "HTTP"
+  certificate_arn = var.query_certificate_arn
+  ssl_policy      = local.query_grpc_mode ? var.query_ssl_policy : null
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.query.arn
+    target_group_arn = aws_lb_target_group.query[0].arn
   }
 }
 
@@ -153,10 +193,13 @@ resource "aws_ecs_service" "query" {
     assign_public_ip = var.assign_public_ip
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.query.arn
-    container_name   = "query"
-    container_port   = var.grpc_port
+  dynamic "load_balancer" {
+    for_each = local.query_alb_enabled ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.query[0].arn
+      container_name   = "query"
+      container_port   = var.grpc_port
+    }
   }
 
   deployment_minimum_healthy_percent = 50

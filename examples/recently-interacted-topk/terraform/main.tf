@@ -12,6 +12,25 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Fail the plan if Container Insights is off on the caller-owned cluster. The
+# worker/query liveness alarms read ECS/ContainerInsights, which publishes
+# nothing when it is disabled — and since those alarms treat missing data as
+# breaching (so a dead service alarms instead of looking healthy), a disabled
+# cluster puts them in permanent ALARM. That is worse than having no alarm at
+# all: it teaches the operator to ignore the two that watch the Kafka half.
+data "aws_ecs_cluster" "target" {
+  cluster_name = var.ecs_cluster_name
+
+  lifecycle {
+    postcondition {
+      condition = !var.require_container_insights || anytrue([
+        for s in self.setting : s.value == "enabled" if s.name == "containerInsights"
+      ])
+      error_message = "Container Insights is disabled on ECS cluster '${var.ecs_cluster_name}'. The worker/query liveness alarms would sit in ALARM forever. Enable it with: aws ecs update-cluster-settings --cluster ${var.ecs_cluster_name} --settings name=containerInsights,value=enabled  (then force a redeploy). Set require_container_insights = false to bypass."
+    }
+  }
+}
+
 # ----------------------------------------------------------------------------
 # ECS side: Kafka worker + query + bootstrap + state DDB + dedup DDB.
 # ----------------------------------------------------------------------------
@@ -34,6 +53,7 @@ module "ecs" {
   worker_desired_count = var.worker_desired_count
   query_desired_count  = var.query_desired_count
   assign_public_ip     = var.assign_public_ip
+  query_alb_enabled    = var.query_alb_enabled
 
   extra_worker_security_group_ids = var.extra_worker_security_group_ids
 

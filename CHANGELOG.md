@@ -28,6 +28,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drops a dummy `NODE_AUTH_TOKEN` export used only for registry publishing,
   which this workflow does not do.
 
+### Fixed — three more soak blockers, found by actually applying
+
+PR #72 claimed these but they were left uncommitted in a working tree; only
+the earlier commit merged. `main` still shipped the broken listener until now.
+
+- **`GRPC` target group under an `HTTP` listener could never apply.** ALB
+  rejects the pair outright (`InvalidLoadBalancerAction`) — gRPC over ALB
+  requires TLS. `protocol_version` is now gated on a new
+  `query_certificate_arn`: with a certificate the listener is HTTPS and the
+  target group GRPC; without one it falls back to HTTP1, which still serves
+  Connect's HTTP+JSON on the same port, since `pkg/query/grpc` speaks gRPC,
+  gRPC-Web and Connect from one handler. **No review caught this — only a
+  real `CreateListener` call did.**
+- **`query_alb_enabled`** (default `true`, unchanged behaviour) makes the ALB
+  optional. It is a ~$17-22/mo standing charge that exists only to front the
+  query service, which a soak does not need.
+- **The `query_task` ingress never converged.** It was an inline `ingress`
+  block whose `security_groups` went empty when the ALB was disabled. An
+  ingress rule with no source is meaningless, AWS will not store it, and
+  Terraform therefore re-proposed it on every plan — a configuration that can
+  never reach `No changes`. Now a `dynamic` block that is simply absent.
+- **Teardown ordering hazard, documented.** When the ALB security group must
+  go away, Terraform tries to delete it *before* updating the `query-task`
+  rule referencing it, with no dependency edge forcing the other order. It
+  retries for 15 minutes and fails with `DependencyViolation`; the rule has
+  to be revoked by hand. The underlying fix is separate
+  `aws_vpc_security_group_ingress_rule` resources rather than inline blocks.
+
+### Fixed — the ECS liveness alarms alarmed on themselves
+
+`worker-not-running` and `query-not-running` read `ECS/ContainerInsights`,
+which publishes nothing unless Container Insights is enabled on the cluster —
+and the cluster is caller-owned, so the module cannot enable it. With it off
+the metric does not exist, and because these alarms deliberately treat missing
+data as breaching (so a dead service alarms instead of looking healthy), they
+sat in permanent ALARM while both services ran fine. That is worse than no
+alarm: it trains the operator to ignore the two that watch the Kafka half.
+
+Now asserted at plan time via a `postcondition` on a new
+`aws_ecs_cluster` data source, with the enabling command in the error message
+and a `require_container_insights` escape hatch.
 
 ### Security
 

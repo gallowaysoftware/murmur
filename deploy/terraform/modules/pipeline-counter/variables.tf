@@ -1,3 +1,21 @@
+variable "query_alb_enabled" {
+  description = "Provision the internal ALB in front of the query service. It is a standing ~$17-22/mo charge that bills whether or not anything queries, so soaks and batch-only deployments often want it off — reach the task on its private IP or via `aws ecs execute-command` instead. Default true preserves existing behaviour."
+  type        = bool
+  default     = true
+}
+
+variable "query_certificate_arn" {
+  description = "ACM certificate for the query ALB listener. Required for real gRPC: ALB refuses a GRPC target group behind an HTTP listener (`InvalidLoadBalancerAction`), and gRPC over ALB requires TLS. When null the listener is plain HTTP and the target group drops to HTTP1, which still serves Connect's HTTP+JSON interface on the same port."
+  type        = string
+  default     = null
+}
+
+variable "query_ssl_policy" {
+  description = "TLS policy for the query ALB listener. Only used when query_certificate_arn is set."
+  type        = string
+  default     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+}
+
 variable "assign_public_ip" {
   description = <<-EOT
     Whether Fargate tasks get a public IP.
