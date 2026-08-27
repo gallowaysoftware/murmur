@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+#### Build failure on Go 1.27 (`undefined: http2.TrailerPrefix`)
+
+- **`golang.org/x/net` 0.54.0 → 0.55.0.** Murmur did not compile on Go 1.27.
+  x/net 0.54.0 gates its legacy `http2` implementation behind
+  `//go:build !(go1.27 && !http2legacy)` and delegates to the standard
+  library instead, but the Go 1.27 wrapper never re-exported the
+  `TrailerPrefix` constant. `google.golang.org/grpc` references
+  `http2.TrailerPrefix` (at every version through v1.83.2), so any build of
+  murmur on Go 1.27 failed with `undefined: http2.TrailerPrefix` in
+  `grpc/internal/transport/handler_server.go`. x/net 0.55.0 hoists the
+  constant into an ungated `server_common.go`; bumping the pin is the whole
+  fix — no gRPC change is involved, and no gRPC bump resolves it.
+- **CI gained a `Go (latest stable toolchain)` job.** Every existing Go job
+  pins `go-version-file: go.mod`, so a dependency that breaks only under a
+  newer toolchain could never be caught. The new lane builds and unit-tests
+  against current Go as a hard gate.
+- **`golangci-lint` pinned to v2.13.1** in CI (was `version: latest`). A
+  floating linter makes CI non-reproducible — an untouched commit can go red
+  months later because the action pulled a release with new checks. Pinning it
+  surfaced one such pre-existing finding, `unparam` on
+  `kafka.(*Source).readSerial`, now documented with a `//nolint` explaining
+  why the always-nil error result is deliberate signature symmetry with
+  `readConcurrent`.
+
 ### Added — v1 readiness pass
 
 A focused push closing the remaining gaps before tagging `v1.0.0`. Each
