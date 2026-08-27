@@ -6,6 +6,54 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — unbounded allocation decoding a malformed TopK sketch
+
+`topk.decode` read the item count `n` straight off the wire and passed it to
+`make([]Item, 0, n)` with no validation. `Item` is 24 bytes, so a corrupt or
+truncated sketch — a partially-written DynamoDB item, a truncated read, bytes
+from a different monoid — decodes `n` as up to 2^32-1 and triggers a **~100 GB
+allocation attempt**. The worker OOMs instead of degrading, which defeats the
+entire purpose of `Combine`'s error path: it never gets reached.
+
+`keyLen` had the same problem, and the key was read with `Reader.Read`, which
+may return a short read without an error and silently truncate the key.
+
+Both are now bounded by the bytes actually remaining, and the key is read with
+`io.ReadFull`. Rejecting 8 bytes of garbage went from **20ms to 16.5µs** —
+1200× — and the sketch test package dropped from ~35s to 1s.
+
+Found by investigating why a new test was slow, which is a reminder that
+"this test is oddly slow" is sometimes a bug report.
+
+### Added — sketch decode failures are reportable
+
+`hll`, `topk` and `bloom` each recover from a `Combine` decode failure by
+returning whichever operand decoded and discarding the other. `Monoid.Combine`
+is `Combine(a, b) V` with no error return, so that recovery is the only option
+short of corrupting merged state or panicking a worker mid-batch — but it was
+**silent**, and the affected key just quietly lost cardinality or counts.
+
+- All three constructors now take `WithDecodeErrorHandler(func(error))`.
+  Errors name the sketch and which operand failed, and wrap the underlying
+  cause so callers can `errors.Unwrap` rather than string-match. Variadic, so
+  no existing call site changes.
+- Bloom is the easiest to hit silently: every merged sketch must share the
+  `(m, k)` shape, so one caller constructing the monoid with different
+  capacity parameters produces filters that fail to decode against each other
+  — and membership answers just quietly go wrong.
+
+### Fixed — STABILITY.md claimed a sharp edge was closed when it was not
+
+Sharp edge #1 struck through "sources, caches, and sketch `Combine` swallow
+real failures" and declared it closed. It was closed for sources and runtimes,
+but all three sketch monoids still dropped an operand with no error, no metric
+and no log line. A sharp-edges list that wrongly reads "closed" is worse than
+the bug it hides, because it tells readers not to look. Now states plainly
+what is closed, what remains, and that properly closing it means giving
+`Monoid.Combine` an error return — a v1-scoped decision affecting every
+implementation and call site.
+
+
 ### Added — CloudWatch EMF metrics recorder
 
 **`pkg/metrics/emf`** implements `metrics.Recorder` on top of the CloudWatch

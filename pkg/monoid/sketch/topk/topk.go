@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
@@ -40,14 +41,44 @@ const DefaultK = 10
 func TopK() monoid.Monoid[[]byte] { return New(DefaultK) }
 
 // New returns a Misra-Gries top-K monoid with capacity k.
-func New(k uint32) monoid.Monoid[[]byte] {
+func New(k uint32, opts ...Option) monoid.Monoid[[]byte] {
 	if k == 0 {
 		k = DefaultK
 	}
-	return topKMonoid{k: k}
+	mo := topKMonoid{k: k}
+	for _, o := range opts {
+		o(&mo)
+	}
+	return mo
 }
 
-type topKMonoid struct{ k uint32 }
+// Option configures the top-K monoid.
+type Option func(*topKMonoid)
+
+// WithDecodeErrorHandler installs a callback invoked when Combine cannot
+// decode one of its operands.
+//
+// Combine returns no error — the contract is Combine(a, b) V — so the only
+// recovery on a decode failure is to return the operand that DID decode,
+// silently discarding the other. That recovery is deliberate; doing it
+// silently is not. Without this hook the affected key quietly loses counts
+// with no error, no metric, and no log line.
+//
+// The handler must be cheap and non-blocking; it runs on the merge path.
+func WithDecodeErrorHandler(fn func(error)) Option {
+	return func(m *topKMonoid) { m.onDecodeErr = fn }
+}
+
+type topKMonoid struct {
+	k           uint32
+	onDecodeErr func(error)
+}
+
+func (m topKMonoid) reportDecodeError(err error) {
+	if m.onDecodeErr != nil {
+		m.onDecodeErr(err)
+	}
+}
 
 func (m topKMonoid) Identity() []byte {
 	return encode(m.k, nil)
@@ -63,9 +94,12 @@ func (m topKMonoid) Combine(a, b []byte) []byte {
 	sa, errA := decode(a)
 	sb, errB := decode(b)
 	if errA != nil {
+		// Keep the operand that decoded; report the one that didn't.
+		m.reportDecodeError(fmt.Errorf("topk: decode left operand (%d bytes): %w", len(a), errA))
 		return b
 	}
 	if errB != nil {
+		m.reportDecodeError(fmt.Errorf("topk: decode right operand (%d bytes): %w", len(b), errB))
 		return a
 	}
 	// Sum on key collision.
@@ -152,6 +186,18 @@ func decode(b []byte) ([]Item, error) {
 	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
 		return nil, fmt.Errorf("topk decode N: %w", err)
 	}
+	// n and keyLen come straight off the wire, so both must be bounded by what
+	// the remaining input could possibly hold before they reach make().
+	// Without this a corrupt or truncated sketch — a partially-written DDB
+	// item, bytes from a different monoid — decodes n as up to 2^32-1 and
+	// make([]Item, 0, n) attempts a ~100 GB allocation. That OOMs the worker
+	// rather than degrading: Combine's error path exists precisely to survive
+	// bad bytes, and it never gets reached.
+	const minItemBytes = 8 + 4 // count + keyLen, with a zero-length key
+	if maxItems := uint64(r.Len()) / minItemBytes; uint64(n) > maxItems {
+		return nil, fmt.Errorf("topk decode: header claims %d items but only %d bytes remain (max %d)", n, r.Len(), maxItems)
+	}
+
 	items := make([]Item, 0, n)
 	for i := uint32(0); i < n; i++ {
 		var count uint64
@@ -162,8 +208,13 @@ func decode(b []byte) ([]Item, error) {
 		if err := binary.Read(r, binary.LittleEndian, &keyLen); err != nil {
 			return nil, fmt.Errorf("topk decode keyLen[%d]: %w", i, err)
 		}
+		if uint64(keyLen) > uint64(r.Len()) {
+			return nil, fmt.Errorf("topk decode keyLen[%d]: claims %d bytes but only %d remain", i, keyLen, r.Len())
+		}
 		keyBytes := make([]byte, keyLen)
-		if _, err := r.Read(keyBytes); err != nil {
+		// io.ReadFull, not r.Read: Reader.Read may return a short read without
+		// error, which would silently truncate the key.
+		if _, err := io.ReadFull(r, keyBytes); err != nil {
 			return nil, fmt.Errorf("topk decode key[%d]: %w", i, err)
 		}
 		items = append(items, Item{Key: string(keyBytes), Count: count})
