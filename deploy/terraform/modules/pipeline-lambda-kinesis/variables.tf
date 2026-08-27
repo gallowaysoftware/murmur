@@ -135,16 +135,32 @@ variable "state_table_arn" {
   type        = string
 }
 
+variable "dedup_enabled" {
+  description = "Whether to wire at-least-once dedup: grants the Lambda role GetItem / PutItem / DeleteItem on the dedup table and injects DDB_DEDUP_TABLE into the function env. Must be a literal known at plan time — do NOT derive it from another module's output. Set dedup_table_arn and dedup_table_name alongside it. Strongly recommended for Kinesis, whose BatchItemFailures semantics redeliver records adjacent to a failure."
+  type        = bool
+  default     = false
+}
+
 variable "dedup_table_arn" {
-  description = "Optional ARN of the at-least-once dedup table. When set, grants the Lambda role GetItem / PutItem / DeleteItem and injects DDB_DEDUP_TABLE into the function env. Strongly recommended for Kinesis (BatchItemFailures may redeliver adjacent records)."
+  description = "ARN of the at-least-once dedup table. Required when dedup_enabled is true; used only to scope the IAM policy, so it may be a value that is unknown until apply (e.g. a sibling module's output)."
   type        = string
   default     = null
+
+  validation {
+    condition     = !var.dedup_enabled || var.dedup_table_arn != null
+    error_message = "dedup_table_arn must be set when dedup_enabled is true."
+  }
 }
 
 variable "dedup_table_name" {
-  description = "Dedup table name. Required when dedup_table_arn is set so the module can populate DDB_DEDUP_TABLE in the Lambda env."
+  description = "Dedup table name. Required when dedup_enabled is true so the module can populate DDB_DEDUP_TABLE in the Lambda env."
   type        = string
   default     = null
+
+  validation {
+    condition     = !var.dedup_enabled || var.dedup_table_name != null
+    error_message = "dedup_table_name must be set when dedup_enabled is true."
+  }
 }
 
 variable "state_table_name" {

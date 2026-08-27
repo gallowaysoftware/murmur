@@ -3,7 +3,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -33,6 +33,7 @@ module "ecs" {
 
   worker_desired_count = var.worker_desired_count
   query_desired_count  = var.query_desired_count
+  assign_public_ip     = var.assign_public_ip
 
   extra_worker_security_group_ids = var.extra_worker_security_group_ids
 
@@ -62,6 +63,12 @@ module "lambda" {
 
   state_table_arn  = module.ecs.ddb_table_arn
   state_table_name = module.ecs.ddb_table_name
+
+  # `dedup_enabled` is a literal, deliberately. The module gates `count` on it,
+  # and a count derived from module.ecs.dedup_table_arn (unknown until apply)
+  # fails the whole plan. The ARN/name below only scope the IAM policy, where
+  # apply-time values are fine.
+  dedup_enabled    = true
   dedup_table_arn  = module.ecs.dedup_table_arn
   dedup_table_name = module.ecs.dedup_table_name
 

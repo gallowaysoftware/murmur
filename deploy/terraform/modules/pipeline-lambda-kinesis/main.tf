@@ -2,8 +2,13 @@ terraform {
   required_version = ">= 1.5"
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
+      source = "hashicorp/aws"
+      # `~> 6.0`, not `>= 5.0`: this module reads
+      # `data.aws_region.current.region`, which only exists on provider v6+
+      # (v5 exposes `.name`). An open-ended lower bound also lets an
+      # unattended re-init during a long soak pull a future v7 and plan
+      # destructive replacements against live resources.
+      version = "~> 6.0"
     }
   }
 }
@@ -14,12 +19,20 @@ locals {
   create_stream = var.kinesis_stream_arn == null
   stream_arn    = local.create_stream ? aws_kinesis_stream.source[0].arn : var.kinesis_stream_arn
 
-  dedup_enabled = var.dedup_table_arn != null
+  # Gate on the caller-supplied boolean, NOT on `var.dedup_table_arn != null`.
+  # The ARN comes from a sibling module in the same run, so it is unknown at
+  # plan time; using it as a `count` fails the whole plan with "The count value
+  # depends on resource attributes that cannot be determined until apply."
+  # A plain bool is known at plan time and keeps the env map determinate too.
+  dedup_enabled = var.dedup_enabled
 
+  # AWS_REGION is deliberately NOT set here: Lambda reserves it, and
+  # CreateFunction rejects any environment containing a reserved key. The
+  # runtime injects it and the AWS SDK reads it automatically. (Setting it is
+  # fine for the ECS tasks in pipeline-counter — the restriction is Lambda's.)
   base_env = merge(
     {
-      DDB_TABLE  = var.state_table_name
-      AWS_REGION = data.aws_region.current.region
+      DDB_TABLE = var.state_table_name
     },
     local.dedup_enabled ? { DDB_DEDUP_TABLE = var.dedup_table_name } : {},
     var.lambda_env,

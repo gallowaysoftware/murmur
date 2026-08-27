@@ -36,8 +36,9 @@ for the composition pattern.
   RDS. (Murmur's recommended deploy keeps Lambda VPC-less and reaches DDB via
   the public endpoint.)
 - The dedup table itself — that's owned by the sibling `pipeline-counter`
-  module. Pass `dedup_table_arn` + `dedup_table_name` to grant the Lambda
-  access; the module wires the env var.
+  module. Set `dedup_enabled = true` (a plan-time literal) and pass
+  `dedup_table_arn` + `dedup_table_name` to grant the Lambda access; the
+  module wires the `DDB_DEDUP_TABLE` env var.
 - Application-level dead-letter queues for poison pills inside the handler.
   The module *can* attach a Lambda on-failure SQS/SNS destination via
   `on_failure_destination_arn`, which catches records that exhausted Lambda's
@@ -71,6 +72,10 @@ module "recently_interacted_kinesis" {
 
   state_table_arn   = module.recently_interacted.ddb_table_arn
   state_table_name  = module.recently_interacted.ddb_table_name
+  # A literal, not a module output: `dedup_enabled` gates `count`, and a
+  # count that depends on another module's not-yet-created attribute fails
+  # the plan outright.
+  dedup_enabled     = true
   dedup_table_arn   = module.recently_interacted.dedup_table_arn
   dedup_table_name  = module.recently_interacted.dedup_table_name
 
@@ -112,7 +117,7 @@ See [`variables.tf`](./variables.tf) for the full set. Required inputs:
 | `state_table_name`| Name of the same table (populated into the Lambda env).           |
 
 Notable optionals: `kinesis_stream_arn`, `kinesis_shard_count`,
-`dedup_table_arn` + `dedup_table_name`, `batch_size`,
+`dedup_enabled`, `dedup_table_arn` + `dedup_table_name`, `batch_size`,
 `parallelization_factor`, `starting_position` /
 `starting_position_timestamp`, `maximum_retry_attempts`,
 `on_failure_destination_arn`, `reserved_concurrency`.

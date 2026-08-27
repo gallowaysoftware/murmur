@@ -170,16 +170,53 @@ See [`variables.tf`](./variables.tf). Required: `aws_region`, `vpc_id`,
 | `lambda_role_arn`               | Lambda execution role.                                      |
 | `bootstrap_task_definition_arn` | For S3-archive backfill via `aws ecs run-task`.             |
 
-## Cost notes (rough order of magnitude)
+## Cost
 
-For a low-volume soak (~10 events/sec across both ingest paths, 24/7):
+Two configurations, priced bottom-up. The **standing** column bills 24/7
+whether or not a single event flows — it is the half that keeps accruing in
+exactly the failure mode where the pipeline is dead and nobody noticed.
 
-- ECS Fargate (2× worker + 2× query, default sizes): ~$60/mo.
-- Lambda (provisioned arm64 512MB, ~50k invocations/day at the default
-  batch_window): ~$2/mo.
-- Kinesis (2 shards): ~$22/mo.
-- DynamoDB (PAY_PER_REQUEST, low write volume): ~$5/mo.
-- NAT data + CloudWatch logs: variable; budget ~$10/mo.
+### Production-shape defaults (~10 events/sec, `terraform.tfvars.example`)
 
-Order-of-magnitude total: **~$100/mo** for a low-throughput soak. Scale
-worker/query/Kinesis up for higher volume.
+| Item | Standing | Usage | Notes |
+|---|---|---|---|
+| ECS Fargate — 2× worker + 2× query | ~$60 | — | Four tasks at default sizes |
+| Query ALB | ~$17–22 | + LCU | **Hourly charge just to exist**; unconditional in `pipeline-counter` |
+| NAT gateway (if `assign_public_ip = false`) | ~$33 | + $0.045/GB | One per AZ; the classic surprise |
+| Kinesis — 2 provisioned shards | ~$22 | + PUT payload | |
+| Lambda — arm64 512MB | — | ~$2 | |
+| DynamoDB — PAY_PER_REQUEST | — | **~$36–75** | See below |
+| CloudWatch logs + 11 alarms | — | ~$10 | |
+| **Total** | **~$132–137** | **~$48–87** | **≈ $180–225/mo** |
+
+The earlier "~$100/mo" estimate in this file was wrong in the direction that
+matters: it omitted the ALB and NAT hourly lines entirely, and understated
+DynamoDB by 7–15×.
+
+**Why DynamoDB is not ~$5.** The pipeline aggregates TopK — a non-coalescable
+CAS monoid — onto a **single `"global"` row**. Every event costs a
+strongly-consistent read plus two conditional writes, multiplied by the CAS
+attempt count under contention. And a `PAY_PER_REQUEST` table under CAS
+contention does not throttle; it just bills. `WriteThrottleEvents` therefore
+cannot detect a runaway, which is why `ddb-write-runaway` (on
+`ConsumedWriteCapacityUnits`) exists in `alarms.tf`.
+
+### Soak configuration (`soak.tfvars`)
+
+The soak's job is to prove the code paths work and stay working, not to
+measure throughput. One task exercises the same code as two.
+
+| Change | Saves |
+|---|---|
+| `worker_desired_count = 1`, `query_desired_count = 1` | ~$30 |
+| `kinesis_shard_count = 1` | ~$11 |
+| `assign_public_ip = true` — public subnet, no NAT | ~$18 |
+| ~1 event/sec instead of 10 | ~$32–68 |
+| **Total** | **≈ $60–80/mo** |
+
+Tasks stay unreachable inbound with a public IP: the worker SG has no ingress
+and the query SG admits only the ALB.
+
+**Set an AWS Budget with an email action.** For an unattended personal-account
+soak that is the real backstop — every alarm here watches correctness, not
+spend, and the DynamoDB line is the one that can run away quietly.

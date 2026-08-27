@@ -184,6 +184,69 @@ rollup can over-count that key. That is the correct trade — at-least-once
 permits re-application but never permits loss, and dedup is a best-effort
 mitigation layered on top, not a stronger guarantee.
 
+### Fixed — soak deploy composition (`terraform-multisource`)
+
+The composition added for the real-AWS soak could not be applied. Three
+independent blockers, none of which `terraform validate` can see:
+
+- **`plan` could not complete at all.** `pipeline-lambda-kinesis` gated two
+  `count` arguments on `var.dedup_table_arn != null`, and that ARN comes from
+  a sibling module in the same run — unknown at plan time. Terraform aborted
+  with *"The count value depends on resource attributes that cannot be
+  determined until apply."* Replaced with an explicit plan-time
+  `dedup_enabled` bool; the ARN now scopes the IAM policy only, where
+  apply-time values are fine. The module's own README demonstrated the broken
+  pattern and is corrected too.
+- **`AWS_REGION` is a reserved Lambda environment key.** The module injected
+  it into every function's environment, so `CreateFunction` rejected the
+  centrepiece resource outright. The runtime sets it and the SDK reads it
+  automatically. (Unchanged for `pipeline-counter`'s ECS tasks — the
+  restriction is Lambda's.)
+- **The default `name` broke ELBv2 validation.** `recently_interacted` flows
+  into `aws_lb` / `aws_lb_target_group`, which accept only alphanumerics and
+  hyphens. `var.name` doubles as the DynamoDB table name, where underscores
+  are legal, so it is sanitized at the ELB sites rather than constrained
+  globally, plus a `validation` block on `pipeline-counter`'s `var.name`.
+  Note that root variables are unknown during `terraform validate`, so the
+  provider skips its own name checks — a `validation` block is the only form
+  of this that a validate-based CI gate can enforce.
+
+### Added — soak observability and cost controls
+
+- **Liveness alarms.** All six existing alarms were positive-polarity
+  (`count > 0`) with `treat_missing_data = "notBreaching"`, so a pipeline that
+  simply STOPPED reported OK on every one — an all-green console for a dead
+  soak, which is the inverse of the signal it was meant to give. Added
+  `lambda-silent` (Invocations), `kinesis-silent` (IncomingRecords),
+  `worker-not-running` and `query-not-running` (ECS RunningTaskCount), all
+  `LessThanThreshold` with `treat_missing_data = "breaching"`. The ECS/Kafka
+  half previously had no alarm coverage of any kind.
+- **`ddb-write-runaway`** on `ConsumedWriteCapacityUnits`. TopK is a
+  non-coalescable CAS monoid on a single row, and a `PAY_PER_REQUEST` table
+  under CAS contention does not throttle — it just bills — so the existing
+  `WriteThrottleEvents` alarms cannot detect a runaway.
+- **`assign_public_ip`** on `pipeline-counter` (default `false`, unchanged
+  behaviour). Fargate tasks were hardcoded into private subnets; with no NAT
+  gateway `apply` still succeeds and the tasks then loop forever on
+  `CannotPullContainerError` — silently, since nothing alarmed on ECS. Public
+  IPs cost ~$14.60/mo for four tasks against ~$32.85/mo for one NAT, and the
+  tasks stay unreachable inbound.
+- **`soak.tfvars.example`** — the ~$60–80/mo shape, versus ~$180–225/mo for
+  the production-shape defaults.
+
+### Changed
+
+- **The runbook's cost table was wrong by 2×** in the direction that matters:
+  it omitted the ALB and NAT hourly lines entirely (both bill 24/7 regardless
+  of throughput) and understated DynamoDB by 7–15× by not accounting for
+  TopK's read-plus-two-conditional-writes per event on a single hot row.
+  Rewritten as a standing-vs-usage split with the arithmetic shown.
+- **AWS provider constraint tightened** from `>= 5.0` to `~> 6.0` across all
+  three configurations. The code reads `data.aws_region.current.region`, which
+  only exists on v6 (v5 exposes `.name`), so the old floor was wrong — and an
+  open-ended upper bound let an unattended re-init during a long soak pull a
+  future v7 and plan destructive replacements against live resources.
+
 ### Added — real-AWS deploy composition for `recently-interacted-topk`
 
 End-to-end Terraform under [`examples/recently-interacted-topk/terraform/`](examples/recently-interacted-topk/terraform/)

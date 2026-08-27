@@ -4,6 +4,23 @@ variable "name" {
   default     = "recently_interacted"
 }
 
+variable "ecs_cluster_name" {
+  description = "ECS cluster NAME (not ARN) — CloudWatch alarm dimensions need the bare name. Must refer to the same cluster as ecs_cluster_arn."
+  type        = string
+}
+
+variable "ddb_write_capacity_alarm_threshold" {
+  description = "Alarm when the state table consumes more than this many WCUs in a 5-minute period. Default 9000 ~= 30 WCU/s sustained, comfortably above a ~1-10 event/sec soak but low enough to catch a CAS retry storm before it shows up on the bill."
+  type        = number
+  default     = 9000
+}
+
+variable "assign_public_ip" {
+  description = "Give the Fargate tasks public IPs instead of requiring a NAT gateway. Set true for a low-cost soak in a default VPC (~$14.60/mo of public IPv4 vs ~$32.85/mo for one NAT). Tasks remain unreachable inbound."
+  type        = bool
+  default     = false
+}
+
 variable "aws_region" {
   description = "AWS region. Passed to the AWS provider; module resources inherit it."
   type        = string
