@@ -17,9 +17,9 @@ jobs:
     # gofmt-check + go vet too, but those duplicate the golangci-lint
     # `gofmt` formatter + `govet` linter — see .golangci.yml.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -54,9 +54,9 @@ jobs:
     # This job tracks whatever Go is current and fails loudly when that
     # recurs. Keep it a hard gate, not `continue-on-error`.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: true
@@ -86,8 +86,8 @@ jobs:
     # once for the sparkconnect submodule (golangci-lint doesn't
     # follow go.work).
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -120,10 +120,14 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # Node 24 (active LTS). Kept in lockstep with web/package.json's
+          # `engines.node` and the `@types/node` major — typing against a
+          # newer Node than the one that executes lets tsc accept APIs that
+          # do not exist at runtime.
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
@@ -149,9 +153,9 @@ jobs:
     # config mistakes).
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true

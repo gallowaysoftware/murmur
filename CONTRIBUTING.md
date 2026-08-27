@@ -43,7 +43,7 @@ Don't open public issues for vulnerabilities — email
 
 - **Go 1.26** (see `go.mod`).
 - **Docker** + `docker compose v2` — for the integration test stack.
-- **Node 20+** and **npm 10+** — for `web/`.
+- **Node 24+** and **npm 10+** — for `web/`. Pinned in `.nvmrc` and enforced by `engines` in `web/package.json`; CI runs the same major.
 
 ### Recommended
 
