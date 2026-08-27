@@ -41,6 +41,41 @@ jobs:
           go test -short -race -timeout 120s ./...
           (cd pkg/exec/batch/sparkconnect && go test -short -race -timeout 120s ./...)
 
+  go-latest-toolchain:
+    name: Go (latest stable toolchain)
+    runs-on: ubuntu-latest
+    # Canary lane. Every other Go job pins `go-version-file: go.mod`, so a
+    # dependency that compiles under the pinned toolchain but breaks under a
+    # NEWER one is invisible to CI by construction. That is not theoretical:
+    # Go 1.27 switched golang.org/x/net/http2 to a stdlib-delegating wrapper
+    # (`//go:build !(go1.27 && !http2legacy)`), which dropped the
+    # `http2.TrailerPrefix` export that google.golang.org/grpc references — so
+    # murmur did not build on Go 1.27 at all while CI stayed fully green.
+    # This job tracks whatever Go is current and fails loudly when that
+    # recurs. Keep it a hard gate, not `continue-on-error`.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: true
+
+      - name: stub embed dir
+        run: |
+          mkdir -p pkg/admin/dist
+          [ -f pkg/admin/dist/README.md ] || echo placeholder > pkg/admin/dist/README.md
+
+      - name: go build
+        run: |
+          go build ./...
+          (cd pkg/exec/batch/sparkconnect && go build ./...)
+
+      - name: unit tests
+        run: |
+          go test -short -race -timeout 120s ./...
+          (cd pkg/exec/batch/sparkconnect && go test -short -race -timeout 120s ./...)
+
   golangci-lint:
     name: golangci-lint
     runs-on: ubuntu-latest
