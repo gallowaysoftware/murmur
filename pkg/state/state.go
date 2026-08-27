@@ -74,6 +74,21 @@ type Deduper interface {
 	// — duplicates are NOT errors.
 	MarkSeen(ctx context.Context, eventID string) (firstSeen bool, err error)
 
+	// Release drops a claim previously won by MarkSeen, so a redelivery of the
+	// same event can win the claim again.
+	//
+	// The runtime calls this when a merge fails *after* the claim succeeded.
+	// Without it the claim outlives the failed write and the event is dropped
+	// permanently on redelivery — a silent violation of the at-least-once
+	// contract, and the worst failure mode available to a non-idempotent
+	// monoid (Sum / HLL / TopK), which loses counts with no error and no
+	// metric.
+	//
+	// Releasing an eventID that isn't currently claimed must be a no-op, not
+	// an error: the runtime cannot always distinguish "we claimed it" from
+	// "the claim already expired via TTL".
+	Release(ctx context.Context, eventID string) error
+
 	// Close releases any underlying resources.
 	Close() error
 }

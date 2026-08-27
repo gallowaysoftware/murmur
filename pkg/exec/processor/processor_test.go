@@ -66,9 +66,11 @@ func (*flakyStore) Close() error { return nil }
 
 // memDeduper.
 type memDeduper struct {
-	mu   sync.Mutex
-	seen map[string]bool
-	err  error
+	mu         sync.Mutex
+	seen       map[string]bool
+	err        error
+	releaseErr error
+	releases   int
 }
 
 func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
@@ -86,6 +88,23 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = true
 	return true, nil
 }
+func (d *memDeduper) Release(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.releases++
+	if d.releaseErr != nil {
+		return d.releaseErr
+	}
+	delete(d.seen, id)
+	return nil
+}
+
+func (d *memDeduper) claimed(id string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.seen[id]
+}
+
 func (*memDeduper) Close() error { return nil }
 
 func key(s string) func(string) string { return func(string) string { return s } }
@@ -227,5 +246,109 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.Dedup != nil {
 		t.Error("Defaults: Dedup should be nil unless set explicitly")
+	}
+}
+
+// deadStore fails every MergeUpdate. Models a store outage that outlives the
+// runtime's retry budget — the case where a claimed EventID would otherwise
+// be stranded.
+type deadStore struct{ calls int }
+
+func (*deadStore) Get(context.Context, state.Key) (int64, bool, error) { return 0, false, nil }
+func (*deadStore) GetMany(context.Context, []state.Key) ([]int64, []bool, error) {
+	return nil, nil, nil
+}
+func (s *deadStore) MergeUpdate(context.Context, state.Key, int64, time.Duration) error {
+	s.calls++
+	return errFlaky
+}
+func (*deadStore) Close() error { return nil }
+
+func TestMergeOne_FailedMergeReleasesDedupClaim(t *testing.T) {
+	// Regression: the claim must not outlive a failed merge. Claiming the
+	// EventID before the merge and never releasing it means the source's
+	// redelivery hits dedup_skip and the event is dropped permanently —
+	// silent count loss for Sum / HLL / TopK.
+	dedup := &memDeduper{}
+	rec := metrics.NewInMemory()
+	cfg := processor.Defaults()
+	cfg.Recorder = rec
+	cfg.Dedup = dedup
+	cfg.MaxAttempts = 1
+
+	// First delivery: the store is down, so the merge fails.
+	dead := &deadStore{}
+	if err := processor.MergeOne(context.Background(), &cfg, "test", "evt-1", time.Now(),
+		"hello", key("a"), one, dead, nil, nil); err == nil {
+		t.Fatal("expected the merge to fail while the store is down")
+	}
+	if dedup.claimed("evt-1") {
+		t.Error("EventID is still claimed after a failed merge: a redelivery " +
+			"will be skipped and the event lost forever")
+	}
+	if dedup.releases != 1 {
+		t.Errorf("Release calls: got %d, want 1", dedup.releases)
+	}
+	if rec.SnapshotOne("test:dedup_release").EventsProcessed != 1 {
+		t.Errorf("dedup_release events: got %d, want 1",
+			rec.SnapshotOne("test:dedup_release").EventsProcessed)
+	}
+
+	// Redelivery against a healthy store must actually apply.
+	live := &fakeStore{m: map[state.Key]int64{}}
+	if err := processor.MergeOne(context.Background(), &cfg, "test", "evt-1", time.Now(),
+		"hello", key("a"), one, live, nil, nil); err != nil {
+		t.Fatalf("redelivery after a released claim: %v", err)
+	}
+	if got := live.m[state.Key{Entity: "a"}]; got != 1 {
+		t.Errorf("redelivered event was not applied: got %d, want 1", got)
+	}
+}
+
+func TestMergeOne_SuccessfulMergeKeepsDedupClaim(t *testing.T) {
+	// The mirror of the above: a merge that succeeds must KEEP its claim, or
+	// dedup stops deduplicating anything.
+	store := &fakeStore{m: map[state.Key]int64{}}
+	dedup := &memDeduper{}
+	cfg := processor.Defaults()
+	cfg.Recorder = metrics.NewInMemory()
+	cfg.Dedup = dedup
+
+	for i := 0; i < 3; i++ {
+		if err := processor.MergeOne(context.Background(), &cfg, "test", "evt-2", time.Now(),
+			"hello", key("b"), one, store, nil, nil); err != nil {
+			t.Fatalf("invocation %d: %v", i, err)
+		}
+	}
+	if !dedup.claimed("evt-2") {
+		t.Error("claim was released after a successful merge")
+	}
+	if dedup.releases != 0 {
+		t.Errorf("Release calls on the happy path: got %d, want 0", dedup.releases)
+	}
+	if got := store.m[state.Key{Entity: "b"}]; got != 1 {
+		t.Errorf("merged value after 3 dedup-protected calls: got %d, want 1", got)
+	}
+}
+
+func TestMergeOne_ReleaseFailureIsRecordedNotFatal(t *testing.T) {
+	// A dedup-table outage during Release must not mask the underlying merge
+	// error — the caller still needs the merge failure to drive
+	// BatchItemFailures / source retry.
+	dedup := &memDeduper{releaseErr: errors.New("dedup table down")}
+	rec := metrics.NewInMemory()
+	cfg := processor.Defaults()
+	cfg.Recorder = rec
+	cfg.Dedup = dedup
+	cfg.MaxAttempts = 1
+
+	err := processor.MergeOne(context.Background(), &cfg, "test", "evt-3", time.Now(),
+		"hello", key("c"), one, &deadStore{}, nil, nil)
+	if !errors.Is(err, errFlaky) {
+		t.Fatalf("caller must see the merge error, not the release error: got %v", err)
+	}
+	if rec.SnapshotOne("test:dedup_release_failed").EventsProcessed != 1 {
+		t.Errorf("dedup_release_failed events: got %d, want 1",
+			rec.SnapshotOne("test:dedup_release_failed").EventsProcessed)
 	}
 }

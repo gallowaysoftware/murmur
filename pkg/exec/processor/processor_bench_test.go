@@ -93,6 +93,12 @@ func (d *benchDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = true
 	return true, nil
 }
+func (d *benchDeduper) Release(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.seen, id)
+	return nil
+}
 func (*benchDeduper) Close() error { return nil }
 
 func BenchmarkMergeOne_WithDedup(b *testing.B) {

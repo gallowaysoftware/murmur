@@ -91,6 +91,13 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = true
 	return true, nil
 }
+func (d *memDeduper) Release(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.seen, id)
+	return nil
+}
+
 func (*memDeduper) Close() error { return nil }
 
 type click struct {

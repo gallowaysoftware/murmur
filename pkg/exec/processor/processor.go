@@ -146,19 +146,47 @@ func MergeMany[V any](
 		return nil
 	}
 
+	// Whether *this* call won the dedup claim. Only a winner may release it:
+	// releasing on a lost claim would drop the winner's row and let a third
+	// delivery re-apply the event.
+	claimed := false
 	if cfg.Dedup != nil && eventID != "" {
 		first, err := cfg.Dedup.MarkSeen(ctx, eventID)
-		if err != nil {
+		switch {
+		case err != nil:
+			// Fail open: a dedup-table outage must not silently drop events.
 			cfg.Recorder.RecordError(pipelineName,
 				fmt.Errorf("dedup MarkSeen %q: %w", eventID, err))
-		} else if !first {
+		case !first:
 			cfg.Recorder.RecordEvent(pipelineName + ":dedup_skip")
 			return nil
+		default:
+			claimed = true
 		}
 	}
 
 	for _, entity := range keys {
 		if err := mergeKeyWithRetry(ctx, cfg, pipelineName, eventID, eventTime, entity, delta, store, cache, window); err != nil {
+			// The claim must not outlive the failed merge. If it does, the
+			// source's redelivery hits dedup_skip and the event is dropped
+			// permanently — silent count loss for Sum / HLL / TopK, with no
+			// error surface and no metric. Releasing restores at-least-once.
+			//
+			// KeyByMany caveat: if an earlier key in this batch already
+			// merged, releasing lets the redelivery re-apply it, so a
+			// hierarchical rollup can over-count that key. That is the
+			// correct trade — at-least-once permits re-application but never
+			// permits loss, and dedup is a best-effort mitigation layered on
+			// top, not a stronger guarantee.
+			if claimed {
+				if rerr := cfg.Dedup.Release(ctx, eventID); rerr != nil {
+					cfg.Recorder.RecordError(pipelineName,
+						fmt.Errorf("dedup Release %q after failed merge: %w", eventID, rerr))
+					cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
+				} else {
+					cfg.Recorder.RecordEvent(pipelineName + ":dedup_release")
+				}
+			}
 			return err
 		}
 	}
