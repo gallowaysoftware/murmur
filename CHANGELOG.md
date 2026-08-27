@@ -6,6 +6,66 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+#### Build failure on Go 1.27 (`undefined: http2.TrailerPrefix`)
+
+- **`golang.org/x/net` 0.54.0 → 0.55.0.** Murmur did not compile on Go 1.27.
+  x/net 0.54.0 gates its legacy `http2` implementation behind
+  `//go:build !(go1.27 && !http2legacy)` and delegates to the standard
+  library instead, but the Go 1.27 wrapper never re-exported the
+  `TrailerPrefix` constant. `google.golang.org/grpc` references
+  `http2.TrailerPrefix` (at every version through v1.83.2), so any build of
+  murmur on Go 1.27 failed with `undefined: http2.TrailerPrefix` in
+  `grpc/internal/transport/handler_server.go`. x/net 0.55.0 hoists the
+  constant into an ungated `server_common.go`; bumping the pin is the whole
+  fix — no gRPC change is involved, and no gRPC bump resolves it.
+- **CI gained a `Go (latest stable toolchain)` job.** Every existing Go job
+  pins `go-version-file: go.mod`, so a dependency that breaks only under a
+  newer toolchain could never be caught. The new lane builds and unit-tests
+  against current Go as a hard gate.
+- **`golangci-lint` pinned to v2.13.1** in CI (was `version: latest`). A
+  floating linter makes CI non-reproducible — an untouched commit can go red
+  months later because the action pulled a release with new checks. Pinning it
+  surfaced one such pre-existing finding, `unparam` on
+  `kafka.(*Source).readSerial`, now documented with a `//nolint` explaining
+  why the always-nil error result is deliberate signature symmetry with
+  `readConcurrent`.
+
+### Fixed — documentation that contradicted the code
+
+Found while walking the matrix for the promotions below. Each of these is
+something a prospective adopter reads before they read any code.
+
+- **`doc/design.md` §15 attributed its performance numbers to measurements
+  that do not exist.** It claimed they came from "the docker-compose
+  integration suite (`test/e2e/`)" and "production-shape micro-benchmarks
+  against DDB-local". Both are false: `test/e2e/` holds correctness
+  assertions with no `b.N` anywhere, and no benchmark in the repo touches
+  DDB-local. The four that exist run against in-memory fakes — the headline
+  "10× speedup at N=16" is goroutines contending on a `sync/atomic` slot
+  array with a `time.Sleep` standing in for store latency. §15 now opens with
+  an explicit provenance note, and the same caveat is applied to the
+  throughput claim in `README.md` and the 10× claim in `STABILITY.md`.
+  Measured numbers become a deliverable of the v1 soak.
+- **`STABILITY.md`'s `pkg/metrics` row was factually wrong**, claiming "only
+  `streaming.Run` is wired today; bootstrap / replay / sources are not."
+  `Recorder` has been wired through `pkg/exec/processor` — and therefore
+  through bootstrap, replay, and every Lambda handler — since the processor
+  consolidation. Sources genuinely aren't instrumented; the row now says so
+  precisely.
+- **`README.md`'s Status paragraph contradicted its own feature table** and
+  the CHANGELOG, saying `get_many` / `get_range` were "Sum-only until
+  `pkg/query/typed` grows the matching methods." That gate was lifted during
+  the typed-client parity work.
+- **The v1 release criteria were unfollowable.** "`v1.0.0` will ship after PR
+  1–4 land" had three incompatible readings in-repo, and under every
+  non-literal one all four had already landed. Replaced with a checkable
+  four-part list naming the soak target, the promotions it unblocks, the five
+  code blockers it does *not* fix (with the `Build()` → `Validate()` rename
+  flagged as the only one with a hard deadline), and the release-engineering
+  gap.
+
 ### Changed — STABILITY.md promotions (experimental → mostly stable)
 
 Thirteen packages move off the `experimental` row. Promotion criteria:

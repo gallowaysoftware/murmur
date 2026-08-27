@@ -197,6 +197,14 @@ func (s *Source[T]) Read(ctx context.Context, out chan<- source.Record[T]) error
 }
 
 // readSerial is the historical single-goroutine path.
+//
+// The error result is always nil: every exit here is a clean shutdown (context
+// cancelled, client closed, or dispatchRecord hitting ctx.Done()), and Read's
+// contract is to return nil on shutdown. The signature stays symmetric with
+// readConcurrent — which does return real errors — so Read can dispatch to
+// either without special-casing.
+//
+//nolint:unparam // deliberate signature symmetry with readConcurrent; see above.
 func (s *Source[T]) readSerial(ctx context.Context, out chan<- source.Record[T]) error {
 	for {
 		if err := ctx.Err(); err != nil {

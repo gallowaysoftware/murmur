@@ -24,7 +24,7 @@ edges callers should plan around.
 | `pkg/source/snapshot/jsonl` | mostly stable | JSON-Lines bootstrap source. Reads from any io.Reader (local file, S3 GetObject body, gzip stream). HandoffToken is caller-supplied (bootstrap from a snapshot whose live-source resume position was captured externally). Default EventID is `<name>:<line-num>`; override with EventIDFn for re-run idempotency |
 | `pkg/source/snapshot/s3` | mostly stable | S3 prefix-scan bootstrap source. Composes ListObjectsV2 + GetObject + auto-gzip with the jsonl line decoder. Right tool for "bootstrap from a partitioned S3 archive" (Firehose, daily DDB exports, Hive-style partitions). KeyFilter, custom OpenObject hook, custom EventIDFn |
 | `pkg/replay/s3` | mostly stable | JSON Lines via `Driver`; Parquet via `ParquetDriver` (apache/arrow-go/v18; the same archive can hold both formats — the default Parquet `KeyFilter` selects only `*.parquet`) |
-| `pkg/exec/streaming` | mostly stable | per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window; `WithConcurrency(N)` distributes records across N worker goroutines via key-hash routing (10× speedup at N=16 under 5ms-store-latency benchmark); `RunFanout` runs N pipelines against ONE shared source with counted-tee Ack semantics (one underlying source.Ack after every pipeline has processed); `WithKeyDebounce` drops same-key records within a window, `WithValueDebounce` drops same-(key,value) records within a window — both safe with idempotent / absolute-value monoids (Max/Min/Set/Last/HLL/Bloom/Monotonic), unsafe with delta-accumulating monoids (Sum/Count/TopK) |
+| `pkg/exec/streaming` | mostly stable | per-record retry + DLQ via WithMaxAttempts / WithDeadLetter; opt-in write aggregation (`WithBatchWindow`) collapses N hot-key records into 1 store call per flush window; `WithConcurrency(N)` distributes records across N worker goroutines via key-hash routing (10× at N=16 in an in-memory benchmark whose "store latency" is a `time.Sleep` — not a measurement against DynamoDB); `RunFanout` runs N pipelines against ONE shared source with counted-tee Ack semantics (one underlying source.Ack after every pipeline has processed); `WithKeyDebounce` drops same-key records within a window, `WithValueDebounce` drops same-(key,value) records within a window — both safe with idempotent / absolute-value monoids (Max/Min/Set/Last/HLL/Bloom/Monotonic), unsafe with delta-accumulating monoids (Sum/Count/TopK) |
 | `pkg/exec/processor` | experimental | shared retry / dedup / metrics core used by streaming.Run + every Lambda handler. `MergeOne` is the canonical entry point for out-of-tree drivers |
 | `pkg/projection` | experimental | bucket functions (Log/Linear/Manual) and hysteresis-band transition detection for projector-style change-data-capture into search indices. The pkg-level building block for doc/search-integration.md Pattern B |
 | `pkg/observability/autoscale` | experimental | Periodic Signal → Emitter loop for publishing scaling-signal metrics. Reference CloudWatch emitter; Signal helpers like `EventsPerSecond` derive rates from the metrics recorder. Closes `doc/architecture.md` open question #2 (worker autoscaling) |
@@ -39,7 +39,7 @@ edges callers should plan around.
 | `pkg/query/typed` | mostly stable | typed-client wrappers over the generic QueryService — `SumClient`, `HLLClient`, `TopKClient`, `BloomClient`. All four expose `Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange`. `GetMany` returns parallel value + present arrays so callers can distinguish "absent" from "present-and-empty"; `GetWindowMany` can't (the generic RPC merges before returning). The decoders + typed shape behind application-service typed-wrapper RPCs (see `examples/typed-wrapper`). Building block under `cmd/murmur-codegen-typed` |
 | `pkg/admin` | mostly stable | CORS is closed by default; opt in via `WithAllowedOrigins`. Bearer-token (`WithAuthToken`, constant-time, multi-token for rotation) and JWT (`WithJWTVerifier`, BYO verifier) auth via a single middleware; auth is off by default — same-origin / network-isolated deploys keep the historical behavior. The `cmd/murmur-ui` binary exposes `--auth-token` + `MURMUR_ADMIN_TOKEN` env fallback |
 | `pkg/swap` | mostly stable | small surface; integrated into `deploy/terraform/modules/pipeline-counter` via opt-in `swap_enabled` (control table + IAM + seed + `SWAP_CONTROL_TABLE` / `SWAP_ALIAS` env vars in every task definition) |
-| `pkg/metrics` | mostly stable | only `streaming.Run` is wired today; bootstrap / replay / sources are not |
+| `pkg/metrics` | mostly stable | `Recorder` is wired through `pkg/exec/processor`, so `streaming.Run`, `bootstrap`, `replay` and every Lambda handler record through it — including `RecordBatch` with a mode tag. Sources are not instrumented; they surface failures via their own `OnDecodeError` / `OnFetchError` callbacks instead |
 | `cmd/murmur-ui` | experimental | demo-grade dashboard; not yet a production ops surface |
 | `cmd/murmur-codegen-typed` | mostly stable | YAML pipeline-spec → typed Connect-RPC `.proto` + Go server stub (delegates to `pkg/query/typed`). Sum / HLL / TopK / Bloom pipelines; method kinds `get_all_time` / `get_window` / `get_window_many` / `get_many` / `get_range`. TopK emits a `TopKItem { string key; int64 count; }` message plus `TopKItemList` when get_window_many or get_many is used; Bloom emits `(capacity_bits, hash_functions, approx_size, present)` plus `BloomShape` when get_window_many or get_many is used. All method kinds are now available on every pipeline kind — the Sum-only gate on `get_many` / `get_range` was lifted alongside the typed-client parity work |
 
@@ -102,5 +102,47 @@ Murmur follows SemVer. Until `v1.0.0`:
 - Anything documented as "experimental" in this file may be removed entirely
   before v1.
 
-`v1.0.0` will ship after PR 1–4 land and the framework has been exercised against
-real (non-`local`) AWS for at least one full quarter.
+### What gates `v1.0.0`
+
+The former wording here — "after PR 1–4 land" — was dead. That phrase had three
+incompatible readings in this repo (the CHANGELOG's set, `doc/design.md`
+§17.5's sharp-edges 1–4, and the literal GitHub PRs #1–#4, which are
+Dependabot bumps), and under every non-literal reading all four had already
+landed. Replaced with a checkable list.
+
+**1. Operational evidence.** The framework must be exercised against real
+(non-`local`) AWS for at least one full quarter. The soak target is
+`examples/recently-interacted-topk` — the only example that exercises the
+Lambda Kinesis runtime, the shared `pkg/exec/processor` core, the Kafka
+source, and the multi-source DDB merge simultaneously, which is exactly the
+set of packages held at `experimental` for want of operational evidence rather
+than API churn. Deploy composition and runbook:
+`examples/recently-interacted-topk/terraform/`.
+
+**2. Promotions the soak unblocks.** `pkg/exec/processor`,
+`pkg/exec/lambda/kinesis`, and `pkg/source/kafka` → `mostly stable`. Note that
+the composition exercises only the *Kinesis* Lambda runtime;
+`pkg/exec/lambda/{sqs,dynamodbstreams}` will still have no real-AWS exposure
+and need either their own soak or an explicit "promoted by analogy" note.
+
+**3. Code blockers the soak does not fix.** These are independent work:
+
+   - `pkg/pipeline`: the `Build()` → `Validate()` rename. **This is the only
+     item with a hard deadline** — after a v1 tag it requires a v2 module path.
+   - `pkg/murmur`: the builder-preset renames flagged in the matrix above.
+   - `pkg/monoid/sketch/{hll,topk,bloom}`: `Combine` silently returns the
+     wrong operand on a decode error. Sharp edge #1 is marked closed for
+     sources and runtimes but is genuinely still open here.
+   - `pkg/source/snapshot/dynamodb`: per-segment `LastEvaluatedKey`
+     checkpointing on resume.
+   - `pkg/exec/batch/sparkconnect`: the `replace` directive (sharp edge #5).
+     Externally gated on `apache/spark-connect-go`'s merge queue, so the
+     realistic options are to accept and document it, vendor the needed
+     subset, or drop Spark Connect from the v1 surface. **Decide this before
+     the soak ends** — it is the one blocker whose resolution date is not ours
+     to control.
+
+**4. Release engineering.** There is exactly one tag in the repo's history,
+`v0.1.0`, and it is far behind `main`. Cut an interim `v0.2.0` reflecting the
+current tree — jumping from a stale `v0.1.0` straight to `v1.0.0` is not a
+good look for a framework asking to be adopted.
