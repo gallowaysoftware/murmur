@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — unbounded allocation decoding a malformed TopK sketch
+
+`topk.decode` read the item count `n` straight off the wire and passed it to
+`make([]Item, 0, n)` with no validation. `Item` is 24 bytes, so a corrupt or
+truncated sketch — a partially-written DynamoDB item, a truncated read, bytes
+from a different monoid — decodes `n` as up to 2^32-1 and triggers a **~100 GB
+allocation attempt**. The worker OOMs instead of degrading, which defeats the
+entire purpose of `Combine`'s error path: it never gets reached.
+
+`keyLen` had the same problem, and the key was read with `Reader.Read`, which
+may return a short read without an error and silently truncate the key.
+
+Both are now bounded by the bytes actually remaining, and the key is read with
+`io.ReadFull`. Rejecting 8 bytes of garbage went from **20ms to 16.5µs** —
+1200× — and the sketch test package dropped from ~35s to 1s.
+
+Found by investigating why a new test was slow, which is a reminder that
+"this test is oddly slow" is sometimes a bug report.
+
 ### Added — sketch decode failures are reportable
 
 `hll`, `topk` and `bloom` each recover from a `Combine` decode failure by

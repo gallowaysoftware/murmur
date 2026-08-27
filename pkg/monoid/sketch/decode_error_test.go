@@ -13,6 +13,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/bloom"
@@ -152,5 +153,64 @@ func TestSketchCombine_HandlerErrorsAreWrapped(t *testing.T) {
 	}
 	if errors.Unwrap(c.errs[0]) == nil {
 		t.Error("decode error should wrap the underlying cause")
+	}
+}
+
+func TestTopKDecode_MalformedHeaderDoesNotAllocateUnbounded(t *testing.T) {
+	// Regression: `n` was read straight off the wire and passed to
+	// make([]Item, 0, n) with no bound. A corrupt or truncated sketch — a
+	// partially-written DDB item, or bytes from a different monoid — decodes n
+	// as up to 2^32-1, and Item is 24 bytes, so the allocation attempt is
+	// ~100 GB. That OOMs the worker instead of degrading, which defeats the
+	// whole point of Combine's error path.
+	//
+	// The header below claims 0xFFFFFFFF items in 8 bytes of input.
+	hostile := []byte{
+		0x20, 0x00, 0x00, 0x00, // K = 32
+		0xff, 0xff, 0xff, 0xff, // N = 4294967295
+	}
+
+	var c capture
+	m := topk.New(32, topk.WithDecodeErrorHandler(c.fn))
+	good := topk.SingleN(32, "a", 1)
+
+	done := make(chan []byte, 1)
+	go func() { done <- m.Combine(hostile, good) }()
+
+	select {
+	case got := <-done:
+		if string(got) != string(good) {
+			t.Error("Combine must return the operand that decoded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Combine did not return within 5s — the unbounded allocation is back")
+	}
+
+	if len(c.errs) != 1 {
+		t.Fatalf("decode errors: got %d, want 1", len(c.errs))
+	}
+	if !strings.Contains(c.errs[0].Error(), "items") {
+		t.Errorf("error should explain the header was rejected: got %q", c.errs[0])
+	}
+}
+
+func TestTopKDecode_TruncatedKeyIsRejected(t *testing.T) {
+	// keyLen was also unbounded, and r.Read may return a short read with no
+	// error — which would silently truncate the key rather than fail.
+	hostile := []byte{
+		0x20, 0x00, 0x00, 0x00, // K = 32
+		0x01, 0x00, 0x00, 0x00, // N = 1
+		0x05, 0, 0, 0, 0, 0, 0, 0, // count = 5
+		0xff, 0xff, 0x00, 0x00, // keyLen = 65535, but no key bytes follow
+	}
+	var c capture
+	m := topk.New(32, topk.WithDecodeErrorHandler(c.fn))
+	good := topk.SingleN(32, "a", 1)
+
+	if got := m.Combine(hostile, good); string(got) != string(good) {
+		t.Error("Combine must return the operand that decoded")
+	}
+	if len(c.errs) != 1 {
+		t.Fatalf("decode errors: got %d, want 1", len(c.errs))
 	}
 }
