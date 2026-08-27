@@ -6,6 +6,48 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+#### Dependency refresh (round 3) — closes two Go advisories and seven npm ones
+
+Replaces the stale PR #52 bundle, which had drifted three months and would
+have landed grpc *inside* an advisory range.
+
+- **`GO-2026-6061`** — vulnerabilities in gRPC's xDS RBAC engine and HTTP/2
+  transport server. Affects `google.golang.org/grpc` below **1.82.1**; `main`
+  was on 1.81.0 and PR #52 moved it only to 1.81.1, still inside the range.
+  Now on **1.83.2**. The server half is the one that matters here: it is the
+  serving path `pkg/query/grpc` runs, and a resource-exhaustion bug there is
+  exactly what goes unnoticed in an unattended deployment.
+- **`GO-2026-5841`** — out-of-bounds read in `klauspost/compress/s2`. Fixed in
+  1.18.7; both #52 and Dependabot #64 land 1.18.6, one patch short. Bumped
+  explicitly to **1.19.2**. It is an `// indirect` dependency, so no
+  Dependabot PR will ever propose it on its own — it moves only when
+  franz-go's requirement moves, and franz-go doesn't force it past 1.18.6.
+  It sits in the Kafka record-decompression path, parsing broker-supplied
+  bytes.
+- **npm: 7 advisories → 0** (5 high). The one that counts is `react-router`,
+  a *runtime* dependency shipped inside the embedded admin UI, carrying five
+  high advisories including an open redirect and an XSS. Also cleared:
+  `vite`, `postcss`, `nanoid`, `brace-expansion`, `@babel/core`.
+
+Unlike #52, the npm `^` ranges are preserved rather than silently converted
+to exact pins.
+
+### Changed
+
+- Go dependencies moved to upstream-latest rather than the open Dependabot
+  PR targets, every one of which was already stale — Dependabot has been
+  saturated at both open-PR limits (gomod 10/10, npm 5/5) for months and so
+  has been unable to open anything new, including security bumps.
+  Notable: `franz-go` 1.21.1 → 1.21.6 (265 commits, concentrated in KIP-848
+  group rejoin/heartbeat and fetch-manager concurrency — treat as a minor),
+  `mongo-driver` 2.6.0 → 2.8.2 (2.8.1 fixes a write whose retried attempt
+  could return `ErrNoDocuments` instead of the real error — silent write
+  loss), `testcontainers-go` 0.42 → 0.44, and the aws-sdk group forward
+  three minors.
+
+
 ### Fixed
 
 #### Build failure on Go 1.27 (`undefined: http2.TrailerPrefix`)
