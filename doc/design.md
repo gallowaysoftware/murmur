@@ -2724,11 +2724,31 @@ crashing. The third case is the user's logic concern.
 
 ## 15. Performance characteristics
 
-This section is honest about throughput, latency, and where the
-bottlenecks are. Numbers are from the docker-compose integration
-suite (`test/e2e/`) and from production-shape micro-benchmarks against
-DDB-local. Production at scale will look different; treat these as
-order-of-magnitude estimates.
+> **Provenance — read this before quoting any number below.**
+>
+> These are **design-time estimates and in-memory microbenchmarks. None of
+> them is a measurement against DynamoDB, real or local.** An earlier version
+> of this paragraph attributed them to `test/e2e/` and to "production-shape
+> micro-benchmarks against DDB-local"; both attributions were false.
+> `test/e2e/` contains correctness assertions only — no `b.N`, no timing. The
+> four benchmark files that do exist
+> (`pkg/exec/processor/{processor_bench,concurrency,coalesce}_test.go`,
+> `pkg/exec/streaming/concurrency_bench_test.go`) run against in-memory fakes;
+> the "10× speedup at N=16" figure comes from goroutines contending on a
+> `sync/atomic` slot array with a `time.Sleep` standing in for store latency.
+>
+> Treat everything here as a model of where the bottlenecks *should* be, not
+> as evidence of where they are. The hot-key CAS number in §15.1 deserves the
+> most suspicion: hot-key contention is the first thing a high-cardinality
+> workload hits, and that figure is a guess.
+>
+> Real numbers are a deliverable of the v1 soak (see `STABILITY.md` →
+> "What gates `v1.0.0`"), which will publish measured events/sec/worker,
+> ingest lag p50/p99, `GetWindow` p99 by granularity, hot-key CAS retry rate,
+> and cost per million events to `doc/benchmarks.md`.
+
+This section describes throughput, latency, and where the bottlenecks are
+expected to be.
 
 ### 15.1 Throughput
 

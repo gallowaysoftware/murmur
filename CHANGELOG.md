@@ -32,6 +32,78 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   why the always-nil error result is deliberate signature symmetry with
   `readConcurrent`.
 
+### Fixed — documentation that contradicted the code
+
+Found while walking the matrix for the promotions below. Each of these is
+something a prospective adopter reads before they read any code.
+
+- **`doc/design.md` §15 attributed its performance numbers to measurements
+  that do not exist.** It claimed they came from "the docker-compose
+  integration suite (`test/e2e/`)" and "production-shape micro-benchmarks
+  against DDB-local". Both are false: `test/e2e/` holds correctness
+  assertions with no `b.N` anywhere, and no benchmark in the repo touches
+  DDB-local. The four that exist run against in-memory fakes — the headline
+  "10× speedup at N=16" is goroutines contending on a `sync/atomic` slot
+  array with a `time.Sleep` standing in for store latency. §15 now opens with
+  an explicit provenance note, and the same caveat is applied to the
+  throughput claim in `README.md` and the 10× claim in `STABILITY.md`.
+  Measured numbers become a deliverable of the v1 soak.
+- **`STABILITY.md`'s `pkg/metrics` row was factually wrong**, claiming "only
+  `streaming.Run` is wired today; bootstrap / replay / sources are not."
+  `Recorder` has been wired through `pkg/exec/processor` — and therefore
+  through bootstrap, replay, and every Lambda handler — since the processor
+  consolidation. Sources genuinely aren't instrumented; the row now says so
+  precisely.
+- **`README.md`'s Status paragraph contradicted its own feature table** and
+  the CHANGELOG, saying `get_many` / `get_range` were "Sum-only until
+  `pkg/query/typed` grows the matching methods." That gate was lifted during
+  the typed-client parity work.
+- **The v1 release criteria were unfollowable.** "`v1.0.0` will ship after PR
+  1–4 land" had three incompatible readings in-repo, and under every
+  non-literal one all four had already landed. Replaced with a checkable
+  four-part list naming the soak target, the promotions it unblocks, the five
+  code blockers it does *not* fix (with the `Build()` → `Validate()` rename
+  flagged as the only one with a hard deadline), and the release-engineering
+  gap.
+
+### Changed — STABILITY.md promotions (experimental → mostly stable)
+
+Thirteen packages move off the `experimental` row. Promotion criteria:
+the package's feature surface has been exercised by integration / e2e
+tests, the STABILITY rows tracked against it in earlier passes have
+all closed, and there are no open known sharp edges in the package's
+notes column.
+
+Promoted:
+
+- **State**: `pkg/state/dynamodb`, `pkg/state/valkey`.
+- **Streaming runtime**: `pkg/exec/streaming`, `pkg/exec/bootstrap`,
+  `pkg/exec/replay`.
+- **Sources**: `pkg/source/snapshot/jsonl`, `pkg/source/snapshot/s3`.
+- **Replay**: `pkg/replay/s3`.
+- **Query**: `pkg/query/grpc`, `pkg/query/typed`.
+- **Admin**: `pkg/admin`.
+- **Algebra**: `pkg/monoid/compose`.
+- **Tools**: `cmd/murmur-codegen-typed`.
+
+Holding `experimental` on purpose:
+
+- `pkg/source/kafka` — per-partition concurrency is fresh; needs soak.
+- `pkg/exec/processor` + `pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`
+  — processor's docstring ties its stability to the Lambda runtimes,
+  which haven't been exercised against real (non-`local`) AWS yet.
+  Promote the four together after the real-AWS soak.
+- `pkg/source/snapshot/mongo`, `pkg/source/snapshot/dynamodb` —
+  known sharp edges still documented in the notes column.
+- `pkg/monoid/sketch/{hll,topk,bloom}` — cross-runtime encoding
+  portability not yet proven.
+- `pkg/projection`, `pkg/observability/autoscale` — too new.
+- `pkg/pipeline`, `pkg/murmur` — author-flagged "expect renames
+  before v1."
+- `pkg/exec/batch/sparkconnect` — `replace`-directive gotcha persists
+  until the fork is upstreamed.
+- `cmd/murmur-ui` — explicitly "demo-grade dashboard."
+
 ### Added — v1 readiness pass
 
 A focused push closing the remaining gaps before tagging `v1.0.0`. Each
