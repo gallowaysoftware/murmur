@@ -6,6 +6,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — CloudWatch EMF metrics recorder
+
+**`pkg/metrics/emf`** implements `metrics.Recorder` on top of the CloudWatch
+Embedded Metric Format.
+
+This closes a real observability hole rather than adding a nicety. Both
+example binaries used `metrics.NewInMemory()` — an in-process map that nothing
+ever read. Every in-pipeline signal (`dedup_skip`, `dedup_release`,
+`dedup_release_failed`, decode errors, retry counts, store latency) was
+therefore invisible, while the CloudWatch alarms could only see Lambda's
+`Errors` / `Throttles` / `IteratorAge` — none of which move when records are
+silently dropped or deduplicated. A pipeline could discard records for a whole
+quarter with every alarm green.
+
+- **No new IAM or SDK client.** EMF metrics are extracted from structured JSON
+  on stdout, which Lambda forwards natively and ECS forwards via the awslogs
+  driver.
+- **Aggregated, not per-event.** One EMF document per pipeline per flush
+  interval (default 60s), carrying counters as sums and latencies as EMF
+  StatisticSets. CloudWatch Logs bills by the byte, so per-record emission
+  would make observability cost scale with throughput; at the default a
+  pipeline emits 1440 documents a day whether it processed a hundred records
+  or a hundred million. An idle pipeline emits nothing.
+- **Sub-event names are split, not passed through.** Runtimes encode
+  sub-events as `pipeline:sub_event`; emitting that verbatim would create a
+  separate `Pipeline` dimension value per sub-event and fragment every
+  dashboard. `orders:dedup_skip` becomes metric `DedupSkip` on
+  `Pipeline=orders`. Sub-scoped errors also increment the pipeline's `Errors`
+  total, so an alarm on `Errors` cannot miss them.
+- Both `examples/recently-interacted-topk` binaries now use it. The Lambda
+  flushes per invocation — Lambda freezes the execution environment on return,
+  so a background ticker is not guaranteed to fire and a low-traffic function
+  would otherwise emit nothing at all.
+
+
 ### Changed — Node 24 toolchain
 
 - **Node 20 → 24 (active LTS)** in CI, and now pinned in one more place than

@@ -27,11 +27,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 
 	example "github.com/gallowaysoftware/murmur/examples/recently-interacted-topk"
 	mkinesis "github.com/gallowaysoftware/murmur/pkg/exec/lambda/kinesis"
-	"github.com/gallowaysoftware/murmur/pkg/metrics"
+	"github.com/gallowaysoftware/murmur/pkg/metrics/emf"
 )
 
 func main() {
@@ -60,7 +61,21 @@ func run() int {
 		defer func() { _ = deduper.Close() }()
 	}
 
-	rec := metrics.NewInMemory()
+	// EMF, not InMemory: an in-process map is invisible to CloudWatch, so
+	// every in-pipeline signal — dedup_skip, dedup_release, decode errors,
+	// retry counts, store latency — would vanish when the invocation ends.
+	// The Lambda alarms only see Errors/Throttles/IteratorAge, none of which
+	// move when records are silently dropped or deduplicated.
+	//
+	// A short flush interval matters here: Lambda freezes the execution
+	// environment between invocations, so a 60s ticker may never fire. Flush
+	// explicitly after each batch instead — see the handler wrapper below.
+	rec := emf.New(emf.Config{
+		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
+		Dimensions: map[string]string{"Source": "kinesis"},
+	})
+	defer func() { _ = rec.Close() }()
+
 	opts := []mkinesis.HandlerOption{
 		mkinesis.WithMetrics(rec),
 		mkinesis.WithMaxAttempts(4),
@@ -79,7 +94,15 @@ func run() int {
 		log.Printf("build kinesis handler: %v", err)
 		return 1
 	}
-	lambda.Start(handler)
+	// Flush metrics at the end of every invocation. Lambda freezes the
+	// execution environment the moment the handler returns, so a background
+	// ticker is not guaranteed to run — without this, a low-traffic function
+	// emits nothing at all.
+	lambda.Start(func(ctx context.Context, ev events.KinesisEvent) (events.KinesisEventResponse, error) {
+		resp, err := handler(ctx, ev)
+		rec.Flush()
+		return resp, err
+	})
 	return 0
 }
 
