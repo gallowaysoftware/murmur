@@ -187,6 +187,13 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = struct{}{}
 	return true, nil
 }
+func (d *memDeduper) Release(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.seen, id)
+	return nil
+}
+
 func (*memDeduper) Close() error { return nil }
 
 // duplicatingSource emits each record twice — simulating a worker crash that

@@ -78,6 +78,32 @@ func (d *Deduper) MarkSeen(ctx context.Context, eventID string) (bool, error) {
 	return false, fmt.Errorf("ddb dedup PutItem %s: %w", d.table, err)
 }
 
+// Release deletes the claim row for eventID so a redelivery can re-claim it.
+// The streaming runtime calls this when a merge fails after MarkSeen already
+// won the claim; without it the claim outlives the failed write and the event
+// is dropped permanently.
+//
+// DeleteItem is unconditional and idempotent — deleting a row that isn't there
+// succeeds — which matches the interface's "releasing an unclaimed ID is a
+// no-op" requirement. In particular a TTL eviction that beat us here is not an
+// error.
+func (d *Deduper) Release(ctx context.Context, eventID string) error {
+	if eventID == "" {
+		// Mirrors MarkSeen: an empty ID was never claimed.
+		return nil
+	}
+	_, err := d.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &d.table,
+		Key: map[string]types.AttributeValue{
+			attrPK: &types.AttributeValueMemberS{Value: eventID},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("ddb dedup DeleteItem %s: %w", d.table, err)
+	}
+	return nil
+}
+
 // Close is a no-op; the underlying client is owned by the caller.
 func (d *Deduper) Close() error { return nil }
 

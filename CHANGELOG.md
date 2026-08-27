@@ -146,6 +146,45 @@ Holding `experimental` on purpose:
   until the fork is upstreamed.
 - `cmd/murmur-ui` — explicitly "demo-grade dashboard."
 
+#### Silent event loss when a merge fails after the dedup claim (data-loss bug)
+
+`pkg/exec/processor` claimed an EventID via `Deduper.MarkSeen` *before*
+running the merge, and `state.Deduper` had no way to give a claim back. Any
+merge that failed after the claim succeeded — a store outage outlasting the
+retry budget, a Lambda timeout mid-batch, a context cancellation — left the
+EventID marked seen forever. The source's redelivery then hit `dedup_skip`
+and the event was dropped permanently.
+
+The failure is silent by construction: no error reaches the caller (the
+record is already "handled"), no metric moves, and nothing distinguishes it
+from a legitimate duplicate. For non-idempotent monoids (Sum / HLL / TopK)
+counts drift downward with no signal. The most likely trigger in a Lambda
+deployment is a timeout: on timeout the function returns no
+`BatchItemFailures` at all, so the whole batch is redelivered and every
+claimed-but-unmerged record in it is already invisible.
+
+- **`state.Deduper` gains `Release(ctx, eventID) error`** — **breaking
+  change** for anyone implementing the interface outside this repo.
+  Releasing an unclaimed ID must be a no-op, not an error.
+- **`pkg/state/dynamodb.Deduper.Release`** deletes the claim row via
+  unconditional `DeleteItem`, which is naturally idempotent and treats a TTL
+  eviction that beat it as success. The `dynamodb:DeleteItem` grant already
+  exists in both Terraform modules, so no IAM change is required.
+- **`processor.MergeMany` releases the claim when a merge fails**, and only
+  when *this* call won it. Emits `<pipeline>:dedup_release`, or
+  `<pipeline>:dedup_release_failed` if the release itself errors — the
+  underlying merge error is still what reaches the caller, so
+  `BatchItemFailures` and source retry are unaffected.
+- Regression tests cover all three directions: a failed merge releases and
+  the redelivery applies; a successful merge keeps its claim; a release
+  failure is recorded without masking the merge error.
+
+**`KeyByMany` caveat:** if an earlier key in a multi-key merge already
+succeeded, releasing lets the redelivery re-apply it, so a hierarchical
+rollup can over-count that key. That is the correct trade — at-least-once
+permits re-application but never permits loss, and dedup is a best-effort
+mitigation layered on top, not a stronger guarantee.
+
 ### Added — v1 readiness pass
 
 A focused push closing the remaining gaps before tagging `v1.0.0`. Each
