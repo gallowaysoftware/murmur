@@ -76,6 +76,85 @@ jobs:
           go test -short -race -timeout 120s ./...
           (cd pkg/exec/batch/sparkconnect && go test -short -race -timeout 120s ./...)
 
+  e2e:
+    name: Library-shape E2E (test/e2e)
+    runs-on: ubuntu-latest
+    # The nine-file suite in test/e2e — counter, HLL, windowed, Mongo
+    # bootstrap, Mongo CDC, DDB bootstrap, S3 replay, S3 Parquet replay, Kafka
+    # concurrency — had never run in CI. README.md advertises it and
+    # doc/design.md claimed "The CI runs them on every PR", which was false:
+    # it ran only through `make test-integration`, i.e. when someone
+    # remembered to do it locally with docker-compose up.
+    #
+    # These are the LIBRARY-shape tests: murmur used as a Go package against
+    # real infra. The `integration` job is the DEPLOYED-shape suite: built
+    # container images run as containers. They catch different classes of bug
+    # and both are worth running.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: stub embed dir
+        run: |
+          mkdir -p pkg/admin/dist
+          [ -f pkg/admin/dist/README.md ] || echo placeholder > pkg/admin/dist/README.md
+
+      - name: start infra
+        # Only the services test/e2e reads: DDB_LOCAL_ENDPOINT, KAFKA_BROKERS,
+        # MONGO_URI, S3_ENDPOINT. valkey and spark-connect are omitted — nothing
+        # under test/e2e gates on them, and spark-connect is a slow image whose
+        # own e2e lives in the sparkconnect submodule.
+        run: docker compose up -d kafka dynamodb-local mongo minio
+
+      - name: init mongo replica set
+        # Change Streams require a replica set; pkg/source/snapshot/mongo's
+        # HandoffToken capture depends on it. The script is idempotent.
+        run: ./scripts/init-mongo-replset.sh
+
+      - name: wait for infra
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            ok=1
+            # dynamodb-local answers 400 to a bare GET, so `curl -f` fails on a
+            # HEALTHY server. Any HTTP status back means the port is serving.
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8000 || echo 000)
+            [ "$code" != "000" ] || ok=0
+            curl -fsS --max-time 5 http://localhost:9000/minio/health/live >/dev/null 2>&1 || ok=0
+            docker exec murmur-mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1 || ok=0
+            docker exec murmur-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || ok=0
+            if [ "$ok" = "1" ]; then echo "infra ready after $i attempt(s)"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::infra did not become ready"
+          docker compose ps
+          docker compose logs --tail=50
+          exit 1
+
+      - name: e2e tests
+        env:
+          DDB_LOCAL_ENDPOINT: http://localhost:8000
+          KAFKA_BROKERS: localhost:9092
+          S3_ENDPOINT: http://localhost:9000
+          MONGO_URI: mongodb://localhost:27017/?replicaSet=rs0&directConnection=true
+        # Piped through the assertion script so a SKIP fails the job. These
+        # tests skip themselves when their env vars are unset, which makes
+        # "ran nothing" and "everything passed" the same exit code — the exact
+        # failure mode that let this suite rot unnoticed.
+        run: |
+          set -euo pipefail
+          go test -timeout 20m -json ./test/e2e/... | tee /tmp/e2e.jsonl | grep -E '"Action":"(fail|output)"' || true
+          python3 scripts/assert-tests-ran.py < /tmp/e2e.jsonl
+
+      - name: dump infra logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
   golangci-lint:
     name: golangci-lint
     runs-on: ubuntu-latest
