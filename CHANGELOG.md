@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Dependabot: catch-all groups, and the sparkconnect submodule is finally covered
+
+Two concrete failures drove this.
+
+**The open-PR cap was the binding constraint, so security updates never
+arrived.** Only two groups were defined, so every other dependency came as its
+own PR. Both ecosystems sat pinned at their cap (gomod 10/10, npm 5/5) for
+months, which means Dependabot could not open *anything* new — including
+security updates. `GO-2026-6061` (gRPC HTTP/2 server) and `GO-2026-5841`
+(`klauspost/compress/s2`, in the Kafka decompression path) went unproposed the
+entire time and had to be found by hand. A catch-all minor/patch group per
+ecosystem keeps the standing PR count at one or two, so the cap stops being
+the thing that matters.
+
+**`pkg/exec/batch/sparkconnect` was never watched at all.** Dependabot only
+covered `directory: /`, and that submodule carries its own `go.mod` — so its
+`aws-sdk`, `arrow-go` and `spark-connect-go` dependencies had never received a
+single automated update in the repo's history. Now has its own entry. Its
+`replace` for the `pequalsnp/spark-connect-go` fork stays manual; Dependabot
+cannot update a replace target.
+
+**GitHub Actions are grouped.** `checkout` / `setup-go` / `setup-node` arrived
+as three PRs whose diff hunks overlapped in `ci.yml`, so merging any one forced
+the other two to rebase.
+
+Majors stay ungrouped deliberately — they need individual review, and burying
+one inside a "minor and patch" batch is how a breaking change gets merged on
+the strength of a green checkmark. `@types/node` additionally ignores majors:
+it must track the Node major that actually executes, which is the drift this
+repo already had (types on 25 while CI ran 20).
+
+
 ### Fixed — unbounded allocation decoding a malformed TopK sketch
 
 `topk.decode` read the item count `n` straight off the wire and passed it to

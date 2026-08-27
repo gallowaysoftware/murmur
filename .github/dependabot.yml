@@ -1,5 +1,27 @@
+# Dependabot configuration.
+#
+# Two lessons are baked into the grouping below.
+#
+# 1. UNGROUPED UPDATES SATURATE THE PR LIMIT AND THEN NOTHING MOVES.
+#    With only two groups defined, every other dependency arrived as its own
+#    PR. Both ecosystems sat pinned at their open-PR cap for months, which
+#    meant Dependabot could not open anything new — including security
+#    updates. Two Go advisories (GO-2026-6061, GO-2026-5841) went unproposed
+#    the entire time. A catch-all group for minor/patch keeps the standing PR
+#    count at one or two per ecosystem so the cap is never the binding
+#    constraint.
+#
+# 2. ADJACENT BUMPS IN ONE FILE CONFLICT WITH EACH OTHER.
+#    checkout/setup-go/setup-node arrived as three PRs whose diff hunks
+#    overlapped in ci.yml, so merging any one forced the other two to rebase.
+#    Grouped, they arrive as one.
+#
+# Majors stay ungrouped on purpose: they need individual review, and burying a
+# major inside a "minor and patch" batch is how a breaking change gets merged
+# on the strength of a green checkmark.
 version: 2
 updates:
+  # --- Go: root module -------------------------------------------------------
   - package-ecosystem: gomod
     directory: /
     schedule:
@@ -9,18 +31,87 @@ updates:
       aws-sdk:
         patterns:
           - "github.com/aws/aws-sdk-go-v2*"
+          - "github.com/aws/smithy-go"
       grpc-protobuf:
         patterns:
           - "google.golang.org/grpc*"
           - "google.golang.org/protobuf"
+          - "google.golang.org/genproto*"
+          - "connectrpc.com/*"
+      # Everything else, minor and patch only.
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
+  # --- Go: sparkconnect submodule -------------------------------------------
+  # This module carries its own go.mod and was NOT covered before — Dependabot
+  # only watched `/`, so its aws-sdk, arrow-go and spark-connect-go
+  # dependencies had never received a single automated update.
+  #
+  # Note it uses a `replace` for the pequalsnp/spark-connect-go fork.
+  # Dependabot cannot update a replace target, so that pin stays manual; the
+  # rest of the module is now covered.
+  - package-ecosystem: gomod
+    directory: /pkg/exec/batch/sparkconnect
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      sparkconnect-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # --- npm: web UI -----------------------------------------------------------
   - package-ecosystem: npm
     directory: /web
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      react-types:
+        patterns:
+          - "@types/react*"
+          - "react"
+          - "react-dom"
+      lint:
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "typescript-eslint"
+      build:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "tailwindcss"
+          - "@tailwindcss/*"
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # @types/node must track the Node major that actually executes (24; see
+      # .nvmrc and engines in package.json). Typing against a newer Node than
+      # the runtime lets tsc accept APIs that do not exist at runtime, which is
+      # exactly the drift this repo had — types on 25 while CI ran 20. Bump
+      # this deliberately alongside the runtime, not automatically.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
+  # --- GitHub Actions --------------------------------------------------------
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
