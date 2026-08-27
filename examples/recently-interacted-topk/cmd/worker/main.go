@@ -24,7 +24,7 @@ import (
 
 	example "github.com/gallowaysoftware/murmur/examples/recently-interacted-topk"
 	"github.com/gallowaysoftware/murmur/pkg/exec/streaming"
-	"github.com/gallowaysoftware/murmur/pkg/metrics"
+	"github.com/gallowaysoftware/murmur/pkg/metrics/emf"
 	"github.com/gallowaysoftware/murmur/pkg/murmur"
 )
 
@@ -72,7 +72,16 @@ func run() int {
 		return 2
 	}
 
-	rec := metrics.NewInMemory()
+	// EMF rather than InMemory — the ECS awslogs driver forwards stdout to
+	// CloudWatch Logs, so these become real metrics with no IAM change. The
+	// long-running worker can use the default ticker; unlike Lambda it is
+	// never frozen.
+	rec := emf.New(emf.Config{
+		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
+		Dimensions: map[string]string{"Source": "kafka"},
+	})
+	defer func() { _ = rec.Close() }()
+
 	opts := []streaming.RunOption{
 		streaming.WithMetrics(rec),
 		streaming.WithMaxAttempts(5),
