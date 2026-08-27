@@ -37,6 +37,47 @@ the strength of a green checkmark. `@types/node` additionally ignores majors:
 it must track the Node major that actually executes, which is the drift this
 repo already had (types on 25 while CI ran 20).
 
+### Fixed — the local docker-compose stack could not start at all
+
+`docker-compose.yml` pinned `bitnami/kafka:latest`. Bitnami withdrew their
+public Docker Hub catalogue in 2025 and that repository now has **no tags** —
+so `make compose-up` failed with `manifest unknown`, and with it
+`make test-integration` and every way of running `test/e2e` by hand. The
+documented local development workflow in `CONTRIBUTING.md` had been dead for
+some time and nothing surfaced it, because no CI job used this stack.
+
+- Switched to the official **`apache/kafka:3.9.0`**, which is KRaft-native and
+  uses unprefixed `KAFKA_*` variables rather than Bitnami's `KAFKA_CFG_*`.
+  Added the single-node replication-factor settings — the defaults of 3 leave
+  the internal topics unable to elect a leader and the broker never becomes
+  usable.
+- Pinned `minio` too. A floating `:latest` on infrastructure images is how a
+  local stack breaks on a day nobody changed anything, which is precisely what
+  happened here.
+
+### Added — CI runs the `test/e2e` suite
+
+The nine-file library-shape suite (counter, HLL, windowed, Mongo bootstrap,
+Mongo CDC, DDB bootstrap, S3 replay, S3 Parquet replay, Kafka concurrency) had
+**never run in CI**. `README.md` advertises it and `doc/design.md` stated "The
+CI runs them on every PR" — which was false; it ran only via
+`make test-integration`, which as of the entry above did not work either.
+
+The new `Library-shape E2E (test/e2e)` job stands up the compose stack and runs
+it. Getting it green surfaced a third bug: `make compose-up` ran
+`init-mongo-replset.sh` immediately after `docker compose up -d`, but `up -d`
+returns when containers are *created*, not when the daemons inside them accept
+connections — so `rs.initiate()` ran against a still-starting mongod and
+failed. It was invisible because the call was `|| true`, so a failed replica-set
+init was silent and the Mongo CDC tests simply skipped. Both the Makefile and
+the CI job now wait for mongod, then for the set to elect a primary. It also **fails on a skip**: these tests gate themselves on infra env vars,
+so "ran nothing" and "everything passed" are the same exit code — exactly the
+property that let the suite rot unnoticed. `scripts/assert-tests-ran.py`
+enforces it.
+
+This complements the existing `integration` job rather than duplicating it:
+that one exercises the *deployed* shape (built images run as containers), this
+one the *library* shape (murmur as a Go package against real infra).
 
 ### Fixed — unbounded allocation decoding a malformed TopK sketch
 

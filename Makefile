@@ -148,7 +148,13 @@ web-proto: web-deps ## Regenerate TypeScript bindings (web/src/gen/*) via npx bu
 .PHONY: compose-up
 compose-up: ## Bring up the local docker-compose stack
 	$(DOCKER) up -d kafka dynamodb-local valkey mongo minio spark-connect
-	@./scripts/init-mongo-replset.sh 2>/dev/null || true
+	@# `up -d` returns when containers are CREATED, not when the daemons inside
+	@# them accept connections, so wait for mongod before initialising the
+	@# replica set. This used to run immediately and swallow the failure with
+	@# `|| true`, which meant a failed init was silent and the Mongo CDC tests
+	@# quietly skipped instead of running.
+	@printf 'waiting for mongod'; 	for i in $$(seq 1 30); do 	  if docker exec murmur-mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1; then 	    echo " ready"; break; 	  fi; 	  printf '.'; sleep 2; 	done
+	@./scripts/init-mongo-replset.sh
 
 .PHONY: compose-down
 compose-down: ## Stop the local docker-compose stack

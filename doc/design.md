@@ -2887,9 +2887,16 @@ The tests cover:
 - Spark Connect batch SUM aggregation → DDB
   (`spark_connect_test.go`).
 
-The tests are slow (multi-second per test) but high-fidelity. The CI
-runs them on every PR; local development can run them via
-`make test-integration`.
+The tests are slow (multi-second per test) but high-fidelity. CI runs
+them on every PR in the `Library-shape E2E (test/e2e)` job, which stands
+up the docker-compose stack and fails if any test *skips* — these tests
+gate themselves on `DDB_LOCAL_ENDPOINT` / `KAFKA_BROKERS` / `MONGO_URI` /
+`S3_ENDPOINT`, so a skipped run and a passing run are otherwise the same
+exit code. Local development can run them via `make test-integration`.
+
+(This paragraph previously claimed CI ran them when it did not: the suite
+existed, was advertised here and in `README.md`, and was executed by no
+job. The `Library-shape E2E` lane is what makes the claim true.)
 
 ### 16.3 Unit tests for the small things
 
