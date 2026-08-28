@@ -42,6 +42,11 @@ type Order struct {
 	Amount     int64  `bson:"amount" json:"amount"`
 }
 
+// pipelineName is the canonical pipeline identifier. It labels metrics and
+// scopes the shared dedup table's claim keys, so it has to be one constant
+// rather than a literal repeated at each construction site.
+const pipelineName = "order_totals"
+
 // Config bundles deployment-time settings shared across both binaries.
 type Config struct {
 	// Mongo
@@ -88,7 +93,7 @@ func BuildLive(ctx context.Context, cfg Config) (*pipeline.Pipeline[Order, int64
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	pipe := pipeline.NewPipeline[Order, int64]("order_totals").
+	pipe := pipeline.NewPipeline[Order, int64](pipelineName).
 		From(src).
 		Key(func(o Order) string { return o.CustomerID }).
 		Value(func(o Order) int64 { return o.Amount }).
@@ -114,7 +119,7 @@ func BuildBootstrap(ctx context.Context, cfg Config) (*pipeline.Pipeline[Order, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	pipe := pipeline.NewPipeline[Order, int64]("order_totals").
+	pipe := pipeline.NewPipeline[Order, int64](pipelineName).
 		Key(func(o Order) string { return o.CustomerID }).
 		Value(func(o Order) int64 { return o.Amount }).
 		Aggregate(core.Sum[int64]()).
@@ -138,7 +143,7 @@ func newDDB(ctx context.Context, cfg Config) (state.Store[int64], state.Deduper,
 	store := mddb.NewInt64SumStore(client, cfg.DDBTable)
 	var deduper state.Deduper
 	if cfg.DDBDedupTable != "" {
-		deduper = mddb.NewDeduper(client, cfg.DDBDedupTable, 24*time.Hour)
+		deduper = mddb.NewDeduper(client, cfg.DDBDedupTable, pipelineName, 24*time.Hour)
 	}
 	return store, deduper, nil
 }

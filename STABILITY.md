@@ -15,7 +15,7 @@ edges callers should plan around.
 | `pkg/monoid/compose` | mostly stable | `MapMerge` / `Tuple2` / `DecayedSum`; FP-associativity caveats apply to `DecayedSum` |
 | `pkg/monoid/windowed` | mostly stable | bucket math is solid; minute-granularity has high read-amplification on long ranges |
 | `pkg/state` (interfaces) | mostly stable | `Store` / `Cache` interfaces unlikely to change before v1. `state.NewInstrumented` / `state.NewInstrumentedCache` decorate any store/cache with metrics.Recorder hooks (store_get / store_get_many / store_merge_update / cache_get / cache_repopulate latencies + errors) |
-| `pkg/state/dynamodb` | mostly stable | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy. `Int64MaxStore` ships the SetCountIfGreater pattern via DDB `UpdateItem` with conditional expression — out-of-order events with lower values are silently dropped |
+| `pkg/state/dynamodb` | mostly stable | `BatchGetItem` retries `UnprocessedKeys` with chunking + jittered backoff; CAS path retries CCF with the same backoff policy, tunable per store via `WithCASRetries` / `WithCASBackoff` and counted under `<pipeline>:cas_conflict` when `WithCASMetrics` is wired. `BytesStore` pre-flights DynamoDB's 400KB item limit and returns `ErrItemTooLarge` / `*ItemTooLargeError` — sketch size tracks key length, not just K, and an oversized row otherwise fails every write while `Get` keeps serving the last value that fit. `Deduper` claim keys are `"<pipeline>#<EventID>"` (`NewDeduper` takes the pipeline name; `ForPipeline` derives a sibling scope) and carry a per-call `claimant` token so a claim whose response was lost is not mistaken for a peer's. `Int64MaxStore` ships the SetCountIfGreater pattern via DDB `UpdateItem` with conditional expression — out-of-order events with lower values are silently dropped |
 | `pkg/state/valkey` | mostly stable | `Int64Cache` (atomic INCRBY) + `BytesCache` (RMW with caller-supplied byte-monoid; works with HLL/TopK/Bloom/DecayedSumBytes) + `HLLCache` (Valkey-native PFADD/PFCOUNT/PFMERGE accelerator) + `BloomCache` (Valkey-native BF.ADD/BF.MADD/BF.EXISTS/BF.MEXISTS accelerator; requires the valkey-bloom or RedisBloom module loaded into the server). The sketch accelerators run side-by-side with the BytesStore-authoritative sketches — independent estimators, both within the monoid's error bound. No portable axiomhq↔HYLL or bits-and-blooms↔valkey-bloom byte conversion: on Valkey loss the accelerators can only be repopulated by re-feeding events |
 | `pkg/source/kafka` | experimental | poison pills are routed via `Config.OnDecodeError` (no surface change for default-drop semantics); convenience `NewDLQProducer` wires a franz-go producer that publishes poison records + diagnostic headers to a dead-letter topic. Per-partition decode concurrency via `Config.Concurrency` — N decoder goroutines plus one fetcher, with each partition pinned to worker `partition mod N` so per-partition order is preserved while decode-heavy formats saturate multiple cores |
 | `pkg/source/kinesis` | dev / demo only | Polling ECS consumer: single-instance, no checkpointing, no resharding. Production path is `pkg/exec/lambda/kinesis` — AWS Lambda event-source mapping owns shard discovery / leasing / autoscaling / checkpointing. KCL v3 Go is NOT planned in-tree |
@@ -82,7 +82,10 @@ edges callers should plan around.
    streaming runtime via `streaming.WithDedup(d)`; duplicates are Ack'd and
    counted under `<pipeline>:dedup_skip` rather than re-applied to the
    monoid. A 16-way race test against dynamodb-local confirms exactly one
-   MarkSeen wins.
+   MarkSeen wins. Claim keys are namespaced by pipeline name — pipelines
+   sharing one dedup table no longer starve each other on colliding
+   EventIDs — and carry a claimant token so a lost claim response is
+   distinguishable from a peer's claim.
 
 4. ~~**Min/Max under empty/missing buckets.**~~ Resolved by the
    `Bounded[V]`-based Min/Max from PR-3: empty buckets fold as the unset

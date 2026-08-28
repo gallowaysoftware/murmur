@@ -11,11 +11,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid"
 	"github.com/gallowaysoftware/murmur/pkg/state"
 )
 
 const attrVersion = "ver"
+
+// maxItemBytes is DynamoDB's hard per-item limit. A write over it fails with a
+// non-retryable ValidationException, so we check before spending the round trip.
+const maxItemBytes = 400 * 1024
+
+// defaultCASRetries is how many read-combine-write cycles MergeUpdate spends on
+// a contended key before giving up. Eight attempts is roughly 17 seconds of
+// jittered backoff — long enough to ride out a burst, short enough that a
+// genuinely hot key surfaces as a dead letter instead of pinning a worker.
+const defaultCASRetries = 8
 
 // BytesStore is a state.Store[[]byte] that uses optimistic-concurrency CAS for monoidal
 // merge. Suitable for sketches (HLL, TopK, Bloom) and any other byte-encoded monoid that
@@ -37,22 +48,107 @@ type BytesStore struct {
 	table      string
 	monoid     monoid.Monoid[[]byte]
 	maxRetries int
+	backoff    func(ctx context.Context, attempt int) error
+	rec        metrics.Recorder
+	pipeline   string
+}
+
+// BytesStoreOption configures a BytesStore at construction.
+type BytesStoreOption func(*BytesStore)
+
+// WithCASRetries caps how many read-combine-write cycles MergeUpdate spends on a
+// contended key before returning ErrMaxRetriesExceeded. Values below 1 are ignored.
+//
+// The default (8) suits a lightly-contended key. A pipeline whose hot key takes
+// concurrent writes from many workers wants either a higher ceiling or a Valkey
+// accelerator in front; one that would rather shed load than stall a batch for
+// ~17 seconds per record wants a lower one.
+func WithCASRetries(n int) BytesStoreOption {
+	return func(s *BytesStore) {
+		if n > 0 {
+			s.maxRetries = n
+		}
+	}
+}
+
+// WithCASBackoff replaces the wait between CAS attempts. fn is called with the
+// 1-based retry number and must return early on ctx cancellation.
+//
+// The default is the same jittered exponential schedule the BatchGetItem retry
+// loop uses. Overriding it is how a test drives the retry ceiling without
+// sleeping through the full backoff — shortening the caller's context deadline
+// instead would surface ctx.Err() rather than the retry outcome under test.
+func WithCASBackoff(fn func(ctx context.Context, attempt int) error) BytesStoreOption {
+	return func(s *BytesStore) {
+		if fn != nil {
+			s.backoff = fn
+		}
+	}
+}
+
+// WithCASMetrics plumbs a metrics.Recorder through the CAS loop. Every losing
+// attempt is counted under "<pipeline>:cas_conflict", following the same
+// "<pipeline>:dedup_skip" naming the processor core uses.
+//
+// Without it, contention is invisible: a hot key burns its whole retry budget
+// and dead-letters with nothing in the metrics to say the writes were racing
+// each other rather than failing.
+func WithCASMetrics(rec metrics.Recorder, pipeline string) BytesStoreOption {
+	return func(s *BytesStore) {
+		s.rec = rec
+		s.pipeline = pipeline
+	}
 }
 
 // NewBytesStore returns a CAS-backed Store[[]byte] for the given monoid. The table must
 // already exist; CreateBytesTable is the test helper for the schema.
-func NewBytesStore(client *dynamodb.Client, table string, m monoid.Monoid[[]byte]) *BytesStore {
-	return &BytesStore{
+func NewBytesStore(client *dynamodb.Client, table string, m monoid.Monoid[[]byte], opts ...BytesStoreOption) *BytesStore {
+	s := &BytesStore{
 		client:     client,
 		table:      table,
 		monoid:     m,
-		maxRetries: 8,
+		maxRetries: defaultCASRetries,
+		backoff:    backoffWait,
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // ErrMaxRetriesExceeded is returned when CAS contention prevents a successful merge
 // within MaxRetries attempts. Caller should retry at a higher level or shed load.
 var ErrMaxRetriesExceeded = errors.New("dynamodb BytesStore: max CAS retries exceeded")
+
+// ErrItemTooLarge reports a merged value that will not fit in a DynamoDB item.
+// Match it with errors.Is; *ItemTooLargeError carries the key and measured size.
+//
+// Worth naming because the failure is otherwise invisible: the oversized write
+// fails non-retryably on every attempt while Get keeps serving the last value
+// that did fit, as Present:true. The key freezes but reads look healthy, so a
+// caller that can't recognize the error has no way to dead-letter the record or
+// alert on the stuck key.
+var ErrItemTooLarge = errors.New("dynamodb BytesStore: item exceeds DynamoDB's 400KB limit")
+
+// ItemTooLargeError is the typed form of ErrItemTooLarge. Size is a conservative
+// estimate of the DynamoDB item size in bytes: attribute names plus values, with
+// numbers counted as their decimal text (DDB packs them tighter), so the guard
+// trips slightly before the service would.
+type ItemTooLargeError struct {
+	Table string
+	Key   state.Key
+	Size  int
+	Limit int
+}
+
+// Error implements error.
+func (e *ItemTooLargeError) Error() string {
+	return fmt.Sprintf("ddb PutItem %s: item for entity %q bucket %d is ~%d bytes, limit %d: %s",
+		e.Table, e.Key.Entity, e.Key.Bucket, e.Size, e.Limit, ErrItemTooLarge.Error())
+}
+
+// Unwrap makes errors.Is(err, ErrItemTooLarge) match.
+func (e *ItemTooLargeError) Unwrap() error { return ErrItemTooLarge }
 
 // Get reads the current sketch bytes at k.
 func (s *BytesStore) Get(ctx context.Context, k state.Key) ([]byte, bool, error) {
@@ -142,10 +238,13 @@ func (s *BytesStore) GetMany(ctx context.Context, ks []state.Key) ([][]byte, []b
 // concurrent writers on the same hot key would all retry at once and burn
 // tight CPU + DDB request capacity in lockstep — under enough contention
 // they'd never make forward progress.
+//
+// Every losing attempt is counted under "<pipeline>:cas_conflict" when a
+// recorder is configured; exhausting the budget returns ErrMaxRetriesExceeded.
 func (s *BytesStore) MergeUpdate(ctx context.Context, k state.Key, delta []byte, ttl time.Duration) error {
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		if attempt > 0 {
-			if err := backoffWait(ctx, attempt); err != nil {
+			if err := s.backoff(ctx, attempt); err != nil {
 				return err
 			}
 		}
@@ -167,11 +266,21 @@ func (s *BytesStore) MergeUpdate(ctx context.Context, k state.Key, delta []byte,
 		var ccf *types.ConditionalCheckFailedException
 		if errors.As(err, &ccf) {
 			// Concurrent writer landed first; back off and retry.
+			s.recordCASConflict()
 			continue
 		}
 		return err
 	}
-	return ErrMaxRetriesExceeded
+	return fmt.Errorf("%w: %s entity %q bucket %d after %d attempts",
+		ErrMaxRetriesExceeded, s.table, k.Entity, k.Bucket, s.maxRetries)
+}
+
+// recordCASConflict counts one losing CAS attempt.
+func (s *BytesStore) recordCASConflict() {
+	if s.rec == nil {
+		return
+	}
+	s.rec.RecordEvent(s.pipeline + ":cas_conflict")
 }
 
 // Close is a no-op; the underlying client is owned by the caller.
@@ -202,16 +311,32 @@ func (s *BytesStore) getWithVersion(ctx context.Context, k state.Key) (val []byt
 }
 
 func (s *BytesStore) casWrite(ctx context.Context, k state.Key, val []byte, expectedVer int64, exists bool, ttl time.Duration) error {
+	skVal := strconv.FormatInt(k.Bucket, 10)
+	verVal := strconv.FormatInt(expectedVer+1, 10)
 	item := map[string]types.AttributeValue{
 		attrPK:      &types.AttributeValueMemberS{Value: k.Entity},
-		attrSK:      &types.AttributeValueMemberN{Value: strconv.FormatInt(k.Bucket, 10)},
+		attrSK:      &types.AttributeValueMemberN{Value: skVal},
 		attrVal:     &types.AttributeValueMemberB{Value: val},
-		attrVersion: &types.AttributeValueMemberN{Value: strconv.FormatInt(expectedVer+1, 10)},
+		attrVersion: &types.AttributeValueMemberN{Value: verVal},
 	}
+	size := len(attrPK) + len(k.Entity) +
+		len(attrSK) + len(skVal) +
+		len(attrVal) + len(val) +
+		len(attrVersion) + len(verVal)
 	if ttl > 0 {
-		item[attrTTL] = &types.AttributeValueMemberN{
-			Value: strconv.FormatInt(time.Now().Add(ttl).Unix(), 10),
-		}
+		ttlVal := strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)
+		item[attrTTL] = &types.AttributeValueMemberN{Value: ttlVal}
+		size += len(attrTTL) + len(ttlVal)
+	}
+
+	// Pre-flight DynamoDB's 400KB item limit. A sketch grows with the length of
+	// the keys fed into it, not just with K — a TopK that lifts an unbounded
+	// wire field into its keys overflows the row on a couple of entries — and
+	// DDB then rejects every write for that key non-retryably while Get keeps
+	// serving the last value that fit. Failing here names the cause instead of
+	// leaving a frozen key behind an opaque ValidationException.
+	if size > maxItemBytes {
+		return &ItemTooLargeError{Table: s.table, Key: k, Size: size, Limit: maxItemBytes}
 	}
 
 	var conditionExpression string

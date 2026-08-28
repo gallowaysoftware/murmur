@@ -177,8 +177,12 @@ What the module does in dedup mode:
    `DeleteItem` on the dedup table. The query role does NOT get dedup access
    (reads don't traverse it).
 3. Injects `DDB_DEDUP_TABLE` into worker / query / bootstrap environments. The
-   binaries are expected to construct a `dynamodb.NewDeduper(client, table)` at
-   startup and wire it into the runtime via `streaming.WithDedup(d)`.
+   binaries are expected to construct a
+   `dynamodb.NewDeduper(client, table, pipelineName, ttl)` at startup and wire
+   it into the runtime via `streaming.WithDedup(d)`. `pipelineName` scopes the
+   claim keys — pass the same name the pipeline was built with, so several
+   pipelines can share one dedup table without starving each other on colliding
+   EventIDs.
 
 Recommended for any source that may redeliver records — Kinesis Lambda
 BatchItemFailures, Kafka rebalance, SQS visibility timeout. The dedup table's

@@ -40,7 +40,28 @@ func main() {
 }
 
 func run() int {
+	// EMF, not InMemory: an in-process map is invisible to CloudWatch, so
+	// every in-pipeline signal — dedup_skip, dedup_release, cas_conflict,
+	// decode errors, retry counts, store latency — would vanish when the
+	// invocation ends. The Lambda alarms only see Errors/Throttles/
+	// IteratorAge, none of which move when records are silently dropped or
+	// deduplicated.
+	//
+	// A short flush interval matters here: Lambda freezes the execution
+	// environment between invocations, so a 60s ticker may never fire. Flush
+	// explicitly after each batch instead — see the handler wrapper below.
+	//
+	// Built before the pipeline because the byte store takes it too: CAS
+	// contention on the single "global" row is only visible if the recorder
+	// exists by the time the store is constructed.
+	rec := emf.New(emf.Config{
+		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
+		Dimensions: map[string]string{"Source": "kinesis"},
+	})
+	defer func() { _ = rec.Close() }()
+
 	cfg := example.Config{
+		Metrics:         rec,
 		DDBEndpoint:     os.Getenv("DDB_ENDPOINT"),
 		DDBTable:        envOr("DDB_TABLE", "recently_interacted"),
 		DDBRegion:       envOr("AWS_REGION", "us-east-1"),
@@ -60,21 +81,6 @@ func run() int {
 	if deduper != nil {
 		defer func() { _ = deduper.Close() }()
 	}
-
-	// EMF, not InMemory: an in-process map is invisible to CloudWatch, so
-	// every in-pipeline signal — dedup_skip, dedup_release, decode errors,
-	// retry counts, store latency — would vanish when the invocation ends.
-	// The Lambda alarms only see Errors/Throttles/IteratorAge, none of which
-	// move when records are silently dropped or deduplicated.
-	//
-	// A short flush interval matters here: Lambda freezes the execution
-	// environment between invocations, so a 60s ticker may never fire. Flush
-	// explicitly after each batch instead — see the handler wrapper below.
-	rec := emf.New(emf.Config{
-		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
-		Dimensions: map[string]string{"Source": "kinesis"},
-	})
-	defer func() { _ = rec.Close() }()
 
 	opts := []mkinesis.HandlerOption{
 		mkinesis.WithMetrics(rec),

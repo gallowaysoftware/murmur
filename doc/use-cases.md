@@ -448,7 +448,7 @@ func BuildBootstrap(ctx context.Context, cfg Config) (*pipeline.Pipeline[Order, 
 // (a single logical change may land at multiple Kafka offsets).
 func BuildLive(ctx context.Context, cfg Config) (*pipeline.Pipeline[Order, int64], state.Store[int64], state.Deduper, error) {
     store := mddb.NewInt64SumStore(ddbClient(cfg), cfg.DDBTable)
-    deduper := mddb.NewDeduper(ddbClient(cfg), cfg.DDBDedupTable, 24*time.Hour)
+    deduper := mddb.NewDeduper(ddbClient(cfg), cfg.DDBDedupTable, "order_totals", 24*time.Hour)
 
     src, err := mkafka.NewSource(mkafka.Config[Order]{
         Brokers: brokers(cfg), Topic: cfg.KafkaTopic, ConsumerGroup: cfg.ConsumerGroup,

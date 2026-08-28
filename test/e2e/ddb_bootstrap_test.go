@@ -230,7 +230,7 @@ func TestE2E_DDBBootstrap_RerunWithDedupIsIdempotent(t *testing.T) {
 	})
 
 	store := mddb.NewInt64SumStore(ddbClient, stateTable)
-	deduper := mddb.NewDeduper(ddbClient, dedupTable, time.Hour)
+	deduper := mddb.NewDeduper(ddbClient, dedupTable, "region_totals", time.Hour)
 
 	// Seed 10 orders.
 	for i := 0; i < 10; i++ {
