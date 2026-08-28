@@ -9,7 +9,9 @@
 // table swap as a deployment concern; the runtime here just drives records through
 // the pipeline.
 //
-// At-least-once dedup at the state-store level handles re-runs safely.
+// Re-runs are safe only when a Deduper is wired (see WithDedup) and only
+// within its TTL horizon: the claims that suppress a repeated merge expire,
+// and an archive replayed after they do is indistinguishable from new data.
 package replay
 
 import (
@@ -78,7 +80,12 @@ func WithRetryBackoff(base, max time.Duration) RunOption {
 
 // WithDedup installs a state.Deduper. The replay driver typically emits
 // stable per-event IDs (S3 archive line position, Kafka offset), so a
-// re-run of the same archive folds idempotently when a Deduper is wired.
+// re-run of the same archive folds idempotently — but only within the
+// deduper's TTL horizon. Claims are TTL'd (DDB evicts them natively), and
+// once they expire the same archive looks like new data and merges again:
+// re-running a backfill a day later behind a 1h dedup TTL double-counts
+// every record. Size the TTL to the longest re-run window you actually
+// want protected, and remember it is a state-table cost, not free.
 func WithDedup(d state.Deduper) RunOption {
 	return func(c *runConfig) {
 		if d != nil {

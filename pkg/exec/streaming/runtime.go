@@ -138,9 +138,13 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 //     immediate-merge semantics; common production values are 500ms–5s
 //     depending on read-staleness tolerance.
 //   - Durability under crash: records are Ack'd to the source AFTER the
-//     batch flushes, so a worker crash loses at most `window`-worth of
-//     in-flight records (the source replays them on restart, dedup
-//     catches the redelivery).
+//     batch flushes, so a worker crash drops at most `window`-worth of
+//     accumulated records and the source redelivers them on restart.
+//     Those records never reached the store, so the redelivery is their
+//     first apply, not a double-apply — dedup is not what saves you here.
+//     It only holds while the deduper's claim is taken at flush time: a
+//     claim taken on accept would suppress exactly the redelivery this
+//     depends on, and the batch's contribution would be lost for good.
 //   - Memory: at most `maxBatch` records per (entity, bucket) before
 //     forced flush. Default 1024 if unset. The number of concurrent keys
 //     in flight is unbounded — for high-cardinality pipelines (per-user

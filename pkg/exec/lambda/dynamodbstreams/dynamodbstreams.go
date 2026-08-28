@@ -47,10 +47,17 @@
 // # Partial-batch failure handling
 //
 // Records that exhaust their retry budget are reported via BatchItemFailures
-// with the DDB Streams `eventID` as ItemIdentifier. Configure your
-// event-source mapping with `FunctionResponseTypes=["ReportBatchItemFailures"]`
-// so Lambda only redelivers the failures (or, in shard-order replay mode,
-// all records from the earliest failure forward).
+// with the record's `SequenceNumber` as ItemIdentifier — NOT its `eventID`.
+// Lambda resolves an ItemIdentifier against the shard's sequence numbers, so
+// an eventID there names nothing it can find: depending on the event-source
+// mapping that degrades to whole-batch redelivery, a stalled iterator, or a
+// silently discarded failure. The eventID is still what feeds the Deduper —
+// it is the stream-unique record identity, just not the checkpoint cursor.
+//
+// Configure your event-source mapping with
+// `FunctionResponseTypes=["ReportBatchItemFailures"]` so Lambda only
+// redelivers the failures (or, in shard-order replay mode, all records from
+// the earliest failure forward).
 package dynamodbstreams
 
 import (
@@ -230,8 +237,11 @@ func NewHandler[T any, V any](
 
 			if err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
 				keysFn(value), valueFn(value), store, cacheStore, window); err != nil {
+				// SequenceNumber, not EventID: Lambda checkpoints the shard by
+				// sequence number, and an identifier it can't resolve is either
+				// ignored or takes the whole batch down with it.
 				resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
-					ItemIdentifier: rec.EventID,
+					ItemIdentifier: rec.Change.SequenceNumber,
 				})
 			}
 		}

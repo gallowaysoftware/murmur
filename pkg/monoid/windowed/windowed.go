@@ -11,6 +11,11 @@ import (
 )
 
 // Config describes the bucket layout for a windowed aggregation.
+//
+// The timestamp a record is bucketed by is source.Record.EventTime — every
+// runtime passes it to BucketID, falling back to the wall clock only when a
+// record carries no event time. There is no per-field extractor here: sources
+// own event-time, not the window config.
 type Config struct {
 	// Granularity is the size of each tumbling bucket (e.g. 24h for daily, 1h for hourly).
 	// Smaller granularity means finer query precision and higher state cost.
@@ -19,11 +24,6 @@ type Config struct {
 	// Retention is how long buckets are kept before TTL eviction. Sliding-window queries
 	// can ask for any range up to Retention.
 	Retention time.Duration
-
-	// EventTimeField, if non-empty, names the field on the source record from which to
-	// extract event-time. If empty, processing-time is used. Backends honor this when
-	// computing BucketID.
-	EventTimeField string
 }
 
 // Daily returns a Config with 24h granularity and the given retention. The most common

@@ -220,9 +220,15 @@ an event's contribution drops by half.
 
 - Decay associativity is approximate (FP-rounding-bounded); see
   `STABILITY.md`'s row on `pkg/monoid/compose`.
-- The "now" used for decay comes from `EventTime` on each record,
-  not processing-time. Late-arriving events still get their original
-  decay applied — they don't artificially count as "fresh."
+- The "now" stamped on each observation is processing-time: the
+  builder calls its `Clock` (default `time.Now`) when the value
+  extractor runs, and that hook is a `func() time.Time` — it gets no
+  access to the event, so it cannot read `EventTime`. A late-arriving
+  event therefore decays from when it was *processed*, not when it
+  happened. Replaying a week-old archive through a Trending pipeline
+  scores every one of those events as fresh; use `Clock` to pin the
+  replay's timestamp, or aggregate with a windowed Sum and apply decay
+  at query time, when you can decay from the bucket's own time.
 
 ---
 
@@ -246,10 +252,18 @@ murmur.MustKinesisHandler(buildPipeline(clickDecoder))
 murmur.RunStreamingWorker(ctx, buildPipeline(purchaseDecoder))
 ```
 
-Both call `buildPipeline()` with the same monoid (`topk.New(10)`),
-same key extractor (`func(e Event) string { return e.CategoryID }`),
-same DDB table. The store's `MergeUpdate` semantics ensure neither
-worker's contribution is lost.
+Both call `buildPipeline()` with the same monoid (`topk.New(k)` for
+one shared `k` — the example resolves it once via `Config.ResolveK()`,
+default 32), same key extractor
+(`func(e Event) string { return e.CategoryID }`), same DDB table. The
+store's `MergeUpdate` semantics ensure neither worker's contribution is
+lost.
+
+The K has to be identical in every binary that touches the row, query
+server included: sketches sized for different K refuse to merge, and
+that shows up as an empty Top-N rather than an error. Note the example's
+32 is its own choice — `topk.DefaultK`, what `topk.TopK()` and
+`topk.Single()` use, is 10.
 
 **Runnable example.** [`examples/recently-interacted-topk/`](../examples/recently-interacted-topk/).
 

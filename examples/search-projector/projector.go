@@ -173,12 +173,17 @@ func (p *Projector) Handle(ctx context.Context, rec *events.DynamoDBEventRecord)
 
 // HandleEvent is the convenience handler for a full SQS-style batch.
 // Returns the BatchItemFailures slice for Lambda's response shape.
+//
+// The ItemIdentifier is the record's SequenceNumber, which is what Lambda
+// resolves against the shard's checkpoint. Reporting the eventID instead
+// names nothing Lambda can find, and the failed record is either redelivered
+// as part of the whole batch or dropped outright.
 func (p *Projector) HandleEvent(ctx context.Context, evt events.DynamoDBEvent) []events.DynamoDBBatchItemFailure {
 	var failures []events.DynamoDBBatchItemFailure
 	for i := range evt.Records {
 		if err := p.Handle(ctx, &evt.Records[i]); err != nil {
 			failures = append(failures, events.DynamoDBBatchItemFailure{
-				ItemIdentifier: evt.Records[i].EventID,
+				ItemIdentifier: evt.Records[i].Change.SequenceNumber,
 			})
 		}
 	}

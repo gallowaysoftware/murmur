@@ -718,24 +718,24 @@ layer. The DSL split is invisible at the boundary.
 
 ### 4.6 Windowing: bucket math and TTL integration
 
-`pkg/monoid/windowed.Config` is two fields and a granularity:
+`pkg/monoid/windowed.Config` is two fields:
 
 ```go
 type Config struct {
-    Granularity    time.Duration
-    Retention      time.Duration
-    EventTimeField string
+    Granularity time.Duration
+    Retention   time.Duration
 }
 ```
 
 `Granularity` is the bucket size — 24h for daily, 1h for hourly, 1m for
 per-minute. `Retention` is how long buckets persist before DDB TTL
-evicts them. `EventTimeField`, when set, names a struct field on the
-record from which the runtime extracts a timestamp; when empty,
-processing-time is used.
+evicts them. The timestamp a record is bucketed by is not configured
+here: it is `source.Record.EventTime`, which every runtime hands to
+`BucketID`, falling back to the wall clock only for a record that
+carries no event time.
 
 Bucket assignment is `BucketID(t) = t.UnixNano() / Granularity.Nanoseconds()`
-(`pkg/monoid/windowed/windowed.go:54-60`). Buckets are tumbling and
+(`pkg/monoid/windowed/windowed.go:51-56`). Buckets are tumbling and
 aligned to the Unix epoch. The implication: bucket 0 is "the first
 bucket since 1970" for any granularity, not "the bucket containing
 midnight today." This matters for queries — `GetWindow(now,
@@ -1101,9 +1101,12 @@ canceled or the source is exhausted. A `Record[T]` carries:
 - `Value T` — the decoded record body.
 - `EventTime time.Time` — used for windowed bucket assignment.
   Sources fill this from their native timestamp (Kafka record
-  timestamp, Kinesis ApproximateArrivalTimestamp, SQS SentTimestamp);
-  the user's value extractor can override via the `EventTimeField`
-  windowing config.
+  timestamp, Kinesis ApproximateArrivalTimestamp, SQS SentTimestamp).
+  This is the ONLY event-time input to bucketing; a record that arrives
+  with a zero EventTime is bucketed by the runtime's clock instead. To
+  bucket by a timestamp carried inside the payload, use the source's
+  `EventTime` extractor (the S3 / JSONL / Parquet snapshot readers all
+  take one) — the windowing config has no say in it.
 - `Ack func() error` — called when the record has been successfully
   processed (or duplicate-skipped). For Kafka, this marks the offset
   for commit; for Kinesis, this advances the per-shard checkpoint;
@@ -2596,12 +2599,16 @@ A worker crash mid-batch:
   caught by dedup if configured.
 - Records in the `WithBatchWindow` accumulator: lost from the
   accumulator, but redelivered by the source (since they weren't
-  Ack'd), and re-aggregated on restart. Dedup catches the first
-  redelivery; the second is the real apply.
+  Ack'd), and aggregated for the first time on restart. Dedup is not
+  the mechanism here — those records never reached the store, so the
+  redelivery is their apply. This holds only while the dedup claim is
+  taken at flush time: a claim taken when the record enters the
+  accumulator outlives the crash, suppresses the redelivery, and the
+  whole in-flight batch is silently lost.
 
 The result: at-least-once with no data loss, modulo the edge case
-where dedup is disabled for a non-idempotent monoid (then crashes
-double-count by the in-flight buffer's worth of records).
+where dedup is disabled for a non-idempotent monoid — a crash between
+a flush and the Acks it releases re-applies that batch on restart.
 
 ### 14.2 DDB throttles or is unavailable
 

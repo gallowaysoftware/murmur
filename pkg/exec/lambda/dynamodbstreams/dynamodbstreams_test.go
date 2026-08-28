@@ -138,12 +138,16 @@ func decodeOrder(rec *events.DynamoDBEventRecord) (order, error) {
 	return order{customerID: cid.String(), amount: n}, nil
 }
 
-func mustChange(t *testing.T, eventID, eventName, customerID string, amount int64) events.DynamoDBEventRecord {
+// mustChange builds a DDB Streams record. eventID and seq are deliberately
+// separate arguments: the two identifiers serve different masters (eventID
+// feeds the Deduper, seq is what Lambda checkpoints on) and a fixture that
+// conflates them cannot catch a handler that reports the wrong one.
+func mustChange(t *testing.T, eventID, seq, eventName, customerID string, amount int64) events.DynamoDBEventRecord {
 	t.Helper()
 	rec := events.DynamoDBEventRecord{
 		EventID:   eventID,
 		EventName: eventName,
-		Change:    events.DynamoDBStreamRecord{},
+		Change:    events.DynamoDBStreamRecord{SequenceNumber: seq},
 	}
 	if eventName != "REMOVE" {
 		rec.Change.NewImage = map[string]events.DynamoDBAttributeValue{
@@ -152,6 +156,13 @@ func mustChange(t *testing.T, eventID, eventName, customerID string, amount int6
 		}
 	}
 	return rec
+}
+
+// seqNum returns a realistic DynamoDB Streams sequence number — a long
+// numeric string, nothing like an eventID — so an assertion on the wrong
+// identifier cannot accidentally pass.
+func seqNum(n int64) string {
+	return "495903382714902566085596925383615710959215759891" + itoa(1000+n)
 }
 
 // itoa is strconv.Itoa for int64 without pulling in strconv in test code.
@@ -187,9 +198,9 @@ func TestHandler_HappyPath(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
-		mustChange(t, "ev-1", "INSERT", "cust-A", 100),
-		mustChange(t, "ev-2", "INSERT", "cust-A", 50),
-		mustChange(t, "ev-3", "MODIFY", "cust-B", 200),
+		mustChange(t, "ev-1", seqNum(1), "INSERT", "cust-A", 100),
+		mustChange(t, "ev-2", seqNum(2), "INSERT", "cust-A", 50),
+		mustChange(t, "ev-3", seqNum(3), "MODIFY", "cust-B", 200),
 	}}
 	resp, err := h(context.Background(), evt)
 	if err != nil {
@@ -221,9 +232,9 @@ func TestHandler_SkipRecordSentinel(t *testing.T) {
 	// Mix INSERT (counted) + REMOVE (skipped) — the REMOVE must NOT decrement
 	// or otherwise affect state, and must NOT be reported as a failure.
 	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
-		mustChange(t, "ev-1", "INSERT", "cust-A", 100),
-		mustChange(t, "ev-2", "REMOVE", "cust-A", 0),
-		mustChange(t, "ev-3", "INSERT", "cust-A", 50),
+		mustChange(t, "ev-1", seqNum(1), "INSERT", "cust-A", 100),
+		mustChange(t, "ev-2", seqNum(2), "REMOVE", "cust-A", 0),
+		mustChange(t, "ev-3", seqNum(3), "INSERT", "cust-A", 50),
 	}}
 	resp, err := h(context.Background(), evt)
 	if err != nil {
@@ -251,7 +262,7 @@ func TestHandler_RetriesAndRecovers(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
-		mustChange(t, "ev-1", "INSERT", "cust-A", 1),
+		mustChange(t, "ev-1", seqNum(1), "INSERT", "cust-A", 1),
 	}}
 	resp, err := h(context.Background(), evt)
 	if err != nil {
@@ -265,6 +276,11 @@ func TestHandler_RetriesAndRecovers(t *testing.T) {
 	}
 }
 
+// TestHandler_ReportsExhaustedRetries pins the identifier Lambda can actually
+// resolve. AWS matches BatchItemFailures against the shard's sequence numbers;
+// an eventID there names nothing, and the batch is then redelivered whole
+// (duplicate merges — dedup is off by default), left on a stalled iterator, or
+// dropped outright.
 func TestHandler_ReportsExhaustedRetries(t *testing.T) {
 	store := newFlakyStore(10)
 	h, err := dynamodbstreams.NewHandler(newPipe(store), decodeOrder,
@@ -274,19 +290,27 @@ func TestHandler_ReportsExhaustedRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
-		mustChange(t, "ev-doom", "INSERT", "cust-A", 1),
-	}}
-	resp, err := h(context.Background(), evt)
+	// eventID and SequenceNumber share no characters, so neither assertion
+	// below can pass by coincidence.
+	const doomSeq = "49590338271490256608559692538361571095921575989136588898"
+	records := []events.DynamoDBEventRecord{
+		mustChange(t, "ev-doom", doomSeq, "INSERT", "cust-A", 1),
+	}
+	resp, err := h(context.Background(), events.DynamoDBEvent{Records: records})
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if got := len(resp.BatchItemFailures); got != 1 {
 		t.Fatalf("BatchItemFailures = %d, want 1; got %+v", got, resp.BatchItemFailures)
 	}
-	if resp.BatchItemFailures[0].ItemIdentifier != "ev-doom" {
-		t.Errorf("ItemIdentifier: got %q, want %q",
-			resp.BatchItemFailures[0].ItemIdentifier, "ev-doom")
+	got := resp.BatchItemFailures[0].ItemIdentifier
+	if got != doomSeq {
+		t.Errorf("ItemIdentifier: got %q, want the record's SequenceNumber %q", got, doomSeq)
+	}
+	for _, rec := range records {
+		if got == rec.EventID {
+			t.Errorf("ItemIdentifier is eventID %q; Lambda checkpoints on sequence numbers", rec.EventID)
+		}
 	}
 }
 
@@ -302,7 +326,7 @@ func TestHandler_DedupSkipsSecondInvocation(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
-		mustChange(t, "ev-dup", "INSERT", "cust-A", 100),
+		mustChange(t, "ev-dup", seqNum(7), "INSERT", "cust-A", 100),
 	}}
 	for i := 0; i < 3; i++ {
 		resp, err := h(context.Background(), evt)
@@ -340,7 +364,7 @@ func TestHandler_DecodeErrorCallback(t *testing.T) {
 				"amount": events.NewNumberAttribute("100"),
 			},
 		}},
-		mustChange(t, "good", "INSERT", "cust-A", 50),
+		mustChange(t, "good", seqNum(9), "INSERT", "cust-A", 50),
 	}}
 	resp, err := h(context.Background(), evt)
 	if err != nil {

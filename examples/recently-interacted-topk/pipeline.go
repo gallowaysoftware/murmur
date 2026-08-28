@@ -84,7 +84,7 @@ type Config struct {
 	ConsumerGroup string
 
 	// TopK parameters
-	K               uint32        // sketch size (memory ~K; default 32 if zero)
+	K               uint32        // sketch size (memory ~K); zero means DefaultK
 	WindowRetention time.Duration // daily-bucket retention (default 30d)
 
 	// Metrics, when set, is handed to the byte store so CAS contention lands
@@ -93,6 +93,23 @@ type Config struct {
 	// concurrent writer past the first loses a CAS round — the one number
 	// worth watching before the retry budget starts dead-lettering.
 	Metrics metrics.Recorder
+}
+
+// DefaultK is the K the example builds with when Config.K is left zero. It is
+// deliberately larger than topk.DefaultK: the deployed writers (TOPK_K) and
+// the query server have always used 32, and a library caller who omitted K
+// used to get a K=10 store read through a K=32 query server.
+const DefaultK uint32 = 32
+
+// ResolveK returns the K this Config actually builds with. Every binary in the
+// example goes through it — writers and the query server alike — because
+// sketches with mismatched K refuse to merge, and the failure shows up at
+// query time as an empty or stale Top-N rather than as an error at startup.
+func (c Config) ResolveK() uint32 {
+	if c.K == 0 {
+		return DefaultK
+	}
+	return c.K
 }
 
 // PipelineName is the canonical pipeline identifier — surfaces in metrics,
@@ -110,10 +127,7 @@ func Build(ctx context.Context, cfg Config) (*pipeline.Pipeline[Interaction, []b
 	if cfg.DDBTable == "" {
 		return nil, nil, nil, errors.New("recently-interacted: DDBTable is required")
 	}
-	k := cfg.K
-	if k == 0 {
-		k = topk.DefaultK
-	}
+	k := cfg.ResolveK()
 	retention := cfg.WindowRetention
 	if retention == 0 {
 		retention = 30 * 24 * time.Hour

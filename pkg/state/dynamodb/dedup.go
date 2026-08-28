@@ -56,6 +56,12 @@ type Deduper struct {
 // ttl is how long each claim is retained before DDB's TTL feature evicts it;
 // pick a value > the source's max delivery latency. 24h is a reasonable default
 // for Kafka with bounded retention; longer for Kinesis with extended retention.
+//
+// The ttl is also the window in which a re-run is idempotent: a replay or
+// bootstrap of the same input after the claims expire merges everything a
+// second time, because an evicted claim is indistinguishable from a record
+// never seen. Operators who re-run backfills days later need a ttl that
+// spans that gap.
 func NewDeduper(client *dynamodb.Client, table, pipeline string, ttl time.Duration) *Deduper {
 	return &Deduper{client: client, table: table, pipeline: pipeline, ttl: ttl}
 }

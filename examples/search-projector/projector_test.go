@@ -50,10 +50,15 @@ func (f *fakeIndex) snapshot() []indexedDoc {
 
 // makeRecord constructs a DDB Streams record carrying a counter
 // transition for entity `pk` going from `oldV` to `newV`.
+//
+// EventID and SequenceNumber deliberately look nothing alike: Lambda
+// checkpoints on the sequence number, so a fixture that let the two collide
+// would let a handler report the useless one and still pass.
 func makeRecord(pk string, oldV, newV int64, hasOld bool) events.DynamoDBEventRecord {
 	rec := events.DynamoDBEventRecord{
 		EventID: "ev-" + pk + "-" + strconv.FormatInt(newV, 10),
 		Change: events.DynamoDBStreamRecord{
+			SequenceNumber: seqFor(pk, newV),
 			Keys: map[string]events.DynamoDBAttributeValue{
 				"pk": events.NewStringAttribute(pk),
 			},
@@ -68,6 +73,17 @@ func makeRecord(pk string, oldV, newV int64, hasOld bool) events.DynamoDBEventRe
 		}
 	}
 	return rec
+}
+
+// seqFor returns a realistic DynamoDB Streams sequence number: a long numeric
+// string that shares no characters with the fixtures' eventIDs.
+func seqFor(pk string, newV int64) string {
+	var sum int64
+	for _, c := range pk {
+		sum += int64(c)
+	}
+	return "4959033827149025660855969253361571095921" +
+		strconv.FormatInt(1_000_000+sum*1000+newV, 10)
 }
 
 func TestProjector_BucketTransitionTriggersIndex(t *testing.T) {
@@ -208,18 +224,27 @@ func TestProjector_OpenSearchFailureReportsToBatchItemFailures(t *testing.T) {
 	idx := &fakeIndex{err: errors.New("opensearch 503")}
 	p := projector.New(projector.Config{Index: "posts"}, idx)
 
-	evt := events.DynamoDBEvent{Records: []events.DynamoDBEventRecord{
+	records := []events.DynamoDBEventRecord{
 		makeRecord("post-A", 999, 1000, true), // would index → fails
 		makeRecord("post-B", 100, 500, true),  // skipped (same bucket)
-	}}
-	failures := p.HandleEvent(context.Background(), evt)
+	}
+	failures := p.HandleEvent(context.Background(), events.DynamoDBEvent{Records: records})
 
 	// Only the failing record should appear in BatchItemFailures.
 	if len(failures) != 1 {
 		t.Fatalf("BatchItemFailures: got %d, want 1", len(failures))
 	}
-	if failures[0].ItemIdentifier != "ev-post-A-1000" {
-		t.Errorf("ItemIdentifier: got %q", failures[0].ItemIdentifier)
+	// The identifier must be the sequence number Lambda checkpoints on. An
+	// eventID resolves to nothing on the shard, which costs a whole-batch
+	// redelivery or a dropped failure.
+	got := failures[0].ItemIdentifier
+	if want := records[0].Change.SequenceNumber; got != want {
+		t.Errorf("ItemIdentifier: got %q, want the record's SequenceNumber %q", got, want)
+	}
+	for _, rec := range records {
+		if got == rec.EventID {
+			t.Errorf("ItemIdentifier is eventID %q; Lambda checkpoints on sequence numbers", rec.EventID)
+		}
 	}
 }
 
