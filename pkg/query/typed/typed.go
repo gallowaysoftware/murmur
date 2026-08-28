@@ -77,6 +77,24 @@ import (
 // Tests: a fake satisfying the same shape.
 type Inner = murmurv1connect.QueryServiceClient
 
+// checkValueCount rejects a response whose value count doesn't match the entity
+// count that was asked for.
+//
+// The batched RPCs are strictly positional — values[i] belongs to entities[i] —
+// so a mismatch means the values can no longer be attributed to entities at all.
+// The old handling was worse than an error in both directions: SumClient wrote
+// straight into out[i] for every value the server sent, so a server returning
+// more values than entities panicked with index-out-of-range inside the CALLING
+// application, remotely triggerable by whatever the server did. The sketch
+// clients' `if i >= len(out) { break }` avoided the panic but silently truncated,
+// handing back a feature vector that was quietly short of ground truth.
+func checkValueCount(rpc string, entities, values int) error {
+	if entities != values {
+		return fmt.Errorf("murmur/typed: %s returned %d values for %d entities", rpc, values, entities)
+	}
+	return nil
+}
+
 // ----------------------------------------------------------------------------
 // Sum / Count / Min / Max — int64 wire shape
 // ----------------------------------------------------------------------------
@@ -128,6 +146,9 @@ func (c *SumClient) GetMany(ctx context.Context, entities []string, opts ...Opti
 		return nil, nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetMany", len(entities), len(values)); err != nil {
+		return nil, nil, err
+	}
 	out := make([]int64, len(entities))
 	present := make([]bool, len(entities))
 	for i, v := range values {
@@ -167,11 +188,12 @@ func (c *SumClient) GetWindowMany(ctx context.Context, entities []string, durati
 		return nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetWindowMany", len(entities), len(values)); err != nil {
+		return nil, err
+	}
 	out := make([]int64, len(entities))
 	for i, v := range values {
-		if i < len(values) {
-			out[i] = DecodeInt64(v.GetData())
-		}
+		out[i] = DecodeInt64(v.GetData())
 	}
 	return out, nil
 }
@@ -270,12 +292,12 @@ func (c *HLLClient) GetMany(ctx context.Context, entities []string, opts ...Opti
 		return nil, nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetMany", len(entities), len(values)); err != nil {
+		return nil, nil, err
+	}
 	out := make([]HLLValue, len(entities))
 	present := make([]bool, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		if !v.GetPresent() {
 			continue
 		}
@@ -332,11 +354,11 @@ func (c *HLLClient) GetWindowMany(ctx context.Context, entities []string, durati
 		return nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetWindowMany", len(entities), len(values)); err != nil {
+		return nil, err
+	}
 	out := make([]HLLValue, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		data := v.GetData()
 		if len(data) == 0 {
 			continue
@@ -439,12 +461,12 @@ func (c *TopKClient) GetMany(ctx context.Context, entities []string, opts ...Opt
 		return nil, nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetMany", len(entities), len(values)); err != nil {
+		return nil, nil, err
+	}
 	out := make([][]TopKItem, len(entities))
 	present := make([]bool, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		if !v.GetPresent() {
 			continue
 		}
@@ -508,11 +530,11 @@ func (c *TopKClient) GetWindowMany(ctx context.Context, entities []string, durat
 		return nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetWindowMany", len(entities), len(values)); err != nil {
+		return nil, err
+	}
 	out := make([][]TopKItem, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		data := v.GetData()
 		if len(data) == 0 {
 			continue
@@ -617,12 +639,12 @@ func (c *BloomClient) GetMany(ctx context.Context, entities []string, opts ...Op
 		return nil, nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetMany", len(entities), len(values)); err != nil {
+		return nil, nil, err
+	}
 	out := make([]BloomValue, len(entities))
 	present := make([]bool, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		if !v.GetPresent() {
 			continue
 		}
@@ -686,11 +708,11 @@ func (c *BloomClient) GetWindowMany(ctx context.Context, entities []string, dura
 		return nil, err
 	}
 	values := resp.Msg.GetValues()
+	if err := checkValueCount("GetWindowMany", len(entities), len(values)); err != nil {
+		return nil, err
+	}
 	out := make([]BloomValue, len(entities))
 	for i, v := range values {
-		if i >= len(out) {
-			break
-		}
 		data := v.GetData()
 		if len(data) == 0 {
 			continue

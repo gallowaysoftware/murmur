@@ -101,14 +101,20 @@ go run ./examples/recently-interacted-topk/cmd/query
 Then query the merged Top-N:
 
 ```sh
-# All time (single bucket if non-windowed)
-grpcurl -plaintext -d '{"entity":"global"}' \
-    localhost:50051 murmur.v1.QueryService/Get
-
 # Last 7 days (merges 7 daily Misra-Gries summaries)
 grpcurl -plaintext -d '{"entity":"global","duration_seconds":604800}' \
     localhost:50051 murmur.v1.QueryService/GetWindow
+
+# Last 24 hours
+grpcurl -plaintext -d '{"entity":"global","duration_seconds":86400}' \
+    localhost:50051 murmur.v1.QueryService/GetWindow
 ```
+
+`cmd/query` configures daily windowing, so `Get` / `GetMany` are not the
+right RPCs here: they read the all-time row at bucket 0, which the windowed
+writers never touch. The server returns `FAILED_PRECONDITION` for them
+rather than an empty result that looks like missing data. Run the pipeline
+without a window if you want an all-time `Get`.
 
 The response's `data` is a serialized Misra-Gries summary (raw bytes); decode
 via `pkg/monoid/sketch/topk.Decode`, or use the embedded admin UI which

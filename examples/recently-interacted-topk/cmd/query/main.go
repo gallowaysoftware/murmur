@@ -1,10 +1,15 @@
 // Connect-RPC query server for the recently-interacted-topk example.
 //
-// Serves Get / GetMany / GetWindow / GetRange against the same DynamoDB
+// Serves GetWindow / GetWindowMany / GetRange against the same DynamoDB
 // row both writers (Lambda + ECS Kafka worker) merge into. The byte-encoded
 // Misra-Gries summary is returned verbatim; clients decode via the
 // pkg/monoid/sketch/topk package's Decode helper, or via the embedded
 // admin UI which renders the sketch's items + counts directly.
+//
+// This server configures daily windowing, so Get / GetMany are rejected with
+// FAILED_PRECONDITION: they read the all-time row at bucket 0, which the
+// windowed writers never populate, and an empty answer there is
+// indistinguishable from a genuinely idle pipeline.
 //
 // Run locally:
 //
@@ -13,9 +18,9 @@
 //
 // Then call it:
 //
-//	# all-time top entities (when running non-windowed)
-//	grpcurl -plaintext -d '{"entity":"global"}' \
-//	    localhost:50051 murmur.v1.QueryService/Get
+//	# top entities over the last 24 hours
+//	grpcurl -plaintext -d '{"entity":"global","duration_seconds":86400}' \
+//	    localhost:50051 murmur.v1.QueryService/GetWindow
 //	# top entities over the last 7 days
 //	grpcurl -plaintext -d '{"entity":"global","duration_seconds":604800}' \
 //	    localhost:50051 murmur.v1.QueryService/GetWindow

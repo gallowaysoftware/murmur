@@ -250,7 +250,15 @@ func (s *Service) fetchAllTime(ctx context.Context, ids []string) []int64 {
 		s.stats.LikesMisses.Add(int64(len(ids)))
 		return out
 	}
-	for i, v := range resp.Msg.GetValues() {
+	values := resp.Msg.GetValues()
+	// The response is positional — values[i] is ids[i]. A count mismatch means the
+	// values can't be attributed to candidates at all, and indexing out[i] off the
+	// response length would panic the reranker on whatever the query server sent.
+	if len(values) != len(ids) {
+		s.stats.LikesMisses.Add(int64(len(ids)))
+		return out
+	}
+	for i, v := range values {
 		if v.GetPresent() && len(v.GetData()) >= 8 {
 			out[i] = decodeInt64LE(v.GetData())
 			s.stats.LikesAllHits.Add(1)
@@ -274,7 +282,12 @@ func (s *Service) fetchWindowed(ctx context.Context, ids []string) []int64 {
 	if err != nil {
 		return out
 	}
-	for i, v := range resp.Msg.GetValues() {
+	values := resp.Msg.GetValues()
+	// Positional response; see fetchAllTime.
+	if len(values) != len(ids) {
+		return out
+	}
+	for i, v := range values {
 		if v.GetPresent() && len(v.GetData()) >= 8 {
 			out[i] = decodeInt64LE(v.GetData())
 			s.stats.LikesWindowHits.Add(1)

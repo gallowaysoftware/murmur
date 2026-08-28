@@ -114,16 +114,23 @@ func (s *Int64SumStore) GetMany(ctx context.Context, ks []state.Key) ([]int64, [
 	}
 	byPair := make(map[pair]int64, len(ks))
 
+	// DynamoDB REJECTS a BatchGetItem whose key list repeats a key ("Provided list
+	// of item keys contains duplicates") and fails the whole request, so the same
+	// entity appearing twice in a candidate list took the entire RPC down with it.
+	// Whether that even reproduced depended on the two copies landing in the same
+	// 100-key chunk, which made it look like a size-dependent flake.
+	uniq := dedupeKeys(ks)
+
 	// Build the initial RequestItems; loop on UnprocessedKeys with bounded
 	// exponential backoff. DDB caps BatchGetItem at 100 keys per request — if the
 	// caller hands us more, chunk before issuing.
 	const maxPerCall = 100
-	for offset := 0; offset < len(ks); offset += maxPerCall {
+	for offset := 0; offset < len(uniq); offset += maxPerCall {
 		end := offset + maxPerCall
-		if end > len(ks) {
-			end = len(ks)
+		if end > len(uniq) {
+			end = len(uniq)
 		}
-		chunk := ks[offset:end]
+		chunk := uniq[offset:end]
 		keys := make([]map[string]types.AttributeValue, len(chunk))
 		for i, k := range chunk {
 			keys[i] = keyAttr(k)
@@ -228,6 +235,25 @@ func CreateInt64Table(ctx context.Context, client *dynamodb.Client, table string
 		return nil
 	}
 	return err
+}
+
+// dedupeKeys returns ks with repeated (entity, bucket) pairs removed, preserving
+// first-seen order. BatchGetItem rejects a request whose key list repeats a key,
+// and a repeated entity in a batched read is ordinary caller input — a rerank
+// candidate list that names the same item twice, a windowed fan-out over an entity
+// list with a duplicate. Read results are scattered back through the (entity,
+// bucket) map, so every copy of a duplicated key still gets its value.
+func dedupeKeys(ks []state.Key) []state.Key {
+	uniq := make([]state.Key, 0, len(ks))
+	seen := make(map[state.Key]struct{}, len(ks))
+	for _, k := range ks {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		uniq = append(uniq, k)
+	}
+	return uniq
 }
 
 func keyAttr(k state.Key) map[string]types.AttributeValue {

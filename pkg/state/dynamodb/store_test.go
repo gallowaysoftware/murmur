@@ -3,6 +3,7 @@ package dynamodb_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/hll"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -492,5 +495,155 @@ func TestInt64SumStore_GetMany_EmptyInputNoCalls(t *testing.T) {
 	}
 	if got := ft.batchGetCalls.Load(); got != 0 {
 		t.Fatalf("BatchGetItem calls: got %d, want 0", got)
+	}
+}
+
+// duplicateKey reports the first (pk, sk) pair that appears twice in a single
+// BatchGetItem request, across all tables in it.
+func duplicateKey(req ddbReq) (string, bool) {
+	for table, ka := range req.RequestItems {
+		seen := make(map[string]struct{}, len(ka.Keys))
+		for _, k := range ka.Keys {
+			id := table + "/" + k["pk"]["S"] + "/" + k["sk"]["N"]
+			if _, dup := seen[id]; dup {
+				return id, true
+			}
+			seen[id] = struct{}{}
+		}
+	}
+	return "", false
+}
+
+// validationException builds the 400 the DynamoDB API returns for a malformed
+// request, in the JSON 1.0 shape the SDK decodes.
+func validationException(message string) *http.Response {
+	body, _ := json.Marshal(map[string]string{
+		"__type":  "com.amazon.coral.validate#ValidationException",
+		"message": message,
+	})
+	return &http.Response{
+		StatusCode: 400,
+		Header:     http.Header{"Content-Type": []string{"application/x-amz-json-1.0"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
+}
+
+// echoHandler answers a BatchGetItem with every requested key, valued from the
+// lookup map. Keys absent from the map are omitted from the response, which is
+// how DynamoDB reports a miss.
+func echoHandler(values map[string]int64) func(int, ddbReq) ddbResp {
+	return func(_ int, req ddbReq) ddbResp {
+		items := make([]map[string]map[string]string, 0, len(req.RequestItems["t"].Keys))
+		for _, k := range req.RequestItems["t"].Keys {
+			entity := k["pk"]["S"]
+			bucket, _ := strconv.ParseInt(k["sk"]["N"], 10, 64)
+			v, ok := values[entity]
+			if !ok {
+				continue
+			}
+			items = append(items, ddbItem(entity, bucket, v))
+		}
+		return ddbResp{Responses: map[string][]map[string]map[string]string{"t": items}}
+	}
+}
+
+// TestInt64SumStore_GetManyDeduplicatesKeys pins the duplicate handling.
+// DynamoDB rejects a BatchGetItem whose key list repeats a key and fails the
+// whole request, so a batched read over a candidate list naming the same entity
+// twice took the entire RPC down with it.
+func TestInt64SumStore_GetManyDeduplicatesKeys(t *testing.T) {
+	ft := &fakeTransport{handle: echoHandler(map[string]int64{"a": 10, "b": 20})}
+	store := newFakeStore(t, ft)
+
+	keys := []state.Key{
+		{Entity: "a", Bucket: 0},
+		{Entity: "b", Bucket: 0},
+		{Entity: "a", Bucket: 0}, // same entity twice, same chunk
+		{Entity: "missing", Bucket: 0},
+		{Entity: "b", Bucket: 0},
+	}
+	vals, oks, err := store.GetMany(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("GetMany with duplicate keys: %v", err)
+	}
+	want := []int64{10, 20, 10, 0, 20}
+	wantOK := []bool{true, true, true, false, true}
+	for i := range keys {
+		if vals[i] != want[i] || oks[i] != wantOK[i] {
+			t.Errorf("result[%d] (%s): got (%d,%v), want (%d,%v)",
+				i, keys[i].Entity, vals[i], oks[i], want[i], wantOK[i])
+		}
+	}
+}
+
+// TestInt64SumStore_GetManyDeduplicatesAcrossChunks covers the chunk-boundary
+// dependence directly: 100 distinct keys followed by a repeat of the first one
+// puts the duplicate in a different 100-key chunk, which is why the failure was
+// intermittent on candidate-set size rather than reliable.
+func TestInt64SumStore_GetManyDeduplicatesAcrossChunks(t *testing.T) {
+	keys := makeKeys(100)
+	values := make(map[string]int64, len(keys))
+	for i, k := range keys {
+		values[k.Entity] = int64(i + 1)
+	}
+	keys = append(keys, keys[0])
+
+	ft := &fakeTransport{handle: echoHandler(values)}
+	store := newFakeStore(t, ft)
+
+	vals, oks, err := store.GetMany(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("GetMany with a cross-chunk duplicate: %v", err)
+	}
+	// 101 keys collapse to 100 distinct ones — a single BatchGetItem, not two.
+	if got := ft.batchGetCalls.Load(); got != 1 {
+		t.Errorf("BatchGetItem calls: got %d, want 1", got)
+	}
+	if !oks[0] || vals[0] != 1 {
+		t.Errorf("result[0]: got (%d,%v), want (1,true)", vals[0], oks[0])
+	}
+	if !oks[100] || vals[100] != 1 {
+		t.Errorf("duplicate at result[100]: got (%d,%v), want (1,true)", vals[100], oks[100])
+	}
+}
+
+// TestBytesStore_GetManyDeduplicatesKeys is the sketch-state counterpart —
+// BytesStore carries its own copy of the batch loop.
+func TestBytesStore_GetManyDeduplicatesKeys(t *testing.T) {
+	ft := &fakeTransport{
+		handle: func(_ int, req ddbReq) ddbResp {
+			items := make([]map[string]map[string]string, 0)
+			for _, k := range req.RequestItems["t"].Keys {
+				entity := k["pk"]["S"]
+				if entity != "a" {
+					continue
+				}
+				items = append(items, map[string]map[string]string{
+					"pk": {"S": entity},
+					"sk": {"N": k["sk"]["N"]},
+					"v":  {"B": base64.StdEncoding.EncodeToString([]byte("sketch"))},
+				})
+			}
+			return ddbResp{Responses: map[string][]map[string]map[string]string{"t": items}}
+		},
+	}
+	store := dynamodb.NewBytesStore(newFakeClient(t, ft, 1), "t", hll.HLL())
+
+	keys := []state.Key{
+		{Entity: "a", Bucket: 7},
+		{Entity: "a", Bucket: 7},
+		{Entity: "b", Bucket: 7},
+	}
+	vals, oks, err := store.GetMany(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("GetMany with duplicate keys: %v", err)
+	}
+	for _, i := range []int{0, 1} {
+		if !oks[i] || string(vals[i]) != "sketch" {
+			t.Errorf("result[%d]: got (%q,%v), want (\"sketch\", true)", i, vals[i], oks[i])
+		}
+	}
+	if oks[2] {
+		t.Errorf("result[2] (b): reported present, want absent")
 	}
 }

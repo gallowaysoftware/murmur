@@ -283,35 +283,63 @@ func TestDeployed_PageViewCounters_QueryBootsAgainstDDB(t *testing.T) {
 
 	host, _ := query.Host(ctx)
 	port, _ := query.MappedPort(ctx, "50051/tcp")
-	url := fmt.Sprintf("http://%s:%s/murmur.v1.QueryService/Get", host, port.Port())
-
+	baseURL := fmt.Sprintf("http://%s:%s", host, port.Port())
 	httpc := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url,
-		strings.NewReader(`{"entity":"page-never-seen"}`))
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpc.Do(req)
-	if err != nil {
-		t.Fatalf("query request: %v", err)
+	post := func(method, payload string) (int, []byte) {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+			baseURL+"/murmur.v1.QueryService/"+method, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpc.Do(req)
+		if err != nil {
+			t.Fatalf("%s request: %v", method, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, body
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("query response: status=%d body=%s", resp.StatusCode, body)
+
+	// This pipeline is windowed (Daily, 90d retention), so Get is the wrong RPC
+	// for it: bucket 0 is the all-time sentinel and no windowed write ever lands
+	// there. It used to answer present=false, which this test then "confirmed" —
+	// an assertion that would have held just as well for an entity with a
+	// million views. The server now says so out loud.
+	status, body := post("Get", `{"entity":"page-never-seen"}`)
+	if status != http.StatusPreconditionFailed {
+		t.Fatalf("Get on a windowed pipeline: status=%d body=%s, want 412", status, body)
 	}
-	// Absent-entity shape: { "value": { "present": false } }
+	var connErr struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &connErr); err != nil {
+		t.Fatalf("Get error decode: %v (body: %s)", err, body)
+	}
+	if connErr.Code != "failed_precondition" {
+		t.Errorf("Get error code: got %q, want %q (body: %s)", connErr.Code, "failed_precondition", body)
+	}
+
+	// GetWindow is the RPC the precondition points at, and it answers for an
+	// absent entity with the merged-empty value rather than an error.
+	status, body = post("GetWindow", `{"entity":"page-never-seen","duration_seconds":86400}`)
+	if status != http.StatusOK {
+		t.Fatalf("GetWindow: status=%d body=%s", status, body)
+	}
 	var env struct {
 		Value struct {
-			Present bool `json:"present"`
+			Data []byte `json:"data"`
 		} `json:"value"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		t.Fatalf("query response decode: %v (body: %s)", err, body)
+		t.Fatalf("GetWindow response decode: %v (body: %s)", err, body)
 	}
-	if env.Value.Present {
-		t.Errorf("absent entity reported present: %s", body)
+	if len(env.Value.Data) >= 8 {
+		if got := int64(binary.LittleEndian.Uint64(env.Value.Data)); got != 0 {
+			t.Errorf("GetWindow for an absent entity: got %d, want 0", got)
+		}
 	}
-	t.Logf("query container served Connect-RPC Get against DDB-local; absent-entity round-trip clean")
+	t.Logf("query container served Connect-RPC against DDB-local; Get routed to GetWindow, absent-entity window clean")
 }
 
 // dumpContainerLogs prints a tail of the named container's combined

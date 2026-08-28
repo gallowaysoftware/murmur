@@ -1953,11 +1953,25 @@ flowchart LR
 
 ### 8.3 Singleflight coalescing
 
-`pkg/query/grpc.Server` wraps the four read methods in
-`golang.org/x/sync/singleflight`. The keying is the request shape: for
-`Get` it's `"get:" + entity`; for `GetWindow` it's `"window:" + entity
-+ ":" + duration`; for `GetRange` it's `"range:" + entity + ":" +
-start + ":" + end`.
+`pkg/query/grpc.Server` wraps the read methods in
+`golang.org/x/sync/singleflight`. The key is the request shape: the RPC
+name, the duration or absolute bounds, the bucketed "now" for windowed
+reads, and the entity list.
+
+Two properties of the entity-list encoding are load-bearing. It is
+**length-prefixed**, because a plain separator-joined key is not
+injective over entity strings that may contain the separator — `["a|b"]`
+and `["a","b"]` produced the same key, and so did `["a|b","c"]` and
+`["a","b|c"]`, which a length check does not catch either. And it is
+**order-preserving**, because responses are positional: sorting the list
+to catch permutations made `["a","b"]` and `["b","a"]` one group, so the
+second caller received the first caller's values attributed to the wrong
+entities. Permutation coalescing is deliberately given up.
+
+The shared call runs on a context detached from whichever caller led the
+group, under a server-side `CoalesceTimeout`, and each waiter selects on
+its own context. A client hanging up therefore leaves without taking its
+coalesced peers down with it, and a wedged store still frees the group.
 
 Concurrent requests for the same key resolve through one underlying
 fold. A thousand simultaneous feed renders asking for the same hot

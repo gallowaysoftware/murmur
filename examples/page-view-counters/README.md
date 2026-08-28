@@ -57,8 +57,15 @@ Produce some events (using your tool of choice — `kcat`, a small Go producer, 
 then query:
 
 ```sh
-grpcurl -plaintext -d '{"entity": "page-A"}' localhost:50051 murmur.v1.QueryService/Get
+# This pipeline is windowed (daily buckets, 90d retention), so GetWindow is
+# the RPC to use. Get / GetMany read the all-time row at bucket 0, which a
+# windowed pipeline never writes — the server answers them with
+# FAILED_PRECONDITION rather than a misleading "not found".
 grpcurl -plaintext -d '{"entity": "page-A", "duration_seconds": 86400}' \
+  localhost:50051 murmur.v1.QueryService/GetWindow
+
+# Last 7 days:
+grpcurl -plaintext -d '{"entity": "page-A", "duration_seconds": 604800}' \
   localhost:50051 murmur.v1.QueryService/GetWindow
 ```
 

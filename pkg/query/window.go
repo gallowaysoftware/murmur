@@ -49,7 +49,10 @@ func GetWindow[V any](
 	duration time.Duration,
 	now time.Time,
 ) (V, error) {
-	lo, hi := w.LastN(now, duration)
+	lo, hi, err := windowBuckets(w, duration, now)
+	if err != nil {
+		return m.Identity(), err
+	}
 	return getRangeBuckets(ctx, store, m, entity, lo, hi)
 }
 
@@ -63,7 +66,10 @@ func GetRange[V any](
 	entity string,
 	start, end time.Time,
 ) (V, error) {
-	lo, hi := w.BucketRange(start, end)
+	lo, hi, err := rangeBuckets(w, start, end)
+	if err != nil {
+		return m.Identity(), err
+	}
 	return getRangeBuckets(ctx, store, m, entity, lo, hi)
 }
 
@@ -89,7 +95,10 @@ func GetWindowMany[V any](
 	duration time.Duration,
 	now time.Time,
 ) ([]V, error) {
-	lo, hi := w.LastN(now, duration)
+	lo, hi, err := windowBuckets(w, duration, now)
+	if err != nil {
+		return identityFill(m, len(entities)), err
+	}
 	return getRangeBucketsMany(ctx, store, m, entities, lo, hi)
 }
 
@@ -102,7 +111,10 @@ func GetRangeMany[V any](
 	entities []string,
 	start, end time.Time,
 ) ([]V, error) {
-	lo, hi := w.BucketRange(start, end)
+	lo, hi, err := rangeBuckets(w, start, end)
+	if err != nil {
+		return identityFill(m, len(entities)), err
+	}
 	return getRangeBucketsMany(ctx, store, m, entities, lo, hi)
 }
 
@@ -113,13 +125,10 @@ func getRangeBucketsMany[V any](
 	entities []string,
 	lo, hi int64,
 ) ([]V, error) {
-	out := make([]V, len(entities))
 	if hi < lo || len(entities) == 0 {
-		for i := range out {
-			out[i] = m.Identity()
-		}
-		return out, nil
+		return identityFill(m, len(entities)), nil
 	}
+	out := make([]V, len(entities))
 	bucketCount := int(hi - lo + 1)
 	totalKeys := bucketCount * len(entities)
 
@@ -136,10 +145,7 @@ func getRangeBucketsMany[V any](
 	vals, _, err := store.GetMany(ctx, keys)
 	if err != nil {
 		// Identity-fill on error so callers don't see a partial slice.
-		for i := range out {
-			out[i] = m.Identity()
-		}
-		return out, err
+		return identityFill(m, len(entities)), err
 	}
 
 	for i := range entities {
@@ -148,6 +154,17 @@ func getRangeBucketsMany[V any](
 		out[i] = windowed.MergeBuckets(m, vals[start:end])
 	}
 	return out, nil
+}
+
+// identityFill returns a full-length slice of monoid identities. Every "Many" error
+// path hands one back so a caller that ignores the error still gets a slice it can
+// index by entity position rather than a short or nil one.
+func identityFill[V any](m monoid.Monoid[V], n int) []V {
+	out := make([]V, n)
+	for i := range out {
+		out[i] = m.Identity()
+	}
+	return out
 }
 
 func getRangeBuckets[V any](

@@ -24,6 +24,45 @@ type Config struct {
 	// Retention is how long buckets are kept before TTL eviction. Sliding-window queries
 	// can ask for any range up to Retention.
 	Retention time.Duration
+
+	// MaxBuckets caps how many buckets a single read may span. Leave it zero to take
+	// the default from Retention (see MaxBucketSpan).
+	//
+	// Without a cap, a caller who passes an open-ended range gets no error — just an
+	// enormous key list. GetRange(entity, Unix(0,0), now) against Minute granularity
+	// builds 29,797,201 keys (~715MB of state.Key) before the first store call, and
+	// all but the last Retention/Granularity of them address buckets that TTL evicted
+	// and can never hold data again.
+	MaxBuckets int
+}
+
+// MaxBucketSpan reports the largest number of buckets one read may span. It is
+// MaxBuckets when set, otherwise ceil(Retention / Granularity) — reading further back
+// than Retention can only return TTL-evicted buckets. Zero means unbounded, which
+// happens only when neither MaxBuckets nor Retention is configured.
+func (c Config) MaxBucketSpan() int64 {
+	if c.MaxBuckets > 0 {
+		return int64(c.MaxBuckets)
+	}
+	if c.Granularity <= 0 || c.Retention <= 0 {
+		return 0
+	}
+	n := int64(c.Retention / c.Granularity)
+	if c.Retention%c.Granularity != 0 {
+		n++
+	}
+	return n
+}
+
+// RetentionBuckets reports how many whole buckets fit inside Retention — the longest
+// window a read can ask for and still be answered entirely from live buckets. Zero
+// means Retention is unset (or shorter than a single bucket), in which case callers
+// should not enforce a retention bound.
+func (c Config) RetentionBuckets() int64 {
+	if c.Granularity <= 0 || c.Retention <= 0 {
+		return 0
+	}
+	return int64(c.Retention / c.Granularity)
 }
 
 // Daily returns a Config with 24h granularity and the given retention. The most common

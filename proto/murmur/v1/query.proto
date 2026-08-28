@@ -22,19 +22,30 @@ package murmur.v1;
 // others.
 service QueryService {
   // Get returns the all-time aggregation value for entity (non-windowed
-  // pipelines).
+  // pipelines). On a WINDOWED pipeline this returns FAILED_PRECONDITION:
+  // it addresses bucket 0, which is the all-time sentinel and which a
+  // windowed pipeline never writes, so it could only ever answer "absent".
+  // Use GetWindow there. fresh_read does not bypass that check.
   rpc Get(GetRequest) returns (GetResponse);
 
   // GetWindow returns the aggregation merged across the bucket range
   // covering the most recent `duration_seconds`, ending at the server's "now".
+  // Returns INVALID_ARGUMENT when duration_seconds is not positive or when
+  // the window reaches further back than the pipeline's retention keeps
+  // buckets — a longer window can only fold in TTL-evicted holes as the
+  // monoid identity and report the result as a full window.
   rpc GetWindow(GetWindowRequest) returns (GetWindowResponse);
 
   // GetRange returns the aggregation merged across the bucket range
-  // covering [start_unix, end_unix].
+  // covering [start_unix, end_unix]. Returns INVALID_ARGUMENT when the
+  // bounds are unset (proto3 zero), reversed, outside the representable
+  // bucket range, or span more buckets than the pipeline's cap allows.
   rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
 
   // GetMany batches Get calls. Response order matches request order so
-  // callers can zip without an index map.
+  // callers can zip without an index map — the response ALWAYS carries
+  // exactly one value per requested entity. Same windowed-pipeline
+  // precondition as Get.
   rpc GetMany(GetManyRequest) returns (GetManyResponse);
 
   // GetWindowMany batches GetWindow calls across many entities in a single

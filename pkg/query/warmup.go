@@ -26,8 +26,9 @@ import (
 // few hundred milliseconds against typical DDB capacity and is a
 // straightforward step in the service-start path.
 //
-// Returns the count of successfully warmed entries (entities × buckets
-// that the store had data for) so callers can log meaningful progress.
+// Returns the count of successfully warmed entries (distinct entities ×
+// buckets that the store had data for) so callers can log meaningful
+// progress. Repeated entities are collapsed before the fetch.
 func WarmupWindowed[V any](
 	ctx context.Context,
 	cache state.Cache[V],
@@ -46,10 +47,16 @@ func WarmupWindowed[V any](
 	if len(entities) == 0 {
 		return 0, nil
 	}
-	lo, hi := w.LastN(now, duration)
+	lo, hi, err := windowBuckets(w, duration, now)
+	if err != nil {
+		return 0, fmt.Errorf("query.WarmupWindowed: %w", err)
+	}
 	if hi < lo {
 		return 0, nil
 	}
+	// A repeated entity would put the same (entity, bucket) key in the list twice,
+	// which BatchGetItem rejects outright, and would double-count it in `warmed`.
+	entities = dedupeStrings(entities)
 	bucketCount := int(hi - lo + 1)
 	keys := make([]state.Key, 0, bucketCount*len(entities))
 	for _, e := range entities {
@@ -98,6 +105,9 @@ func WarmupNonWindowed[V any](
 	if len(entities) == 0 {
 		return 0, nil
 	}
+	// Same reason as WarmupWindowed: duplicates are illegal in a BatchGetItem key
+	// list and inflate the warmed count.
+	entities = dedupeStrings(entities)
 	keys := make([]state.Key, len(entities))
 	for i, e := range entities {
 		keys[i] = state.Key{Entity: e}
@@ -116,4 +126,18 @@ func WarmupNonWindowed[V any](
 		return warmed, fmt.Errorf("query.WarmupNonWindowed: repopulate: %w", err)
 	}
 	return warmed, nil
+}
+
+// dedupeStrings returns entities with repeats removed, preserving first-seen order.
+func dedupeStrings(entities []string) []string {
+	out := make([]string, 0, len(entities))
+	seen := make(map[string]struct{}, len(entities))
+	for _, e := range entities {
+		if _, dup := seen[e]; dup {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	return out
 }
