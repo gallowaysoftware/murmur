@@ -108,6 +108,11 @@ func MergeOne[T any, V any](
 		[]string{keyFn(value)}, valueFn(value), store, cache, window)
 }
 
+// releaseTimeout bounds the detached dedup-release call. It has to be short:
+// the caller is usually shutting down and something is waiting on it, but a
+// release that never happens costs an event permanently.
+const releaseTimeout = 5 * time.Second
+
 // MergeMany is the multi-key entry point. It claims the EventID via Dedup
 // (once, regardless of how many keys), then for each key runs the store
 // and cache MergeUpdate with the supplied delta. Used by hierarchical-
@@ -179,7 +184,16 @@ func MergeMany[V any](
 			// permits loss, and dedup is a best-effort mitigation layered on
 			// top, not a stronger guarantee.
 			if claimed {
-				if rerr := cfg.Dedup.Release(ctx, eventID); rerr != nil {
+				// Release on a context DETACHED from ctx. The single most
+				// likely reason a merge fails is that ctx was just cancelled
+				// by SIGTERM — and releasing with the cancelled ctx fails
+				// immediately, so the claim survives exactly the shutdown it
+				// most needs to survive. The redelivery then hits dedup_skip
+				// and the event is lost permanently.
+				relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+				rerr := cfg.Dedup.Release(relCtx, eventID)
+				cancel()
+				if rerr != nil {
 					cfg.Recorder.RecordError(pipelineName,
 						fmt.Errorf("dedup Release %q after failed merge: %w", eventID, rerr))
 					cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
