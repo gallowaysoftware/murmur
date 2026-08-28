@@ -130,6 +130,88 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on an in-flight aggregator flush, and a shutdown drain spending exactly one
   release budget.
 
+- **Bloom `Identity` no longer imposes a shape.** `(m, k)` is written into every
+  marshaled filter and read back out of it by `UnmarshalBinary`, so a marshaled
+  empty `Identity` was an identity only for filters of its own shape. A pipeline
+  built with `bloom.NewWithCapacity` whose value extractor called the
+  default-sized `bloom.Single` merged every event into a shape mismatch and the
+  stored row stayed empty forever. `Identity` is now the empty slice, which
+  `Combine` already short-circuits.
+- **Bloom shape mismatches are reported.** A `(m, k)` clash between two real
+  filters now fires `WithDecodeErrorHandler` naming both shapes and the monoid's
+  own — the case that hook's doc always claimed to cover and never did, because
+  mismatched filters decode fine and the merge was abandoned in silence.
+- **TopK honours the wire K.** The K in a sketch's header was decoded and
+  discarded, so a `topk.New(10)` client merging a saturated K=32 row truncated it
+  to 10 counters and wrote the truncation back. `Combine` now merges at the
+  widest K of the monoid and both operands (`max` is associative, so merge order
+  still cannot change the result) and reports the mismatch through
+  `WithDecodeErrorHandler`. A K adopted from the wire is capped, so a corrupt
+  header cannot switch off eviction and let a row grow until the store refuses it.
+- **TopK saturation is visible.** A summary retaining 0.06% of its stream was
+  byte-indistinguishable from an exact one: 32 counters summing to 45,932 over 32
+  distinct entities, 29 summing to 29 over 33. The header now carries total
+  ingested weight as a plain associative `uint64` sum, and the new `topk.Inspect`
+  returns a `Summary` with `Ingested` / `Retained` / `Coverage` / `Saturated` /
+  `MaxError`. Discarded mass is deliberately not accumulated — it is
+  merge-order-dependent and would break associativity.
+- **One future-dated event no longer freezes a `DecayedSum` key.** `Combine`
+  adopts the newer timestamp as the reference frame, so a four-year skew made the
+  frame unreachable: `2^(-4y/24h)` underflows to exactly zero, the accumulated
+  mass was annihilated, and every event that followed was itself the older operand
+  and was annihilated in turn. The key froze at whatever the skewed event carried,
+  and the read path scaled that up by `2^(+gap/halfLife)` — `+Inf`, or 7.5e109 for
+  a one-year skew at `halfLife=24h` — pinning it to rank #1 permanently. `Combine`
+  now bounds the reference frame against the wall clock (`WithClockSkewBound`,
+  two half-lives by default; `WithClock` to override the clock), and `EvaluateAt`
+  before the reference time returns the stored value instead of un-decaying it.
+- **`DecayedSum` with `halfLife <= 0` no longer means two different things.**
+  `Combine` computed `2^(-dt/0)`: `NaN` at `dt=0`, which round-trips through
+  `Encode`/`Decode` and poisons the row forever, and `0` at `dt>0`, which silently
+  dropped every older contribution — while `EvaluateAt` on the same row reported
+  it undecayed, and a negative half-life made the value grow. Both now mean "no
+  decay". Reachable by accident via `murmur.Trending(name, cfg.HalfLife)` with an
+  unset `Duration` field.
+- **`compose` gained a decode-error handler.** The `Decayed` wire form is a bare
+  17 bytes with no magic and no length prefix, so a 200-byte HLL sketch decoded to
+  a `Set=true` observation assembled from its first 17 bytes and merged into the
+  row as if it were real. `DecodeDecayed` now rejects any length but 0 and 17, and
+  `DecayedSumBytes` takes `WithDecodeErrorHandler` like `hll` / `topk` / `bloom`.
+
+### Changed
+
+- `pkg/query/typed.TopKItem.Count` is documented as the Misra-Gries lower bound it
+  has always been, pointing at `topk.Inspect` for the error bound and coverage.
+- `monoidlaws` now fuzzes non-default capacities: a Bloom monoid whose `(m, k)`
+  differs from its operands', and a K=4 TopK monoid over K=32 sketches.
+
+### Breaking (pre-1.0)
+
+- The TopK wire format gains a flagged `uint64` ingested-weight header field.
+  Rows written by older binaries still decode (flagged `PartialWeight`); rows
+  written by this version do **not** decode correctly on older binaries.
+- `bloom` `Identity()` returns an empty slice rather than a marshaled empty filter.
+- `compose.DecodeDecayed` returns `(Decayed, error)`.
+- `compose.EvaluateAt` no longer scales a value up when evaluated before its
+  reference time; it returns the stored value.
+- `compose.DecayedSum` / `DecayedSumBytes` and `bloom.Bloom` take variadic options.
+
+### Changed
+
+- `pkg/monoid/compose`: `DecayedSum` / `DecayedSumBytes` `Combine` is a pure function of its operands again — it no longer reads the wall clock. `BytesStore.MergeUpdate` recomputes `Combine` on every CAS retry, so a clock-reading `Combine` returned a different answer on each attempt, and the monoid-law fuzzer evaluated the two associativity groupings at different instants. **Breaking:** `WithClock` and `WithClockSkewBound` are removed.
+- `pkg/monoid/compose`: the future-timestamp skew bound moves from the merge path to the lift, as `ClampFuture(t, now, bound)` and `DefaultSkewBound(halfLife)`. Use it in any pipeline whose value extractor takes the timestamp from the event rather than from the clock; `murmur.Trending` stamps at its own clock and is unaffected. The bound cannot be derived from `Combine`'s operands: a state dated into the future is indistinguishable there from a legitimately idle key, so a pairwise clamp would resurrect stale mass.
+- `pkg/monoid/compose`: a non-positive half-life now means "no decay" in `Combine` as well as `EvaluateAt`. It previously computed `2^(-dt/0)` — NaN at `dt=0`, which round-trips through the wire format and poisons the row permanently, and `0` at `dt>0`, which silently dropped every older contribution.
+- `pkg/monoid/compose`: `EvaluateAt` at a time before the reference timestamp returns the stored value instead of scaling it up. Un-decaying is an unbounded over-estimate (`+Inf` for a four-year-ahead row at `halfLife=24h`).
+- **Breaking:** `pkg/monoid/compose.DecodeDecayed` returns `(Decayed, error)`. Any length other than 0 or 17 is now an error rather than a `Set=true` value assembled from a foreign blob's first 17 bytes.
+- `pkg/monoid/sketch/bloom`: `Identity` is the empty slice rather than a marshaled empty filter, so it is an identity for an operand of any shape. A monoid built with `NewWithCapacity` whose extractor called the default-sized `Single` previously merged every event into a shape mismatch and left the row empty forever.
+- `pkg/monoid/sketch/bloom`: `NewWithCapacity(n, p)`'s parameters are now enforced as a declaration. `Combine` reports, via `WithDecodeErrorHandler`, both a shape clash between operands and operands that agree with each other but not with the configured `(m, k)` — the latter is how a `NewWithCapacity(1_000, 0.01)` pipeline could aggregate `DefaultCapacity` filters at a false-positive rate nothing in the configuration predicted.
+- `pkg/monoid/sketch/bloom`: `Combine` no longer allocates two discarded ~120 KB bit arrays per merge.
+
+### Added
+
+- `pkg/monoid/compose.ClampFuture` and `pkg/monoid/compose.DefaultSkewBound` (experimental).
+- `pkg/monoid/sketch/topk`: saturation tests documenting that a `K=32` summary drops from 32 counters covering 45,932 events to 29 counters covering 29 when a 33rd entity appears, and that the counts are Misra-Gries lower bounds with an `n/(K+1)` error bar that callers must size from an `n` the sketch does not record.
+
 ### Fixed — graceful shutdown silently lost every in-flight record
 
 `streaming.Run` treated a cancelled context as a poison record. The comment at
