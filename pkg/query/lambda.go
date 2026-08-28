@@ -67,7 +67,10 @@ func (q LambdaQuery[V]) GetWindow(
 	duration time.Duration,
 	now time.Time,
 ) (V, error) {
-	lo, hi := w.LastN(now, duration)
+	lo, hi, err := windowBuckets(w, duration, now)
+	if err != nil {
+		return q.Monoid.Identity(), err
+	}
 	return q.mergeBuckets(ctx, entity, lo, hi)
 }
 
@@ -78,7 +81,10 @@ func (q LambdaQuery[V]) GetRange(
 	entity string,
 	start, end time.Time,
 ) (V, error) {
-	lo, hi := w.BucketRange(start, end)
+	lo, hi, err := rangeBuckets(w, start, end)
+	if err != nil {
+		return q.Monoid.Identity(), err
+	}
 	return q.mergeBuckets(ctx, entity, lo, hi)
 }
 

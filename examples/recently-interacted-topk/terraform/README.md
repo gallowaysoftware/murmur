@@ -113,14 +113,19 @@ inside the VPC (jump host, bastion, EC2 instance in the same VPC):
 ```sh
 ENDPOINT=$(terraform output -raw query_service_endpoint)
 
-grpcurl -plaintext -d '{"entity":"global"}' \
-  "$ENDPOINT" murmur.v1.QueryService/Get
+grpcurl -plaintext -d '{"entity":"global","duration_seconds":86400}' \
+  "$ENDPOINT" murmur.v1.QueryService/GetWindow
 # → Top-N with product-42 at count = 2 (one from each source).
 
 grpcurl -plaintext -d '{"entity":"global","duration_seconds":604800}' \
   "$ENDPOINT" murmur.v1.QueryService/GetWindow
 # → 7-day windowed Top-N (merged across daily Misra-Gries summaries).
 ```
+
+The deployed pipeline is windowed, so `GetWindow` is the RPC to reach for.
+`Get` addresses the all-time row at bucket 0, which no windowed write ever
+populates; the server answers it with `FAILED_PRECONDITION` so a soak run
+can't mistake a routing error for zero traffic.
 
 ### 6. Observability during the soak
 

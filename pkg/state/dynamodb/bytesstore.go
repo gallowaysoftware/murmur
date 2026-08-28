@@ -182,13 +182,18 @@ func (s *BytesStore) GetMany(ctx context.Context, ks []state.Key) ([][]byte, []b
 	}
 	byPair := make(map[pair][]byte, len(ks))
 
+	// See Int64SumStore.GetMany: BatchGetItem rejects a duplicated key outright,
+	// so the request has to carry each (entity, bucket) once even when the caller
+	// asked for it twice.
+	uniq := dedupeKeys(ks)
+
 	const maxPerCall = 100
-	for offset := 0; offset < len(ks); offset += maxPerCall {
+	for offset := 0; offset < len(uniq); offset += maxPerCall {
 		end := offset + maxPerCall
-		if end > len(ks) {
-			end = len(ks)
+		if end > len(uniq) {
+			end = len(uniq)
 		}
-		chunk := ks[offset:end]
+		chunk := uniq[offset:end]
 		keys := make([]map[string]types.AttributeValue, len(chunk))
 		for i, k := range chunk {
 			keys[i] = keyAttr(k)

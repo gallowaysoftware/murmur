@@ -1,8 +1,13 @@
 // Connect-RPC query server for the page-view-counters example.
 //
-// Serves Get / GetMany / GetWindow / GetRange against the same DynamoDB table
+// Serves GetWindow / GetWindowMany / GetRange against the same DynamoDB table
 // the streaming worker writes to. The endpoint speaks gRPC, gRPC-Web, and
 // Connect (HTTP+JSON) on the same port — pick whichever your client supports.
+//
+// This pipeline is windowed (daily buckets), so GetWindow is the entry point.
+// Get / GetMany address the all-time row at bucket 0, which a windowed
+// pipeline never writes; the server rejects them with FAILED_PRECONDITION
+// instead of reporting a phantom "not found".
 //
 // In production this binary runs as a separate ECS Fargate service behind an
 // ALB (the Terraform pipeline-counter module's `query` service). Locally:
@@ -12,10 +17,11 @@
 //
 // Then call it with grpcurl, buf curl, or plain curl:
 //
-//	grpcurl -plaintext -d '{"entity": "page-A"}' \
-//	    localhost:50051 murmur.v1.QueryService/Get
-//	curl -X POST http://localhost:50051/murmur.v1.QueryService/Get \
-//	    -H 'Content-Type: application/json' -d '{"entity": "page-A"}'
+//	grpcurl -plaintext -d '{"entity": "page-A", "duration_seconds": 86400}' \
+//	    localhost:50051 murmur.v1.QueryService/GetWindow
+//	curl -X POST http://localhost:50051/murmur.v1.QueryService/GetWindow \
+//	    -H 'Content-Type: application/json' \
+//	    -d '{"entity": "page-A", "duration_seconds": 86400}'
 package main
 
 import (

@@ -51,16 +51,27 @@ const (
 // others.
 type QueryServiceClient interface {
 	// Get returns the all-time aggregation value for entity (non-windowed
-	// pipelines).
+	// pipelines). On a WINDOWED pipeline this returns FAILED_PRECONDITION:
+	// it addresses bucket 0, which is the all-time sentinel and which a
+	// windowed pipeline never writes, so it could only ever answer "absent".
+	// Use GetWindow there. fresh_read does not bypass that check.
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	// GetWindow returns the aggregation merged across the bucket range
 	// covering the most recent `duration_seconds`, ending at the server's "now".
+	// Returns INVALID_ARGUMENT when duration_seconds is not positive or when
+	// the window reaches further back than the pipeline's retention keeps
+	// buckets — a longer window can only fold in TTL-evicted holes as the
+	// monoid identity and report the result as a full window.
 	GetWindow(ctx context.Context, in *GetWindowRequest, opts ...grpc.CallOption) (*GetWindowResponse, error)
 	// GetRange returns the aggregation merged across the bucket range
-	// covering [start_unix, end_unix].
+	// covering [start_unix, end_unix]. Returns INVALID_ARGUMENT when the
+	// bounds are unset (proto3 zero), reversed, outside the representable
+	// bucket range, or span more buckets than the pipeline's cap allows.
 	GetRange(ctx context.Context, in *GetRangeRequest, opts ...grpc.CallOption) (*GetRangeResponse, error)
 	// GetMany batches Get calls. Response order matches request order so
-	// callers can zip without an index map.
+	// callers can zip without an index map — the response ALWAYS carries
+	// exactly one value per requested entity. Same windowed-pipeline
+	// precondition as Get.
 	GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (*GetManyResponse, error)
 	// GetWindowMany batches GetWindow calls across many entities in a single
 	// round-trip. ONE underlying store fetch over (N entities × M buckets)
@@ -192,16 +203,27 @@ func (c *queryServiceClient) GetTrailingMany(ctx context.Context, in *GetTrailin
 // others.
 type QueryServiceServer interface {
 	// Get returns the all-time aggregation value for entity (non-windowed
-	// pipelines).
+	// pipelines). On a WINDOWED pipeline this returns FAILED_PRECONDITION:
+	// it addresses bucket 0, which is the all-time sentinel and which a
+	// windowed pipeline never writes, so it could only ever answer "absent".
+	// Use GetWindow there. fresh_read does not bypass that check.
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	// GetWindow returns the aggregation merged across the bucket range
 	// covering the most recent `duration_seconds`, ending at the server's "now".
+	// Returns INVALID_ARGUMENT when duration_seconds is not positive or when
+	// the window reaches further back than the pipeline's retention keeps
+	// buckets — a longer window can only fold in TTL-evicted holes as the
+	// monoid identity and report the result as a full window.
 	GetWindow(context.Context, *GetWindowRequest) (*GetWindowResponse, error)
 	// GetRange returns the aggregation merged across the bucket range
-	// covering [start_unix, end_unix].
+	// covering [start_unix, end_unix]. Returns INVALID_ARGUMENT when the
+	// bounds are unset (proto3 zero), reversed, outside the representable
+	// bucket range, or span more buckets than the pipeline's cap allows.
 	GetRange(context.Context, *GetRangeRequest) (*GetRangeResponse, error)
 	// GetMany batches Get calls. Response order matches request order so
-	// callers can zip without an index map.
+	// callers can zip without an index map — the response ALWAYS carries
+	// exactly one value per requested entity. Same windowed-pipeline
+	// precondition as Get.
 	GetMany(context.Context, *GetManyRequest) (*GetManyResponse, error)
 	// GetWindowMany batches GetWindow calls across many entities in a single
 	// round-trip. ONE underlying store fetch over (N entities × M buckets)
