@@ -220,6 +220,47 @@ func TestProjector_TombstoneProjectsToZero(t *testing.T) {
 	}
 }
 
+// TestProjector_FailureWithoutSequenceNumberIsNotReported covers the record
+// shape with no checkpoint cursor. Lambda rejects a response whose
+// itemIdentifier is null or empty as malformed and redelivers the ENTIRE
+// batch — one unreportable record would then cost every other record in the
+// batch a redundant reindex. The projector must drop the entry and count it
+// rather than emit an empty identifier or fall back to the eventID.
+func TestProjector_FailureWithoutSequenceNumberIsNotReported(t *testing.T) {
+	idx := &fakeIndex{err: errors.New("opensearch 503")}
+	p := projector.New(projector.Config{Index: "posts"}, idx)
+
+	noSeq := makeRecord("post-A", 999, 1000, true) // would index → fails
+	noSeq.Change.SequenceNumber = ""               // hand-constructed: no cursor
+	withSeq := makeRecord("post-B", 999, 1000, true)
+
+	records := []events.DynamoDBEventRecord{noSeq, withSeq}
+	failures := p.HandleEvent(context.Background(), events.DynamoDBEvent{Records: records})
+
+	if len(failures) != 1 {
+		t.Fatalf("BatchItemFailures: got %d, want 1 (only the record with a SequenceNumber): %+v",
+			len(failures), failures)
+	}
+	if got, want := failures[0].ItemIdentifier, withSeq.Change.SequenceNumber; got != want {
+		t.Errorf("ItemIdentifier: got %q, want %q", got, want)
+	}
+	for _, f := range failures {
+		if f.ItemIdentifier == "" {
+			t.Error("empty ItemIdentifier reported; Lambda treats that response as malformed " +
+				"and redelivers the whole batch")
+		}
+		if f.ItemIdentifier == noSeq.EventID {
+			t.Errorf("ItemIdentifier fell back to the eventID %q; Lambda cannot resolve one", noSeq.EventID)
+		}
+	}
+
+	// The drop must be observable — a silent one hides records that failed
+	// and were never handed back to Lambda.
+	if got := p.Stats().Unreportable.Load(); got != 1 {
+		t.Errorf("Stats.Unreportable: got %d, want 1", got)
+	}
+}
+
 func TestProjector_OpenSearchFailureReportsToBatchItemFailures(t *testing.T) {
 	idx := &fakeIndex{err: errors.New("opensearch 503")}
 	p := projector.New(projector.Config{Index: "posts"}, idx)

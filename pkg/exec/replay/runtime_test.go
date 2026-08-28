@@ -131,65 +131,48 @@ func (d *slowDriver) Replay(ctx context.Context, out chan<- source.Record[int]) 
 func (*slowDriver) Name() string { return "slow-driver" }
 func (*slowDriver) Close() error { return nil }
 
-// fakeClock is a hand-wound clock. Replay idempotency is bounded by the
-// deduper's TTL, and a test that waited out a real one would never run.
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
+// claimOnceDeduper is a minimal state.Deduper: one claim per EventID, held
+// for the life of the test. It stands in for any Deduper implementation
+// while the runtime's own behaviour is under test — whether a replay re-run
+// re-merges depends only on what MarkSeen answers, so nothing here needs to
+// model DynamoDB.
+//
+// It deliberately does NOT model claim expiry. Nothing in murmur implements
+// a dedup TTL — DynamoDB's native TTL sweeper does, in
+// pkg/state/dynamodb.Deduper's table — so a hand-rolled expiry here would
+// only be this file asserting against itself. The horizon that expiry puts
+// on replay idempotency is pinned against the real Deduper in
+// test/e2e/replay_dedup_ttl_test.go, behind the DDB-local gate.
+type claimOnceDeduper struct {
+	mu    sync.Mutex
+	claim map[string]bool
 }
 
-func newFakeClock() *fakeClock {
-	return &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+func newClaimOnceDeduper() *claimOnceDeduper {
+	return &claimOnceDeduper{claim: map[string]bool{}}
 }
 
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-func (c *fakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.t = c.t.Add(d)
-}
-
-// ttlDeduper models dynamodb.Deduper: one claim per EventID, which DDB's
-// native TTL drops once it expires, after which the same EventID is claimable
-// again. That expiry is exactly what bounds a replay's idempotency.
-type ttlDeduper struct {
-	mu      sync.Mutex
-	clock   *fakeClock
-	ttl     time.Duration
-	expires map[string]time.Time
-}
-
-func newTTLDeduper(clock *fakeClock, ttl time.Duration) *ttlDeduper {
-	return &ttlDeduper{clock: clock, ttl: ttl, expires: map[string]time.Time{}}
-}
-
-func (d *ttlDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
+func (d *claimOnceDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	if id == "" {
 		return true, nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	now := d.clock.Now()
-	if exp, ok := d.expires[id]; ok && now.Before(exp) {
+	if d.claim[id] {
 		return false, nil
 	}
-	d.expires[id] = now.Add(d.ttl)
+	d.claim[id] = true
 	return true, nil
 }
 
-func (d *ttlDeduper) Release(_ context.Context, id string) error {
+func (d *claimOnceDeduper) Release(_ context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	delete(d.expires, id)
+	delete(d.claim, id)
 	return nil
 }
 
-func (*ttlDeduper) Close() error { return nil }
+func (*claimOnceDeduper) Close() error { return nil }
 
 // newCountingPipe sums one unit per record into a single entity, so a re-run
 // that double-counts shows up as a doubled total rather than a per-key puzzle.
@@ -242,12 +225,17 @@ func TestReplay_HappyPath(t *testing.T) {
 // after a partial failure, a second pass over a shadow table) must not double
 // the totals. Sum is non-idempotent, so WithDedup is the only thing standing
 // between a re-run and a corrupted backfill.
+//
+// This covers the runtime's half of the contract — that it consults the
+// Deduper for every record and skips the merge on a claimed one. The other
+// half, that the protection lapses once the claims expire, belongs to the
+// real DynamoDB-backed Deduper and is asserted in
+// test/e2e/replay_dedup_ttl_test.go.
 func TestReplay_RerunWithDedupIsIdempotent(t *testing.T) {
 	const records = 100
 
 	store := newFakeStore()
-	clock := newFakeClock()
-	dedup := newTTLDeduper(clock, time.Hour)
+	dedup := newClaimOnceDeduper()
 	rec := metrics.NewInMemory()
 
 	for run := 1; run <= 2; run++ {
@@ -264,45 +252,6 @@ func TestReplay_RerunWithDedupIsIdempotent(t *testing.T) {
 	}
 	if got := rec.SnapshotOne("replay-dedup:dedup_skip").EventsProcessed; got != records {
 		t.Errorf("dedup_skip events on the second replay: got %d, want %d", got, records)
-	}
-}
-
-// TestReplay_RerunAfterClaimExpiryDoubleCounts pins the horizon on that
-// idempotency: the Deduper's claims are TTL'd, and once they expire the same
-// archive merges a second time. 200, not 100, is the intended contract — an
-// operator re-running a backfill a day later with a 1h dedup TTL is not
-// protected, and nothing in the runtime can tell that re-run from new data.
-func TestReplay_RerunAfterClaimExpiryDoubleCounts(t *testing.T) {
-	const (
-		records = 100
-		ttl     = time.Hour
-	)
-
-	store := newFakeStore()
-	clock := newFakeClock()
-	dedup := newTTLDeduper(clock, ttl)
-
-	if err := replay.Run(context.Background(), newCountingPipe(store), archive(records),
-		replay.WithDedup(dedup),
-	); err != nil {
-		t.Fatalf("first replay: %v", err)
-	}
-	if got := store.m[state.Key{Entity: "all"}]; got != records {
-		t.Fatalf("after first replay: got %d, want %d", got, records)
-	}
-
-	// Past the TTL horizon: DDB has evicted every claim, so the identical
-	// archive looks brand new.
-	clock.Advance(ttl + time.Minute)
-
-	if err := replay.Run(context.Background(), newCountingPipe(store), archive(records),
-		replay.WithDedup(dedup),
-	); err != nil {
-		t.Fatalf("second replay: %v", err)
-	}
-	if got := store.m[state.Key{Entity: "all"}]; got != 2*records {
-		t.Errorf("re-run past the dedup TTL: got %d, want %d (claims expire; the merge repeats)",
-			got, 2*records)
 	}
 }
 

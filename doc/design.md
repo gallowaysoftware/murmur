@@ -1040,7 +1040,7 @@ isn't in the box."
 
 The single optional concession to a non-trivial runtime is
 `streaming.WithBatchWindow(window, maxBatch)`
-(`pkg/exec/streaming/runtime.go:78`). It enables a per-(entity, bucket)
+(`pkg/exec/streaming/runtime.go`). It enables a per-(entity, bucket)
 delta accumulator: instead of issuing one MergeUpdate per record, the
 runtime accumulates deltas in memory for `window` time, then flushes a
 single MergeUpdate per key.
@@ -1061,8 +1061,13 @@ The trade is real:
   side for the read-your-writes case.
 - **Crash durability.** Records are Ack'd to the source AFTER the
   batch flushes. A worker crash loses up to `window`-worth of in-flight
-  records, which the source replays on restart. Dedup catches the
-  redelivery.
+  records, which the source replays on restart. Whether that replay
+  restores them turns on `WithDedup`, and not in the direction the
+  word "dedup" suggests: the aggregator claims each EventID when the
+  record ENTERS the accumulator, so the claim survives the crash, the
+  replay is dedup-skipped, and the batch's contribution is gone. Run
+  without a Deduper and the replay is the records' first apply, so
+  nothing is lost. Section 14.1 walks both cases.
 - **Memory.** At most `maxBatch` records per (entity, bucket) before
   a forced flush, but the *number of concurrent keys* is unbounded.
   For high-cardinality pipelines (per-user keys, with long-tail
@@ -1319,17 +1324,41 @@ poison-pill semantics are uniform across all three Lambda variants.
 `FunctionResponseTypes=["ReportBatchItemFailures"]` on the
 event-source mapping), Lambda redelivers only the failed records, not
 the whole batch. The Murmur Lambda handlers populate the
-`BatchItemFailures` slice with the EventIDs of records that exhausted
-their retry budget; Lambda redelivers those on the next invocation.
-This is the single most operationally important detail of the Lambda
-runtime — without it, one bad record retries the entire batch
-indefinitely. With it, one bad record is dead-lettered and the batch
-proceeds.
+`BatchItemFailures` slice with the *checkpoint identifier* of records
+that exhausted their retry budget; Lambda redelivers those on the next
+invocation. This is the single most operationally important detail of
+the Lambda runtime — without it, one bad record retries the entire
+batch indefinitely. With it, one bad record is dead-lettered and the
+batch proceeds.
 
-The `ItemIdentifier` for `BatchItemFailures` differs by source:
-Kinesis uses the record `SequenceNumber`, DDB Streams uses
-`EventID`, SQS uses `MessageId`. The handlers fill the right shape
-for each.
+The `ItemIdentifier` is whatever the event source checkpoints on, which
+is not the same thing as the identity Murmur dedups on:
+
+| Source | `ItemIdentifier` | Go field |
+| --- | --- | --- |
+| Kinesis | record sequence number | `rec.Kinesis.SequenceNumber` |
+| DDB Streams | stream-record sequence number | `rec.Change.SequenceNumber` |
+| SQS | message ID | `msg.MessageId` |
+
+The DDB Streams row is the one that reads wrong at a glance. A change
+record also carries an `eventID`, and it is the record's unique name —
+but it is not a cursor. Lambda resolves an `ItemIdentifier` against the
+shard's sequence numbers, so an `eventID` there names nothing it can
+find, and the mapping degrades to whole-batch redelivery, a stalled
+iterator, or a failure discarded outright. The `eventID` is still what
+feeds the `Deduper` (point 3 below); record identity and checkpoint
+cursor are two different jobs and the handlers fill both.
+
+A record whose checkpoint identifier is empty cannot be reported at
+all: Lambda treats a null or empty `itemIdentifier` in the response as
+malformed and redelivers the WHOLE batch, which for a non-idempotent
+monoid without dedup means re-merging every record that had already
+succeeded. Rather than hand Lambda that, the DDB Streams handler drops
+the entry and surfaces the record through `metrics.RecordError` plus a
+`<name>:unreportable_failure` event — the same "never hand Lambda a
+redelivery loop" policy as the poison-pill path above. Real DDB
+Streams records always carry a sequence number; an empty one means a
+synthetic or hand-constructed event.
 
 **3. Dedup-friendly EventID shapes.** Each variant produces an
 EventID format suitable for `Deduper.MarkSeen`:
@@ -1337,7 +1366,9 @@ EventID format suitable for `Deduper.MarkSeen`:
 - Kinesis: `<stream>/<shard>/<sequenceNumber>` — globally unique
   across the stream's lifetime.
 - DDB Streams: the stream record's `EventID` field — unique per
-  stream record, ordering preserved within a shard.
+  stream record, ordering preserved within a shard. This is the only
+  place `EventID` is used; the `BatchItemFailures` identifier above is
+  the sequence number.
 - SQS: `<arn>/<MessageId>` by default, override-able.
 
 The dedup contract is the same across all three: pass
@@ -2577,7 +2608,8 @@ flowchart TB
       WC["Worker crashes"]
       WC --> NoAck["In-flight records not Ack'd"]
       NoAck --> Replay["Source replays on restart"]
-      Replay --> Dedup2["Dedup catches duplicates"]
+      Replay --> Dedup2["Unbatched: dedup catches<br/>the duplicate re-apply"]
+      Replay --> Lost["WithBatchWindow + WithDedup:<br/>claim taken on accept suppresses<br/>the replay — batch lost (14.1)"]
     end
     subgraph Storage["Storage failures"]
       DDBT["DDB throttle / unavailable"]
@@ -2598,17 +2630,36 @@ A worker crash mid-batch:
 - Records in the source's in-flight buffer: redelivered on restart,
   caught by dedup if configured.
 - Records in the `WithBatchWindow` accumulator: lost from the
-  accumulator, but redelivered by the source (since they weren't
-  Ack'd), and aggregated for the first time on restart. Dedup is not
-  the mechanism here — those records never reached the store, so the
-  redelivery is their apply. This holds only while the dedup claim is
-  taken at flush time: a claim taken when the record enters the
-  accumulator outlives the crash, suppresses the redelivery, and the
-  whole in-flight batch is silently lost.
+  accumulator and redelivered by the source (they were never Ack'd —
+  the aggregator defers each record's Ack until its batch flushes).
+  Whether the redelivery restores them depends on whether a `Deduper`
+  is wired, and today the two cases differ:
+  - **No `WithDedup`:** the records never reached the store, so the
+    redelivery is their first and only apply. Nothing is lost and
+    nothing is double-counted.
+  - **With `WithDedup`:** the claim is taken in `aggregator.accept`,
+    when the record enters the accumulator — not at flush. The claim
+    outlives the crash — with the recommended
+    `pkg/state/dynamodb.Deduper` it is a durable table row — so the
+    redelivery is dedup-skipped and the in-flight batch's contribution
+    is lost for good. `WithBatchWindow` + `WithDedup` therefore has a data-loss
+    window of up to one flush interval (or `maxBatch` records per key,
+    whichever comes first) per crash.
 
-The result: at-least-once with no data loss, modulo the edge case
-where dedup is disabled for a non-idempotent monoid — a crash between
-a flush and the Acks it releases re-applies that batch on restart.
+  This is the opposite trade from the unbatched path, where
+  `processor.MergeOne` releases the claim on a detached context when a
+  merge fails, so the redelivery is re-applied rather than skipped. The
+  aggregator has no equivalent release: `flushOne` dead-letters and
+  Acks a batch whose merge exhausted its retries but leaves the claims
+  standing, so a manual replay of the dead-lettered EventIDs is also
+  suppressed until the dedup TTL expires.
+
+The result for the unbatched path: at-least-once with no data loss,
+modulo the edge case where dedup is disabled for a non-idempotent
+monoid — a crash between a flush and the Acks it releases re-applies
+that batch on restart. Under `WithBatchWindow` the guarantee is
+weaker in exactly the way above, and choosing between a lost window
+and a double-counted one is currently the operator's call.
 
 ### 14.2 DDB throttles or is unavailable
 
@@ -2656,7 +2707,10 @@ recovery for known-popular keys.
 - SQS (Lambda): same as DDB Streams.
 
 In all cases, dedup catches re-deliveries that arrive during the
-reconnect window.
+reconnect window — with the `WithBatchWindow` caveat from 14.1: there
+the claim is taken on accept, so dedup suppresses the re-delivery
+rather than absorbing a duplicate, and whatever the accumulator was
+holding is lost.
 
 ### 14.5 The handoff token is lost or corrupted
 

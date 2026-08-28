@@ -826,9 +826,20 @@ func main() {
                 Body:       strings.NewReader(body),
             }
             if _, err := osClient.Update(ctx, updateReq); err != nil {
-                resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
-                    ItemIdentifier: rec.EventID,
-                })
+                // ItemIdentifier is the SequenceNumber, NOT the eventID.
+                // Lambda resolves this against the shard's sequence
+                // numbers; an eventID names nothing it can find, and the
+                // failure is either dropped or escalated to a whole-batch
+                // redelivery. An empty identifier is worse still — Lambda
+                // rejects the response as malformed and redelivers the
+                // whole batch — so skip the entry rather than emit one.
+                if seq := rec.Change.SequenceNumber; seq != "" {
+                    resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
+                        ItemIdentifier: seq,
+                    })
+                } else {
+                    log.Printf("unreportable failure: %v (eventID=%s has no SequenceNumber)", err, rec.EventID)
+                }
             }
         }
         return resp, nil

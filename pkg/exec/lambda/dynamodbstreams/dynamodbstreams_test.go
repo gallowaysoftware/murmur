@@ -314,6 +314,64 @@ func TestHandler_ReportsExhaustedRetries(t *testing.T) {
 	}
 }
 
+// TestHandler_EmptySequenceNumberIsNotReported covers the record shape that
+// has no checkpoint cursor at all. Lambda rejects a response whose
+// itemIdentifier is null or empty as MALFORMED and redelivers the entire
+// batch — so an empty entry does not cost one record, it costs every record
+// in the batch a second merge (dedup is off by default). The handler must
+// drop the unreportable entry and surface it through the metrics recorder
+// instead of handing Lambda a batch-wide redelivery.
+func TestHandler_EmptySequenceNumberIsNotReported(t *testing.T) {
+	store := newFlakyStore(10) // never succeeds within the retry budget
+	rec := metrics.NewInMemory()
+	h, err := dynamodbstreams.NewHandler(newPipe(store), decodeOrder,
+		dynamodbstreams.WithMaxAttempts(2),
+		dynamodbstreams.WithRetryBackoff(time.Millisecond, 2*time.Millisecond),
+		dynamodbstreams.WithMetrics(rec),
+	)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// A hand-constructed record: an eventID but no SequenceNumber. Real DDB
+	// Streams always fills the sequence number; synthetic events and
+	// non-AWS drivers do not.
+	records := []events.DynamoDBEventRecord{
+		mustChange(t, "ev-no-seq", "", "INSERT", "cust-A", 1),
+		mustChange(t, "ev-ok", seqNum(2), "INSERT", "cust-B", 1),
+	}
+	resp, err := h(context.Background(), events.DynamoDBEvent{Records: records})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	// Only the record that HAS a sequence number is reportable.
+	if got := len(resp.BatchItemFailures); got != 1 {
+		t.Fatalf("BatchItemFailures = %d, want 1; got %+v", got, resp.BatchItemFailures)
+	}
+	if got, want := resp.BatchItemFailures[0].ItemIdentifier, seqNum(2); got != want {
+		t.Errorf("ItemIdentifier: got %q, want %q", got, want)
+	}
+	for _, f := range resp.BatchItemFailures {
+		if f.ItemIdentifier == "" {
+			t.Errorf("empty ItemIdentifier reported; Lambda treats that response as " +
+				"malformed and redelivers the whole batch")
+		}
+		if f.ItemIdentifier == "ev-no-seq" {
+			t.Errorf("ItemIdentifier fell back to the eventID %q; Lambda cannot resolve one", f.ItemIdentifier)
+		}
+	}
+
+	// The dropped failure must not be silent — an operator has to be able to
+	// see that a record failed and could not be handed back to Lambda.
+	if got := rec.SnapshotOne("orders:unreportable_failure").EventsProcessed; got != 1 {
+		t.Errorf("orders:unreportable_failure events: got %d, want 1", got)
+	}
+	if got := rec.SnapshotOne("orders").Errors; got == 0 {
+		t.Error("no error recorded for the dropped BatchItemFailures entry")
+	}
+}
+
 func TestHandler_DedupSkipsSecondInvocation(t *testing.T) {
 	store := newFakeStore()
 	dedup := newMemDeduper()
