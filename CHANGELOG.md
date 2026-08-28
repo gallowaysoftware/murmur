@@ -6,6 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — graceful shutdown silently lost every in-flight record
+
+`streaming.Run` treated a cancelled context as a poison record. The comment at
+the error branch said cancellation would "just return; the runtime is exiting
+anyway", but the code fell straight through it into the dead-letter callback
+**and `rec.Ack()`** — telling the source a record had been handled when it had
+never been merged. `Run` then returned `nil`, so the worker logged a clean exit
+and exited 0.
+
+`murmur.RunStreamingWorker` wires SIGINT/SIGTERM into that context, so this
+fired on **every ECS deploy, scale-in and task replacement** — the ordinary
+steady state of the very pipeline gating v1, needing no misconfiguration and no
+unusual input. Measured in a regression test: a single 40 ms shutdown acked
+**1,005 records it never merged** at concurrency 1, and 249 at concurrency 8.
+(At the soak's deliberate 1 event/sec only a record or two is ever in flight;
+at production rates the loss scales with throughput.)
+
+- Cancellation now returns **without acking**, so the source has not advanced
+  and the record is redelivered. It also no longer invokes the dead-letter
+  callback — a shutdown is not a poison record, and reporting it as one buries
+  real poison records in noise. Emits `<pipeline>:shutdown_unacked`.
+- Detected with `errors.Is`, since `pkg/exec/processor` wraps the cause.
+
+### Fixed — the dedup release could not fire during the shutdown it was written for
+
+`processor.MergeMany` released a dedup claim on merge failure using **the same
+context that had just been cancelled**, so the `DeleteItem` failed immediately
+and the claim survived. The most likely reason a merge fails is that the
+context was cancelled, which made the release useless in precisely the case it
+existed to handle: the claim outlived the failed merge, the redelivery hit
+`dedup_skip`, and the event was lost permanently.
+
+Release now runs on `context.WithoutCancel(ctx)` with a 5s timeout. The two
+fixes are interdependent: not acking is what causes the redelivery, and
+releasing the claim is what lets that redelivery actually apply.
+
+
 ### Changed — Dependabot: catch-all groups, and the sparkconnect submodule is finally covered
 
 Two concrete failures drove this.

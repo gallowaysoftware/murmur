@@ -10,6 +10,7 @@ package streaming
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -575,10 +576,29 @@ func processWithRetry[T any, V any](
 	err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
 		keys, v, store, cache, window)
 	if err != nil {
-		// Either context cancellation (just return; the runtime is exiting
-		// anyway) or retry exhaustion. processor.MergeOne already recorded
-		// the dead_letter metric — we just need to invoke the user's
-		// dead-letter callback and Ack past the poison record.
+		// Shutdown is NOT a poison record. The comment here used to claim
+		// cancellation would "just return", but the code fell through and
+		// both dead-lettered and Acked — telling the source a record had been
+		// handled when it had not been merged at all. Every ECS deploy,
+		// scale-in and task replacement silently lost its in-flight records
+		// that way, and Run still returned nil so the worker logged a clean
+		// exit.
+		//
+		// Return WITHOUT Acking: the source has not advanced, so the record
+		// is redelivered to whoever picks the partition up next. That is the
+		// at-least-once contract doing its job. (processor.MergeMany releases
+		// the dedup claim on a detached context for the same reason, so the
+		// redelivery is re-applied rather than dedup-skipped.)
+		//
+		// errors.Is, not ==: processor wraps the cause.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			cfg.Recorder.RecordEvent(name + ":shutdown_unacked")
+			return
+		}
+
+		// Genuine retry exhaustion — a poison record. processor already
+		// recorded the dead_letter metric; invoke the user's callback and Ack
+		// past it so the pipeline makes progress.
 		if cfg.deadLetter != nil {
 			cfg.deadLetter(rec.EventID, err)
 		}
