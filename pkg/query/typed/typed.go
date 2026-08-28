@@ -368,7 +368,16 @@ func NewTopKClient(inner Inner) *TopKClient {
 
 // TopKItem is one (key, count) pair from a Misra-Gries summary.
 type TopKItem struct {
-	Key   string
+	Key string
+	// Count is a Misra-Gries LOWER BOUND, not a count. It understates the true
+	// count by up to n/(K+1), where n is the total weight the sketch ingested —
+	// and n is not visible from this item list. A sketch that retained 0.1% of
+	// its stream returns a handful of counts in the single digits and looks
+	// exactly like an exact answer over a handful of events.
+	//
+	// The sketch does not record n, so the bound cannot be derived from what
+	// this client returns — carry n out of band (an event counter on the same
+	// pipeline is the usual answer) if the difference matters to you.
 	Count uint64
 }
 

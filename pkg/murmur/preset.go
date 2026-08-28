@@ -280,6 +280,11 @@ func (b *TopNBuilder[T]) Build() *pipeline.Pipeline[T, []byte] {
 // most" / "fast-burning trends"; 6*time.Hour for "today's hot"; 24*time.Hour
 // for "yesterday and today both matter."
 //
+// A zero halfLife — an unset Duration field in a config struct is the usual
+// way to get one — means no decay at all: the pipeline degrades to a plain
+// running sum rather than producing a value the query side reads differently
+// from the merge side. Check the field if a trending feed stops moving.
+//
 // Caveat: this is NOT Reddit's `log(votes) + (time/factor)` formula
 // directly — Reddit's formula isn't a monoid. Trending implements
 // time-weighted summation, which is the building block; if you want

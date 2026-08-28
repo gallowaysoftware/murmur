@@ -2,6 +2,7 @@ package compose
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"time"
 
@@ -33,18 +34,26 @@ func EncodeDecayed(d Decayed) []byte {
 	return b
 }
 
-// DecodeDecayed parses a 17-byte wire form back into a Decayed. Returns
-// Identity (Set=false) on a short or empty input — both are treated as
-// "no observation yet."
-func DecodeDecayed(b []byte) Decayed {
-	if len(b) < decayedWireSize {
-		return Decayed{}
+// DecodeDecayed parses the 17-byte wire form back into a Decayed.
+//
+// An empty input is the absent key and decodes to Identity with no error —
+// that is what a DDB read of a missing item yields. Any other length is a
+// foreign blob and is an error: the format has no magic and no length prefix,
+// so a 200-byte HLL sketch or a Bloom filter used to decode to a Set=true
+// observation assembled from its first 17 bytes, and that fabricated value
+// then merged into the row and stayed there.
+func DecodeDecayed(b []byte) (Decayed, error) {
+	switch {
+	case len(b) == 0:
+		return Decayed{}, nil
+	case len(b) != decayedWireSize:
+		return Decayed{}, fmt.Errorf("decayed decode: got %d bytes, want %d", len(b), decayedWireSize)
 	}
 	return Decayed{
 		Value: math.Float64frombits(binary.LittleEndian.Uint64(b[0:8])),
 		T:     int64(binary.LittleEndian.Uint64(b[8:16])),
 		Set:   b[16] != 0,
-	}
+	}, nil
 }
 
 // DecayedSumBytes wraps DecayedSum to operate on []byte values, suitable
@@ -55,11 +64,17 @@ func DecodeDecayed(b []byte) Decayed {
 // The wire format is the same as EncodeDecayed / DecodeDecayed; queries
 // can decode the bytes returned by GetWindow / GetRange and evaluate the
 // score "as of now" via EvaluateAt(d, halfLife, time.Now()).
-func DecayedSumBytes(halfLife time.Duration) monoid.Monoid[[]byte] {
-	return decayedBytesMonoid{inner: decayedMonoid{halfLife: halfLife.Seconds()}}
+//
+// Pass WithDecodeErrorHandler to be told when an operand is not a Decayed at
+// all; without it the mismatch is recovered from silently, the same deal as
+// the sketch monoids.
+func DecayedSumBytes(halfLife time.Duration, opts ...Option) monoid.Monoid[[]byte] {
+	cfg := newDecayedConfig(halfLife, opts)
+	return decayedBytesMonoid{cfg: cfg, inner: decayedMonoid{cfg: cfg}}
 }
 
 type decayedBytesMonoid struct {
+	cfg   decayedConfig
 	inner decayedMonoid
 }
 
@@ -68,8 +83,17 @@ func (decayedBytesMonoid) Identity() []byte {
 }
 
 func (m decayedBytesMonoid) Combine(a, b []byte) []byte {
-	da := DecodeDecayed(a)
-	db := DecodeDecayed(b)
+	da, errA := DecodeDecayed(a)
+	db, errB := DecodeDecayed(b)
+	if errA != nil {
+		// Keep the operand that decoded; report the one that didn't.
+		m.cfg.reportDecodeError(fmt.Errorf("decayed: decode left operand: %w", errA))
+		return b
+	}
+	if errB != nil {
+		m.cfg.reportDecodeError(fmt.Errorf("decayed: decode right operand: %w", errB))
+		return a
+	}
 	merged := m.inner.Combine(da, db)
 	return EncodeDecayed(merged)
 }
