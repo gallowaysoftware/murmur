@@ -262,6 +262,61 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `examples/recently-interacted-topk/multisource_test.go` drives the example's real `Build()` instead of a hand-rolled copy that had drifted to `K=10` against the deployment's `K=32`, and asserts the built sketch's K against `Config.ResolveK()`.
 - The replay dedup-TTL contract moved from a unit test asserting against its own hand-rolled expiring fake to `test/e2e/replay_dedup_ttl_test.go`, which exercises the real `pkg/state/dynamodb.Deduper` behind the `DDB_LOCAL_ENDPOINT` gate.
 
+- **Query layer: `Get` / `GetMany` on a windowed pipeline could never return data.** Both RPCs address bucket 0, which is simultaneously the all-time sentinel and the epoch bucket, so on a windowed pipeline they reported `present: false` no matter how much the pipeline had counted. Four shipped runbooks pointed operators at them. They now return `FAILED_PRECONDITION` naming `GetWindow` / `GetWindowMany`; `fresh_read` does not bypass the check. A `Granularity` of zero still legitimately writes bucket 0 and stays allowed.
+- **Query layer: degenerate time bounds returned a fabricated `present: true` zero.** `start_unix > end_unix`, bounds left at the proto3 zero, a non-positive `duration_seconds`, a `duration_seconds` large enough to overflow the nanosecond `time.Duration`, `end_unix = 253402300799`, and the zero `time.Time` that `pkg/query/typed` sends as `-62135596800` — the last two wrap `UnixNano` and landed on arbitrary negative buckets. All now return `INVALID_ARGUMENT`, mirroring the check `pkg/admin` already had.
+- **Query layer: retention was advisory on the read path.** A window longer than `Retention` read TTL-evicted buckets, folded the holes in as the monoid identity, and returned the result labelled as a full window. Windowed reads now reject a duration that reaches past what retention keeps.
+- **Query layer: bucket fan-out was unbounded.** With `windowed.Minute(24h)`, `GetRange(entity, Unix(0,0), now)` built 29,797,201 keys (~715MB) of which all but 1,440 addressed buckets TTL had already evicted. `windowed.Config` gains `MaxBuckets`, defaulting to `ceil(Retention/Granularity)`, enforced on every path that fans a read across buckets (`GetWindow`/`GetRange` and their `Many` forms, `LambdaQuery`, `WarmupWindowed`).
+- **Query layer: the singleflight coalesce key was ambiguous.** Entities were sorted and joined with `|`, so `["a|b"]` shared a group with `["a","b"]` and `["a|b","c"]` with `["a","b|c"]` — and the shipped codegen `key_template` puts a literal `|` inside entity keys. Sorting also merged `["a","b"]` with `["b","a"]`, and since responses are positional the second caller received the first caller's values against the wrong entities. The key is now length-prefixed and order-preserving; permutation coalescing is deliberately given up.
+- **Query layer: one client disconnect failed every coalesced peer.** The shared store call ran on the context of whichever caller happened to lead the singleflight group, so a hang-up cancelled the read for everyone with `CodeInternal` — under exactly the concurrent load coalescing exists to serve. The shared work now runs detached under a server-side `Config.CoalesceTimeout` (default 10s) with each waiter selecting on its own context.
+- **DynamoDB stores: a duplicate key in a batched read failed the whole RPC.** `BatchGetItem` rejects a repeated key (`Provided list of item keys contains duplicates`), and whether it reproduced depended on the two copies landing in the same 100-key chunk. `Int64SumStore.GetMany` and `BytesStore.GetMany` now chunk a de-duplicated key set and scatter results back through the `(entity, bucket)` map they already keep; `Int64MaxStore` inherits the fix. `query.WarmupWindowed` / `WarmupNonWindowed` collapse repeated entities before fetching (their reported "warmed" count is now distinct entities × buckets).
+- **`pkg/query/typed`: `SumClient` wrote past its output slice.** It sized the slice from the entity list but indexed it by the server's value count, so a server returning more values than entities caused an index-out-of-range panic inside the calling application. The sketch clients' `if i >= len(out) { break }` guard turned the same bug into silent truncation. Every batched typed client now rejects a value/entity count mismatch — the wire contract is positional, so a mismatch means the values cannot be attributed at all. `examples/search-rerank` was fixed the same way.
+
+### Changed (breaking, pre-1.0)
+
+- `QueryService.Get` / `GetMany` now fail with `FAILED_PRECONDITION` on windowed pipelines instead of reporting `present: false`.
+- Malformed windows and ranges now return `INVALID_ARGUMENT` instead of a monoid-identity value; `duration_seconds` must be positive, and absolute ranges must set at least one bound.
+- `pkg/query`'s `GetWindow` / `GetRange` / `GetWindowMany` / `GetRangeMany` / `LambdaQuery` / `WarmupWindowed` return errors matching the new `query.ErrInvalidQuery` for these shapes.
+- `windowed.Config` gains `MaxBuckets`; `grpc.Config` gains `CoalesceTimeout`. Both default from existing fields, so existing configs keep working.
+- `pkg/query/typed`'s batched clients (`GetMany`, `GetWindowMany` on all four clients) now return an error when the response's value count does not match the requested entity count.
+
+### Fixed
+
+- `pkg/query`: a `GetRange` / `GetRangeMany` over exactly the retention
+  window is accepted again. `windowed.Config.MaxBucketSpan` derived
+  `ceil(Retention/Granularity)`, but bucket ranges are inclusive at both
+  ends, so a range of duration `Retention` touches
+  `Retention/Granularity + 1` buckets and was rejected as
+  `InvalidArgument`.
+- `pkg/query`: absolute ranges are now held to `Retention` as trailing
+  windows already were. Setting `windowed.Config.MaxBuckets` higher than
+  `Retention` let `GetRange`, `GetRangeMany` and `LambdaQuery.GetRange`
+  read past TTL — a year against a 7-day `Retention` fanned out over 366
+  buckets, folded 359 evicted ones in as `Identity`, and returned the
+  week's total labelled as a year. The bound is on a range's width, not
+  its age; `checkRetention` documents why.
+- `pkg/query/grpc`: coalesced store work keeps the leading caller's
+  deadline instead of only a flat `CoalesceTimeout`. Detaching the shared
+  call from the caller's context dropped the deadline with the
+  cancellation, so a burst of abandoned requests each held up to
+  `CoalesceTimeout` of fan-out open with nobody left to read it; before
+  coalescing existed, a client hangup shed that work immediately. The
+  shared context's deadline is now derived from the leader's, capped by
+  `CoalesceTimeout`.
+
+### Changed
+
+- `pkg/monoid/windowed`: **breaking.** `Config.MaxBucketSpan()` counts
+  both ends of an inclusive range, so the default derived from
+  `Retention` is now `ceil(Retention/Granularity) + 1`. An explicit
+  `MaxBuckets` is unchanged and still used verbatim.
+- `pkg/monoid/windowed`: **breaking.** A `Config` with a `Granularity`
+  but neither `MaxBuckets` nor `Retention` now caps reads at the new
+  `DefaultMaxBucketSpan` (100,000 buckets) instead of being unbounded.
+  `Config{Granularity: time.Minute}` previously let
+  `GetRange(epoch, now)` build ~30 million keys (~715MB of `state.Key`)
+  before the first store call. A `Config` with no `Granularity` still
+  reports 0 — it assigns everything to bucket 0 and cannot fan out.
+
 ### Fixed — graceful shutdown silently lost every in-flight record
 
 `streaming.Run` treated a cancelled context as a poison record. The comment at
