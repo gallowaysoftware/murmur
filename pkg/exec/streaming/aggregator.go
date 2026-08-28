@@ -25,8 +25,10 @@ import (
 //     accumulated.
 //  2. Acks are deferred. A record's Ack fires only after its batch has
 //     successfully flushed to the store. If the flush dead-letters, every
-//     record in the batch gets an Ack (so the source advances) AND a
-//     deadLetter callback (so the user can DLQ the EventIDs).
+//     record in the batch gets an Ack (so the source advances), a
+//     deadLetter callback (so the user can DLQ the EventIDs), and its dedup
+//     claim back (so replaying that DLQ re-applies the event instead of
+//     hitting dedup_skip).
 //  3. Hierarchical rollups (KeyByMany) are supported — each emitted key
 //     has its own batch entry. One record contributes to N batches but
 //     dedup is claimed once.
@@ -63,6 +65,12 @@ type batch[V any] struct {
 	eventTime time.Time // latest contributor's timestamp (for windowing TTL)
 	acks      []func() error
 	eventIDs  []string
+	// claimedIDs is the subset of eventIDs whose dedup claim THIS worker won.
+	// It is a subset and not the whole of eventIDs because MarkSeen is fail-open:
+	// a dedup-backend error accepts the record unclaimed. Releasing a claim we did
+	// not win would drop the winner's row and let a third delivery re-apply the
+	// event, so the dead-letter path may only release these.
+	claimedIDs []string
 }
 
 func newAggregator[T any, V any](
@@ -106,15 +114,23 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 		return true
 	}
 
+	// Whether *this* accept won the claim is carried into the batch: the claim is
+	// taken a whole flush window before the durable write, and only a winner may
+	// hand it back if that write never lands.
+	claimed := false
 	if a.cfg.Dedup != nil && rec.EventID != "" {
 		first, err := a.cfg.Dedup.MarkSeen(ctx, rec.EventID)
-		if err != nil {
+		switch {
+		case err != nil:
 			// Dedup backend failure: same fail-open policy as processor.MergeMany.
+			// The record is accepted unclaimed — we do not own a row to hand back.
 			a.cfg.Recorder.RecordError(a.name,
 				fmt.Errorf("dedup MarkSeen %q: %w", rec.EventID, err))
-		} else if !first {
+		case !first:
 			a.cfg.Recorder.RecordEvent(a.name + ":dedup_skip")
 			return true
+		default:
+			claimed = true
 		}
 	}
 
@@ -170,6 +186,9 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 				b.acks = append(b.acks, rec.Ack)
 			}
 			b.eventIDs = append(b.eventIDs, rec.EventID)
+			if claimed {
+				b.claimedIDs = append(b.claimedIDs, rec.EventID)
+			}
 		}
 		if len(b.acks) >= a.maxBatchSize {
 			fullBatches = append(fullBatches, sk)
@@ -257,6 +276,13 @@ func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
 	a.cfg.Recorder.RecordEvent(a.name + ":flush")
 
 	if err != nil {
+		// The delta never landed, so the claims taken at accept time have to go
+		// back. Without that, replaying these EventIDs out of the DLQ hits
+		// dedup_skip and the events are lost for good — silent count loss for
+		// Sum / HLL / TopK, which is the failure the dead-letter callback exists
+		// to let the operator recover from.
+		processor.ReleaseClaims(ctx, &a.cfg.Config, a.name, b.claimedIDs)
+
 		// Retry exhausted: dead-letter every record in the batch.
 		for _, id := range b.eventIDs {
 			if a.cfg.deadLetter != nil {

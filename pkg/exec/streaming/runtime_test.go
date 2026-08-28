@@ -173,8 +173,9 @@ func TestRetry_DeadLettersOnPermaFail(t *testing.T) {
 
 // memDeduper is an in-memory implementation of state.Deduper for unit tests.
 type memDeduper struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
+	mu       sync.Mutex
+	seen     map[string]struct{}
+	releases int
 }
 
 func newMemDeduper() *memDeduper { return &memDeduper{seen: map[string]struct{}{}} }
@@ -190,11 +191,27 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 func (d *memDeduper) Release(_ context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.releases++
 	delete(d.seen, id)
 	return nil
 }
 
 func (*memDeduper) Close() error { return nil }
+
+// releaseCount reports how many claims were handed back. Flushes can run on the
+// aggregator's flush-loop goroutine, so this has to take the lock.
+func (d *memDeduper) releaseCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.releases
+}
+
+// claimedCount reports how many claims are currently outstanding.
+func (d *memDeduper) claimedCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.seen)
+}
 
 // duplicatingSource emits each record twice — simulating a worker crash that
 // causes the source to redeliver. With dedup configured the runtime should

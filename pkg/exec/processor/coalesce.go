@@ -28,6 +28,11 @@ package processor
 // Dedup. The Coalescer applies the configured state.Deduper at AddMany time, the same
 // as processor.MergeMany: a duplicate event is dropped before any delta is folded into
 // the pending map. This preserves at-least-once semantics across Lambda redeliveries.
+// Because the claim is taken a whole batch before the durable write, Flush hands back
+// the claims of every event whose delta failed to reach the store — otherwise the
+// redelivery the failure is asking for arrives to a dedup_skip and the event is gone.
+// Only claims the Coalescer actually won are released; MarkSeen is fail-open, so an
+// event can be buffered on somebody else's claim.
 //
 // Auto-flush triggers. AddMany flushes synchronously when either MaxKeys distinct
 // (entity, bucket) pairs are accumulated or FlushTick has elapsed since the last flush
@@ -142,9 +147,15 @@ type Coalescer[V any] struct {
 // entry computed the same BucketID. TTL is re-derived from window.Retention by
 // mergeOneAttempt rather than tracked here.
 type pendingEntry[V any] struct {
-	delta     V
-	eventIDs  []string // contributing event IDs, in arrival order
-	firstSeen time.Time
+	delta    V
+	eventIDs []string // contributing event IDs, in arrival order
+	// claimedIDs is the subset of eventIDs whose dedup claim THIS coalescer won.
+	// It is a subset and not the whole of eventIDs because MarkSeen is fail-open:
+	// a dedup-backend error buffers the event unclaimed. Releasing a claim we did
+	// not win would drop the winner's row and let a third delivery re-apply the
+	// event, so the flush failure path may only release these.
+	claimedIDs []string
+	firstSeen  time.Time
 }
 
 // NewCoalescer constructs a Coalescer bound to a Pipeline's storage + monoid. The cfg
@@ -218,15 +229,24 @@ func (c *Coalescer[V]) AddMany(
 
 	// Dedup is checked once per event before any key is buffered. This matches
 	// MergeMany's contract: a duplicate event short-circuits the entire fanout.
+	//
+	// Whether *this* call won the claim is carried through to flush time: only a
+	// winner may release, and the claim has to come back if the buffered delta
+	// never reaches the store.
+	claimed := false
 	if c.cfg.Dedup != nil && eventID != "" {
 		first, err := c.cfg.Dedup.MarkSeen(ctx, eventID)
-		if err != nil {
+		switch {
+		case err != nil:
 			c.cfg.Recorder.RecordError(c.pipelineName,
 				fmt.Errorf("dedup MarkSeen %q: %w", eventID, err))
-			// Fail-open: same policy as MergeMany. Fall through to buffer.
-		} else if !first {
+			// Fail-open: same policy as MergeMany. Buffer the event, but
+			// unclaimed — we do not own a row we can hand back.
+		case !first:
 			c.cfg.Recorder.RecordEvent(c.pipelineName + ":dedup_skip")
 			return nil
+		default:
+			claimed = true
 		}
 	}
 
@@ -248,6 +268,9 @@ func (c *Coalescer[V]) AddMany(
 		entry.delta = c.mon.Combine(entry.delta, delta)
 		if eventID != "" {
 			entry.eventIDs = append(entry.eventIDs, eventID)
+			if claimed {
+				entry.claimedIDs = append(entry.claimedIDs, eventID)
+			}
 		}
 	}
 
@@ -314,19 +337,34 @@ func (c *Coalescer[V]) Flush(ctx context.Context) error {
 		return nil
 	}
 
-	var failures []KeyFailure
+	var (
+		failures []KeyFailure
+		// cancelErr short-circuits the remaining merges without short-circuiting
+		// the claim bookkeeping below — the entries we never got to are exactly
+		// as unwritten as the one that failed.
+		cancelErr error
+		// unreleased collects the claims of every event whose delta did NOT reach
+		// the store. Gathered across the whole loop rather than released inline so
+		// an event fanned out over several failing keys is released once.
+		unreleased []string
+	)
 	for k, entry := range c.pending {
+		if cancelErr != nil {
+			unreleased = append(unreleased, entry.claimedIDs...)
+			continue
+		}
 		// Re-use the existing per-key retry path for full parity with MergeMany.
-		// fakeEventID is "" because dedup already ran at AddMany time.
+		// The eventID is "" because dedup already ran at AddMany time — which is
+		// also why MergeMany's own release path can't cover us here.
 		err := mergeKeyWithRetry(ctx, c.cfg, c.pipelineName, "",
 			entry.firstSeen, k.Entity, entry.delta, c.store, c.cache, c.window)
 		if err != nil {
+			unreleased = append(unreleased, entry.claimedIDs...)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Reset state and propagate. Pending entries are dropped; the
-				// at-least-once redelivery will re-emit them.
-				c.pending = make(map[state.Key]*pendingEntry[V], c.coalesceCfg.MaxKeys)
-				c.lastFlush = c.now()
-				return err
+				// Pending entries are dropped; the at-least-once redelivery will
+				// re-emit them — but only if their claims go back first.
+				cancelErr = err
+				continue
 			}
 			failures = append(failures, KeyFailure{
 				Key:             k,
@@ -336,11 +374,19 @@ func (c *Coalescer[V]) Flush(ctx context.Context) error {
 		}
 	}
 
+	// The claims must not outlive the deltas they were taken for. A leaked claim
+	// turns the redelivery this failure is asking for into a dedup_skip, and the
+	// events are lost for good.
+	ReleaseClaims(ctx, c.cfg, c.pipelineName, unreleased)
+
 	// Reset state before returning — even on partial failure the caller must not
 	// re-flush the same deltas (that would double-count successful keys).
 	c.pending = make(map[state.Key]*pendingEntry[V], c.coalesceCfg.MaxKeys)
 	c.lastFlush = c.now()
 
+	if cancelErr != nil {
+		return cancelErr
+	}
 	if len(failures) > 0 {
 		return &FlushError{FailedKeys: failures}
 	}

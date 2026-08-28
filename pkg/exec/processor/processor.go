@@ -113,6 +113,57 @@ func MergeOne[T any, V any](
 // release that never happens costs an event permanently.
 const releaseTimeout = 5 * time.Second
 
+// ReleaseClaims hands dedup claims back for events whose delta never reached the
+// store, so the source's redelivery (or a DLQ replay) re-applies them instead of
+// hitting dedup_skip and losing the event permanently — silent count loss for
+// Sum / HLL / TopK, with no error surface and no metric.
+//
+// Pass ONLY EventIDs this caller actually won via Deduper.MarkSeen. MarkSeen is
+// fail-open — an error means "proceed unclaimed" — so an in-flight event may be
+// riding somebody else's claim, and releasing that claim would drop the winner's
+// row and let a third delivery re-apply the event. Batching callers therefore
+// have to track ownership per EventID, not per batch.
+//
+// Repeated IDs are released once. Calling with no Dedup configured, or with an
+// empty slice, is a no-op, so batching drivers can call it unconditionally on
+// their failure path.
+func ReleaseClaims(ctx context.Context, cfg *Config, pipelineName string, eventIDs []string) {
+	if cfg.Dedup == nil || len(eventIDs) == 0 {
+		return
+	}
+
+	// Release on a context DETACHED from ctx. The single most likely reason a
+	// merge fails is that ctx was just cancelled by SIGTERM — and releasing with
+	// the cancelled ctx fails immediately, so the claim survives exactly the
+	// shutdown it most needs to not survive.
+	//
+	// One budget spans the whole slice rather than one per ID: a failed flush of
+	// a 10k-key batch would otherwise stall shutdown for minutes. Whatever the
+	// budget doesn't cover surfaces as dedup_release_failed rather than going out
+	// silently.
+	relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+
+	seen := make(map[string]struct{}, len(eventIDs))
+	for _, id := range eventIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		if err := cfg.Dedup.Release(relCtx, id); err != nil {
+			cfg.Recorder.RecordError(pipelineName,
+				fmt.Errorf("dedup Release %q after failed merge: %w", id, err))
+			cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
+			continue
+		}
+		cfg.Recorder.RecordEvent(pipelineName + ":dedup_release")
+	}
+}
+
 // MergeMany is the multi-key entry point. It claims the EventID via Dedup
 // (once, regardless of how many keys), then for each key runs the store
 // and cache MergeUpdate with the supplied delta. Used by hierarchical-
@@ -184,22 +235,7 @@ func MergeMany[V any](
 			// permits loss, and dedup is a best-effort mitigation layered on
 			// top, not a stronger guarantee.
 			if claimed {
-				// Release on a context DETACHED from ctx. The single most
-				// likely reason a merge fails is that ctx was just cancelled
-				// by SIGTERM — and releasing with the cancelled ctx fails
-				// immediately, so the claim survives exactly the shutdown it
-				// most needs to survive. The redelivery then hits dedup_skip
-				// and the event is lost permanently.
-				relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
-				rerr := cfg.Dedup.Release(relCtx, eventID)
-				cancel()
-				if rerr != nil {
-					cfg.Recorder.RecordError(pipelineName,
-						fmt.Errorf("dedup Release %q after failed merge: %w", eventID, rerr))
-					cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
-				} else {
-					cfg.Recorder.RecordEvent(pipelineName + ":dedup_release")
-				}
+				ReleaseClaims(ctx, cfg, pipelineName, []string{eventID})
 			}
 			return err
 		}
