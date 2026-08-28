@@ -1968,10 +1968,16 @@ to catch permutations made `["a","b"]` and `["b","a"]` one group, so the
 second caller received the first caller's values attributed to the wrong
 entities. Permutation coalescing is deliberately given up.
 
-The shared call runs on a context detached from whichever caller led the
-group, under a server-side `CoalesceTimeout`, and each waiter selects on
+The shared call runs on a context derived from whichever caller led the
+group, with that caller's **cancellation dropped** but its **deadline
+kept**, capped by a server-side `CoalesceTimeout`; each waiter selects on
 its own context. A client hanging up therefore leaves without taking its
-coalesced peers down with it, and a wedged store still frees the group.
+coalesced peers down with it. Keeping the deadline matters as much as
+dropping the cancellation: with both gone, a burst of abandoned requests
+would each hold a full `CoalesceTimeout` of fan-out open with nobody left
+to read it, where before coalescing a hangup shed that work at once. The
+`CoalesceTimeout` ceiling then covers the remaining case — a leader with
+no deadline at all, against a wedged store.
 
 Concurrent requests for the same key resolve through one underlying
 fold. A thousand simultaneous feed renders asking for the same hot

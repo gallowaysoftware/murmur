@@ -79,6 +79,19 @@ func rangeBuckets(w windowed.Config, start, end time.Time) (lo, hi int64, err er
 		return 0, 0, invalidQuery("end %s precedes start %s",
 			end.UTC().Format(time.RFC3339), start.UTC().Format(time.RFC3339))
 	}
+	// An absolute range answers to Retention just as a trailing window does. Only
+	// checkSpan ran here before, and its limit is MaxBuckets whenever MaxBuckets is
+	// set — so a Config with MaxBuckets raised above Retention read straight past TTL:
+	// GetRange over a year against a 7-day Retention fanned out over 366 buckets, found
+	// 359 of them evicted, folded the holes in as Identity, and returned one week's
+	// total labelled as a year. MaxBuckets is a cap, never a licence to outrun TTL.
+	//
+	// time.Time.Sub saturates instead of wrapping, so a range between the two extreme
+	// representable instants arrives here as the maximum Duration and is rejected
+	// rather than overflowing into a plausible-looking short one.
+	if err := checkRetention(w, end.Sub(start)); err != nil {
+		return 0, 0, err
+	}
 	lo, hi = w.BucketRange(start, end)
 	if err := checkSpan(w, lo, hi); err != nil {
 		return 0, 0, err
@@ -95,12 +108,21 @@ func checkRepresentable(name string, t time.Time) error {
 	return nil
 }
 
-// checkRetention rejects a window longer than the buckets still exist for. Retention
-// was advisory on the read path: asking for 90 days against a 7-day Retention read 83
+// checkRetention rejects a read wider than the buckets still exist for. Retention was
+// advisory on the read path: asking for 90 days against a 7-day Retention read 83
 // TTL-evicted buckets, folded them in as Identity, and returned the result labelled as
 // a full 90-day window. A short window that happens to be missing buckets is normal
-// and stays silent — this only catches the case where the bucket range itself reaches
+// and stays silent — this only catches the case where the requested span itself reaches
 // past what TTL keeps.
+//
+// It bounds the WIDTH of a read, not its age. For a trailing window those are the same
+// thing, because the window is anchored at now. For an absolute range they are not:
+// GetRange(now-90d, now-83d) against a 7-day Retention is seven days wide and passes
+// here even though every bucket in it is long evicted. Age is deliberately left
+// unchecked. rangeBuckets has no `now` to measure against, and threading one in would
+// break LambdaQuery.GetRange, whose View store holds history written by a bootstrap or
+// replay job and outlives the streaming table's TTL by design — reading a year-old
+// range out of a batch view is the feature, not the bug.
 func checkRetention(w windowed.Config, d time.Duration) error {
 	limit := w.RetentionBuckets()
 	if limit <= 0 {
@@ -120,16 +142,25 @@ func checkRetention(w windowed.Config, d time.Duration) error {
 // checkSpan enforces windowed.Config.MaxBucketSpan on an already-computed bucket
 // range. This is the last line before the key slice is materialized, so it runs on
 // every path that fans a read out over buckets.
+//
+// [lo, hi] is inclusive at both ends, so it touches hi-lo+1 buckets. That count is
+// what MaxBucketSpan caps, and the comparison is written as span >= limit rather than
+// span+1 > limit so that a span of MaxInt64 cannot overflow the addition.
 func checkSpan(w windowed.Config, lo, hi int64) error {
 	limit := w.MaxBucketSpan()
 	if limit <= 0 {
 		return nil
 	}
 	span := hi - lo
-	// A negative span here means hi-lo overflowed int64, which a nanosecond-scale
-	// Granularity makes reachable from two representable instants.
-	if span < 0 || span >= limit {
-		return invalidQuery("range spans more than %d buckets (max_buckets); narrow the range or raise MaxBuckets", limit)
+	// A negative span means hi-lo overflowed int64, which a nanosecond-scale
+	// Granularity makes reachable from two representable instants; MaxInt64 is the
+	// one non-negative span whose bucket count would overflow in turn.
+	if span < 0 || span == math.MaxInt64 {
+		return invalidQuery("range spans more buckets than int64 can count; narrow the range or coarsen Granularity")
+	}
+	if span >= limit {
+		return invalidQuery("range touches %d buckets of %s, more than the %d-bucket cap; narrow the range or raise MaxBuckets",
+			span+1, w.Granularity, limit)
 	}
 	return nil
 }

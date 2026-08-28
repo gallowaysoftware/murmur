@@ -114,18 +114,19 @@ type Config[V any] struct {
 	// process serves multiple pipelines.
 	Pipeline string
 
-	// CoalesceTimeout bounds the store call a singleflight group runs on behalf
-	// of its waiters. That call is deliberately detached from the context of
-	// whichever caller happened to lead the group — otherwise one client hanging
-	// up cancels the read out from under every peer coalesced onto it — so it
-	// needs a deadline of its own or a wedged store pins the group forever.
-	// Defaults to defaultCoalesceTimeout.
+	// CoalesceTimeout is the CEILING on the store call a singleflight group runs on
+	// behalf of its waiters. That call keeps the leading caller's deadline but not
+	// its cancellation — otherwise one client hanging up cancels the read out from
+	// under every peer coalesced onto it — and CoalesceTimeout bounds the case where
+	// the leader had no deadline at all, so a wedged store cannot pin the group
+	// forever. Defaults to defaultCoalesceTimeout.
 	CoalesceTimeout time.Duration
 }
 
-// defaultCoalesceTimeout bounds detached singleflight work when Config leaves
-// CoalesceTimeout unset. Long enough for a multi-chunk BatchGetItem with retries,
-// short enough that a wedged store frees the group inside one health-check interval.
+// defaultCoalesceTimeout bounds detached singleflight work whose leading caller set no
+// deadline of its own, when Config leaves CoalesceTimeout unset. Long enough for a
+// multi-chunk BatchGetItem with retries, short enough that a wedged store frees the
+// group inside one health-check interval.
 const defaultCoalesceTimeout = 10 * time.Second
 
 // NewServer constructs a query Server.
@@ -168,13 +169,12 @@ type coalescedResult[V any] struct {
 // coalesce runs fn at most once per concurrent group keyed by `key`; every other
 // caller in the group awaits the same result.
 //
-// Two things the plain singleflight.Do version got wrong. The shared work ran on
-// the context of whichever caller happened to arrive first, so a single client
-// hanging up cancelled the store read out from under every peer and failed all of
-// them with CodeInternal — a failure that only appears under exactly the concurrent
-// load coalescing exists to serve. And detaching that context outright would drop
-// the client deadline with it, letting a wedged store call hold the group open
-// indefinitely, so the detached work carries a server-side bound instead.
+// The plain singleflight.Do version ran the shared work on the context of whichever
+// caller happened to arrive first, so a single client hanging up cancelled the store
+// read out from under every peer and failed all of them with CodeInternal — a failure
+// that only appears under exactly the concurrent load coalescing exists to serve. The
+// shared work now runs on a context detached from the leader's cancellation but still
+// carrying its deadline; see detachedWork.
 //
 // Each waiter selects on its OWN context, so a caller that goes away leaves without
 // disturbing the group.
@@ -187,7 +187,7 @@ func coalesce[R any](
 ) (R, error) {
 	var zero R
 	ch := sf.DoChan(key, func() (any, error) {
-		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		workCtx, cancel := detachedWork(ctx, timeout)
 		defer cancel()
 		v, err := fn(workCtx)
 		if err != nil {
@@ -208,6 +208,31 @@ func coalesce[R any](
 		}
 		return v, nil
 	}
+}
+
+// detachedWork derives the context a coalesced store call runs on from the context of
+// the caller that led the group.
+//
+// It drops that caller's CANCELLATION and keeps its DEADLINE, capped by timeout.
+// Dropping both — context.WithoutCancel plus a flat CoalesceTimeout — traded one load
+// problem for another: before coalescing existed, a client hanging up shed the store
+// work with it, and a burst of abandoned requests would instead have kept a full
+// CoalesceTimeout of fan-out alive per group with nobody left to read it. The cap is
+// still needed on its own, because a leader with no deadline at all would otherwise
+// pin its group on a wedged store forever.
+//
+// A waiter whose own deadline is longer than the leader's is bounded by the leader's:
+// the group runs one call, and it can only carry one deadline. That is the standing
+// bargain of coalescing — the alternative is not sharing the call at all. In the corner
+// where a leader arrives with a deadline that has already passed, its group gets a
+// context that is already expired and its waiters see DeadlineExceeded rather than a
+// result; they are free to retry, and the next request leads a fresh group.
+func detachedWork(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	bound := time.Now().Add(timeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(bound) {
+		bound = dl
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), bound)
 }
 
 // fail maps err onto a Connect status and records it against the pipeline —

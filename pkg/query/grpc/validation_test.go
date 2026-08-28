@@ -200,13 +200,18 @@ func TestQueryServer_GetWindowRejectsInvalidDuration(t *testing.T) {
 // singleflight group open and observe what the other callers in it experience. It
 // honors the context it is handed — that is the whole point: a leader-scoped
 // context used to cancel this call for everyone.
+//
+// It also records the deadline each call's context carried, which is how the
+// deadline-propagation test reads the answer off the context instead of waiting for
+// a timer to fire.
 type blockingStore struct {
 	values  fakeStore
 	release chan struct{}
 	arrived chan []state.Key
 
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	calls     int
+	deadlines []time.Time
 }
 
 func newBlockingStore(values fakeStore) *blockingStore {
@@ -215,6 +220,17 @@ func newBlockingStore(values fakeStore) *blockingStore {
 		release: make(chan struct{}),
 		arrived: make(chan []state.Key, 8),
 	}
+}
+
+// deadlineAt returns the deadline the i'th store call's context carried, zero if it
+// had none.
+func (s *blockingStore) deadlineAt(i int) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i >= len(s.deadlines) {
+		return time.Time{}
+	}
+	return s.deadlines[i]
 }
 
 func (s *blockingStore) Get(ctx context.Context, k state.Key) (int64, bool, error) {
@@ -226,14 +242,24 @@ func (s *blockingStore) Get(ctx context.Context, k state.Key) (int64, bool, erro
 }
 
 func (s *blockingStore) GetMany(ctx context.Context, ks []state.Key) ([]int64, []bool, error) {
+	deadline, _ := ctx.Deadline()
 	s.mu.Lock()
 	s.calls++
+	s.deadlines = append(s.deadlines, deadline)
 	s.mu.Unlock()
 	s.arrived <- ks
 	select {
 	case <-s.release:
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+	}
+	// Cancellation is re-checked here rather than decided by the select above. With
+	// both channels ready select picks at random, and that coin flip is precisely what
+	// let the cancellation test below pass 4 runs in 20 against the unfixed server:
+	// half the time the release won the race and the store returned a value even
+	// though its context was already dead. Whether the coalesced call still holds a
+	// live context when its turn finally comes is the whole question, so answer it.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 	return s.values.GetMany(ctx, ks)
 }
@@ -345,63 +371,176 @@ func TestQueryServer_CoalesceKeepsEntityListsDistinct(t *testing.T) {
 	}
 }
 
+// joinContext reports the moment its holder becomes a singleflight waiter.
+//
+// coalesce evaluates ctx.Done() only in the select it runs AFTER sf.DoChan returns,
+// and DoChan has already appended the caller to the in-flight call's channel list by
+// the time it returns. A signal here is therefore proof that the peer is parked on
+// the leader's group — where a sleep was only ever a guess that it had got there.
+type joinContext struct {
+	context.Context
+	once   sync.Once
+	joined chan struct{}
+}
+
+func newJoinContext(parent context.Context) *joinContext {
+	return &joinContext{Context: parent, joined: make(chan struct{})}
+}
+
+func (c *joinContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.joined) })
+	return c.Context.Done()
+}
+
 // TestQueryServer_CoalescedPeerSurvivesCallerCancellation covers the other half of
 // the singleflight bug: the shared store call ran on the leader's context, so one
 // client hanging up failed everybody coalesced behind it with CodeInternal.
+//
+// Every step is gated on an explicit channel rather than a sleep, because the sleeping
+// version of this test only failed 16 runs in 20 against the unfixed server and a
+// regression test that passes a fifth of the time is not one. Two gates carry it: the
+// leader is provably inside the store call before the cancel, and the peer is provably
+// a waiter on the leader's group before it. The server is driven in-process rather than
+// over HTTP so the cancellation reaches the store through nothing but context plumbing
+// — the HTTP path stays covered by the coalesce-key test above.
 func TestQueryServer_CoalescedPeerSurvivesCallerCancellation(t *testing.T) {
 	w := windowed.Daily(30 * 24 * time.Hour)
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 	store := newBlockingStore(fakeStore{
 		state.Key{Entity: "page-A", Bucket: w.BucketID(now)}: 42,
 	})
-	client, cleanup := startServer(t, mgrpc.Config[int64]{
+	srv := mgrpc.NewServer(mgrpc.Config[int64]{
 		Store: store, Monoid: core.Sum[int64](), Window: &w, Encode: mgrpc.Int64LE(),
 		Now: func() time.Time { return now },
 	})
-	defer cleanup()
+	req := func() *connect.Request[pb.GetWindowRequest] {
+		return connect.NewRequest(&pb.GetWindowRequest{Entity: "page-A", DurationSeconds: 86400})
+	}
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
-	leaderDone := make(chan struct{})
+	defer cancelLeader()
+	leaderErr := make(chan error, 1)
 	go func() {
-		defer close(leaderDone)
-		_, _ = client.GetWindow(leaderCtx, connect.NewRequest(&pb.GetWindowRequest{
-			Entity: "page-A", DurationSeconds: 86400,
-		}))
+		_, err := srv.GetWindow(leaderCtx, req())
+		leaderErr <- err
 	}()
-	// The leader is now parked inside the store with its group open.
+	// Gate 1: the leader is inside the store call, so its group is open.
 	<-store.arrived
 
-	peerDone := make(chan error, 1)
-	peerValue := make(chan int64, 1)
+	peerCtx := newJoinContext(context.Background())
+	type peerResult struct {
+		value int64
+		err   error
+	}
+	peerDone := make(chan peerResult, 1)
 	go func() {
-		resp, err := client.GetWindow(context.Background(), connect.NewRequest(&pb.GetWindowRequest{
-			Entity: "page-A", DurationSeconds: 86400,
-		}))
+		resp, err := srv.GetWindow(peerCtx, req())
 		if err != nil {
-			peerDone <- err
+			peerDone <- peerResult{err: err}
 			return
 		}
-		peerValue <- decodeInt64(resp.Msg.GetValue().GetData())
-		peerDone <- nil
+		peerDone <- peerResult{value: decodeInt64(resp.Msg.GetValue().GetData())}
 	}()
-	// Give the peer time to join the leader's group (or, if it forms its own,
-	// to reach the store) before the leader hangs up.
-	select {
-	case <-store.arrived:
-	case <-time.After(500 * time.Millisecond):
-	}
+	// Gate 2: the peer is a waiter on that group, not merely dispatched towards it.
+	<-peerCtx.joined
 
 	cancelLeader()
-	<-leaderDone
+	if err := <-leaderErr; connect.CodeOf(err) != connect.CodeCanceled {
+		t.Fatalf("leader GetWindow after hanging up: got %v (code %v), want Canceled",
+			err, connect.CodeOf(err))
+	}
+	// The leader is gone and its context is dead. The store call is still parked;
+	// whether it kept a live context of its own is what the peer now reports.
 	close(store.release)
 
-	if err := <-peerDone; err != nil {
-		t.Fatalf("peer GetWindow failed after the leading caller cancelled: %v (code %v)", err, connect.CodeOf(err))
+	got := <-peerDone
+	if got.err != nil {
+		t.Fatalf("peer GetWindow failed after the leading caller cancelled: %v (code %v)",
+			got.err, connect.CodeOf(got.err))
 	}
-	if got := <-peerValue; got != 42 {
-		t.Errorf("peer GetWindow: got %d, want 42", got)
+	if got.value != 42 {
+		t.Errorf("peer GetWindow: got %d, want 42", got.value)
 	}
-	if store.callCount() == 0 {
-		t.Error("store was never called")
+	if n := store.callCount(); n != 1 {
+		t.Fatalf("store called %d times, want 1: the peer never coalesced onto the leader's group, so this run proved nothing", n)
 	}
+}
+
+// TestQueryServer_CoalescedWorkKeepsCallerDeadline pins that detaching the shared store
+// call from the leader's CANCELLATION did not also detach it from the leader's DEADLINE.
+//
+// context.WithoutCancel plus a flat CoalesceTimeout dropped both. Before coalescing
+// existed, a client hanging up shed its store work immediately; with the deadline gone
+// a burst of abandoned requests would instead keep a full CoalesceTimeout of fan-out
+// alive per group with nobody left to read the answer.
+//
+// Both cases read the deadline straight off the context the store was handed, so
+// neither waits for a timer.
+func TestQueryServer_CoalescedWorkKeepsCallerDeadline(t *testing.T) {
+	w := windowed.Daily(30 * 24 * time.Hour)
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	// An hour of CoalesceTimeout, far longer than any deadline below, so what the
+	// assertions measure is which of the two bounds the store call inherited.
+	const coalesceTimeout = time.Hour
+
+	newFixture := func(t *testing.T) (*mgrpc.Server[int64], *blockingStore) {
+		t.Helper()
+		store := newBlockingStore(fakeStore{
+			state.Key{Entity: "page-A", Bucket: w.BucketID(now)}: 42,
+		})
+		return mgrpc.NewServer(mgrpc.Config[int64]{
+			Store: store, Monoid: core.Sum[int64](), Window: &w, Encode: mgrpc.Int64LE(),
+			Now: func() time.Time { return now }, CoalesceTimeout: coalesceTimeout,
+		}), store
+	}
+	req := connect.NewRequest(&pb.GetWindowRequest{Entity: "page-A", DurationSeconds: 86400})
+
+	t.Run("caller deadline is inherited", func(t *testing.T) {
+		srv, store := newFixture(t)
+		// Generous enough that it cannot expire mid-test; it is never waited out.
+		callerDeadline := time.Now().Add(30 * time.Second)
+		ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = srv.GetWindow(ctx, req)
+		}()
+		<-store.arrived
+		close(store.release)
+		<-done
+
+		got := store.deadlineAt(0)
+		if got.IsZero() {
+			t.Fatal("the coalesced store call ran with no deadline at all")
+		}
+		if got.After(callerDeadline) {
+			t.Errorf("coalesced store call carries a deadline %s past the caller's own; the caller's deadline was dropped for the flat %s CoalesceTimeout",
+				got.Sub(callerDeadline), coalesceTimeout)
+		}
+	})
+
+	t.Run("CoalesceTimeout bounds a caller with no deadline", func(t *testing.T) {
+		srv, store := newFixture(t)
+		before := time.Now()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = srv.GetWindow(context.Background(), req)
+		}()
+		<-store.arrived
+		close(store.release)
+		<-done
+
+		got := store.deadlineAt(0)
+		if got.IsZero() {
+			t.Fatal("a caller with no deadline left the coalesced store call unbounded; a wedged store would pin the group forever")
+		}
+		if got.Before(before) || got.After(before.Add(coalesceTimeout+time.Minute)) {
+			t.Errorf("coalesced store call deadline is %s from the call, want about the %s CoalesceTimeout",
+				got.Sub(before), coalesceTimeout)
+		}
+	})
 }

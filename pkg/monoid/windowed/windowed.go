@@ -25,8 +25,9 @@ type Config struct {
 	// can ask for any range up to Retention.
 	Retention time.Duration
 
-	// MaxBuckets caps how many buckets a single read may span. Leave it zero to take
-	// the default from Retention (see MaxBucketSpan).
+	// MaxBuckets caps how many buckets a single read may touch, counting both ends of
+	// an inclusive range. Leave it zero to take the default from Retention (see
+	// MaxBucketSpan).
 	//
 	// Without a cap, a caller who passes an open-ended range gets no error — just an
 	// enormous key list. GetRange(entity, Unix(0,0), now) against Minute granularity
@@ -36,22 +37,46 @@ type Config struct {
 	MaxBuckets int
 }
 
-// MaxBucketSpan reports the largest number of buckets one read may span. It is
-// MaxBuckets when set, otherwise ceil(Retention / Granularity) — reading further back
-// than Retention can only return TTL-evicted buckets. Zero means unbounded, which
-// happens only when neither MaxBuckets nor Retention is configured.
+// DefaultMaxBucketSpan caps the fan-out of a Config that sets a Granularity but
+// neither MaxBuckets nor Retention. That shape used to get no cap at all, so a
+// hand-built Config{Granularity: time.Minute} still let GetRange(epoch, now) build
+// ~30 million keys before the first store call.
+//
+// It is a backstop against unbounded, not a tuning knob. 100,000 buckets sits far
+// above any deliberate query — seven days at Minute granularity is 10,080 buckets, a
+// year at Hourly is 8,760 — while holding the key slice to a couple of megabytes
+// instead of hundreds. A pipeline that genuinely wants to read more sets MaxBuckets
+// and says so.
+const DefaultMaxBucketSpan = 100_000
+
+// MaxBucketSpan reports the largest number of buckets one read may touch, counting
+// both ends of an inclusive range.
+//
+// MaxBuckets wins when set: it is a bucket count the operator wrote down literally.
+// Otherwise the cap is derived from Retention as ceil(Retention/Granularity) + 1, and
+// that +1 is load-bearing. Buckets are tumbling and BucketRange is inclusive at both
+// ends, so an absolute [t, t+Retention] touches Retention/Granularity + 1 of them.
+// Deriving ceil(Retention/Granularity) rejected a read over exactly the retention
+// window — the most natural range a caller writes.
+//
+// With neither field set the cap is DefaultMaxBucketSpan. Zero — genuinely unbounded —
+// comes back only for a Config with no Granularity, which assigns everything to bucket
+// 0 and so cannot fan out at all.
 func (c Config) MaxBucketSpan() int64 {
 	if c.MaxBuckets > 0 {
 		return int64(c.MaxBuckets)
 	}
-	if c.Granularity <= 0 || c.Retention <= 0 {
+	if c.Granularity <= 0 {
 		return 0
+	}
+	if c.Retention <= 0 {
+		return DefaultMaxBucketSpan
 	}
 	n := int64(c.Retention / c.Granularity)
 	if c.Retention%c.Granularity != 0 {
 		n++
 	}
-	return n
+	return n + 1
 }
 
 // RetentionBuckets reports how many whole buckets fit inside Retention — the longest
