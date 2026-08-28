@@ -173,8 +173,9 @@ func TestRetry_DeadLettersOnPermaFail(t *testing.T) {
 
 // memDeduper is an in-memory implementation of state.Deduper for unit tests.
 type memDeduper struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
+	mu       sync.Mutex
+	seen     map[string]struct{}
+	releases int
 }
 
 func newMemDeduper() *memDeduper { return &memDeduper{seen: map[string]struct{}{}} }
@@ -187,14 +188,39 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = struct{}{}
 	return true, nil
 }
-func (d *memDeduper) Release(_ context.Context, id string) error {
+
+// Release honours ctx the way the real dynamodb.Deduper does: it issues a
+// DeleteItem, and a DeleteItem on a cancelled context fails without touching the
+// table. Fakes that ignore ctx here silently bless a release that would never
+// have landed in production — which is the entire reason ReleaseClaims detaches
+// from the caller's context before releasing.
+func (d *memDeduper) Release(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("dedup Release %q: %w", id, err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.releases++
 	delete(d.seen, id)
 	return nil
 }
 
 func (*memDeduper) Close() error { return nil }
+
+// releaseCount reports how many claims were handed back. Flushes can run on the
+// aggregator's flush-loop goroutine, so this has to take the lock.
+func (d *memDeduper) releaseCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.releases
+}
+
+// claimedCount reports how many claims are currently outstanding.
+func (d *memDeduper) claimedCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.seen)
+}
 
 // duplicatingSource emits each record twice — simulating a worker crash that
 // causes the source to redeliver. With dedup configured the runtime should
