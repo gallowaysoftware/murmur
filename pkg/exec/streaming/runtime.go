@@ -138,9 +138,21 @@ func WithDeadLetter(fn func(eventID string, err error)) RunOption {
 //     immediate-merge semantics; common production values are 500ms–5s
 //     depending on read-staleness tolerance.
 //   - Durability under crash: records are Ack'd to the source AFTER the
-//     batch flushes, so a worker crash loses at most `window`-worth of
-//     in-flight records (the source replays them on restart, dedup
-//     catches the redelivery).
+//     batch flushes, so a worker crash drops at most `window`-worth of
+//     accumulated records and the source redelivers them on restart.
+//     What the redelivery is worth depends on whether a Deduper is wired:
+//     without WithDedup, those records never reached the store, so the
+//     redelivery is their first apply and nothing is lost. WithDedup, the
+//     claim is taken when the record ENTERS the accumulator, not at
+//     flush — so the claim survives the crash, the redelivery is
+//     dedup-skipped, and the in-flight batch's contribution is lost for
+//     good. Pairing WithBatchWindow with WithDedup trades a possible
+//     double-count for a possible silent loss of up to one flush window
+//     (or maxBatch records per key) per crash; pick the failure you can
+//     live with. There is no release-on-crash: flushOne dead-letters and
+//     Acks a batch whose merge exhausted its retries but leaves the
+//     claims standing, so replaying those EventIDs by hand is suppressed
+//     until the dedup TTL expires.
 //   - Memory: at most `maxBatch` records per (entity, bucket) before
 //     forced flush. Default 1024 if unset. The number of concurrent keys
 //     in flight is unbounded — for high-cardinality pipelines (per-user
@@ -236,6 +248,12 @@ func WithBatchTick(d time.Duration) RunOption {
 //
 // The Deduper itself is typically backed by a small DDB table with TTL —
 // see pkg/state/dynamodb.NewDeduper.
+//
+// Note the interaction with WithBatchWindow. On the unbatched path the
+// claim is released when the merge fails, so a redelivery is re-applied.
+// The aggregator claims on accept and never releases, so a crash before
+// the flush loses the accumulated records rather than double-counting
+// them — see WithBatchWindow's "Durability under crash" note.
 func WithDedup(d state.Deduper) RunOption {
 	return func(c *runConfig) {
 		if d != nil {

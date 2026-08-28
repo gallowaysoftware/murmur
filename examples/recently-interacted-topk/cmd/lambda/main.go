@@ -67,7 +67,7 @@ func run() int {
 		DDBRegion:       envOr("AWS_REGION", "us-east-1"),
 		DDBDedupTable:   os.Getenv("DDB_DEDUP_TABLE"), // recommended in production
 		DedupTTL:        24 * time.Hour,
-		K:               envU32("TOPK_K", 32),
+		K:               envU32("TOPK_K", example.DefaultK),
 		WindowRetention: 30 * 24 * time.Hour,
 	}
 

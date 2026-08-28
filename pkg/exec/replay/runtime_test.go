@@ -131,6 +131,71 @@ func (d *slowDriver) Replay(ctx context.Context, out chan<- source.Record[int]) 
 func (*slowDriver) Name() string { return "slow-driver" }
 func (*slowDriver) Close() error { return nil }
 
+// claimOnceDeduper is a minimal state.Deduper: one claim per EventID, held
+// for the life of the test. It stands in for any Deduper implementation
+// while the runtime's own behaviour is under test — whether a replay re-run
+// re-merges depends only on what MarkSeen answers, so nothing here needs to
+// model DynamoDB.
+//
+// It deliberately does NOT model claim expiry. Nothing in murmur implements
+// a dedup TTL — DynamoDB's native TTL sweeper does, in
+// pkg/state/dynamodb.Deduper's table — so a hand-rolled expiry here would
+// only be this file asserting against itself. The horizon that expiry puts
+// on replay idempotency is pinned against the real Deduper in
+// test/e2e/replay_dedup_ttl_test.go, behind the DDB-local gate.
+type claimOnceDeduper struct {
+	mu    sync.Mutex
+	claim map[string]bool
+}
+
+func newClaimOnceDeduper() *claimOnceDeduper {
+	return &claimOnceDeduper{claim: map[string]bool{}}
+}
+
+func (d *claimOnceDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
+	if id == "" {
+		return true, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.claim[id] {
+		return false, nil
+	}
+	d.claim[id] = true
+	return true, nil
+}
+
+func (d *claimOnceDeduper) Release(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.claim, id)
+	return nil
+}
+
+func (*claimOnceDeduper) Close() error { return nil }
+
+// newCountingPipe sums one unit per record into a single entity, so a re-run
+// that double-counts shows up as a doubled total rather than a per-key puzzle.
+func newCountingPipe(store state.Store[int64]) *pipeline.Pipeline[int, int64] {
+	return pipeline.NewPipeline[int, int64]("replay-dedup").
+		Key(func(int) string { return "all" }).
+		Value(func(int) int64 { return 1 }).
+		Aggregate(core.Sum[int64]()).
+		StoreIn(store)
+}
+
+// archive returns n records of replay input. fakeDriver assigns each record a
+// positional EventID, which is what a real S3-archive or Kafka-offset driver
+// does: stable across re-runs of the same archive, which is the whole basis
+// for dedup catching a re-run.
+func archive(n int) *fakeDriver {
+	vals := make([]int, n)
+	for i := range vals {
+		vals[i] = i
+	}
+	return &fakeDriver{values: vals}
+}
+
 func newPipe(store state.Store[int64]) *pipeline.Pipeline[int, int64] {
 	return pipeline.NewPipeline[int, int64]("replay-test").
 		Key(func(i int) string { return strconv.Itoa(i % 3) }).
@@ -152,6 +217,41 @@ func TestReplay_HappyPath(t *testing.T) {
 		if got := store.m[state.Key{Entity: entity}]; got != w {
 			t.Errorf("entity %q: got %d, want %d", entity, got, w)
 		}
+	}
+}
+
+// TestReplay_RerunWithDedupIsIdempotent is the replay analogue of the
+// bootstrap re-run test: an operator who re-runs the same archive (a retry
+// after a partial failure, a second pass over a shadow table) must not double
+// the totals. Sum is non-idempotent, so WithDedup is the only thing standing
+// between a re-run and a corrupted backfill.
+//
+// This covers the runtime's half of the contract — that it consults the
+// Deduper for every record and skips the merge on a claimed one. The other
+// half, that the protection lapses once the claims expire, belongs to the
+// real DynamoDB-backed Deduper and is asserted in
+// test/e2e/replay_dedup_ttl_test.go.
+func TestReplay_RerunWithDedupIsIdempotent(t *testing.T) {
+	const records = 100
+
+	store := newFakeStore()
+	dedup := newClaimOnceDeduper()
+	rec := metrics.NewInMemory()
+
+	for run := 1; run <= 2; run++ {
+		if err := replay.Run(context.Background(), newCountingPipe(store), archive(records),
+			replay.WithDedup(dedup),
+			replay.WithMetrics(rec),
+		); err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+	}
+
+	if got := store.m[state.Key{Entity: "all"}]; got != records {
+		t.Errorf("total after two identical replays: got %d, want %d", got, records)
+	}
+	if got := rec.SnapshotOne("replay-dedup:dedup_skip").EventsProcessed; got != records {
+		t.Errorf("dedup_skip events on the second replay: got %d, want %d", got, records)
 	}
 }
 

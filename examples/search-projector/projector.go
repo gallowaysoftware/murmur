@@ -72,6 +72,13 @@ type Stats struct {
 	Indexed     atomic.Int64 // bucket changed → reindex emitted
 	IndexErrors atomic.Int64 // OpenSearch update returned a non-2xx
 	DecodeErrs  atomic.Int64 // missing pk / bad attribute / etc.
+
+	// Unreportable counts records that failed but carry no SequenceNumber,
+	// so no BatchItemFailures entry can name them. Lambda rejects an empty
+	// itemIdentifier and redelivers the whole batch, which is worse than
+	// dropping the entry — but the drop must not be invisible. A nonzero
+	// value here means records are failing and Lambda is not being told.
+	Unreportable atomic.Int64
 }
 
 // IndexClient abstracts the OpenSearch UpdateDoc surface so the projector
@@ -173,12 +180,29 @@ func (p *Projector) Handle(ctx context.Context, rec *events.DynamoDBEventRecord)
 
 // HandleEvent is the convenience handler for a full SQS-style batch.
 // Returns the BatchItemFailures slice for Lambda's response shape.
+//
+// The ItemIdentifier is the record's SequenceNumber, which is what Lambda
+// resolves against the shard's checkpoint. Reporting the eventID instead
+// names nothing Lambda can find, and the failed record is either redelivered
+// as part of the whole batch or dropped outright.
+//
+// A record with an EMPTY SequenceNumber gets no entry at all: Lambda treats a
+// null or empty itemIdentifier as a malformed response and redelivers the
+// WHOLE batch, so one unreportable record would cost every other record in
+// the batch a redundant reindex. Those drops are counted in
+// Stats.Unreportable rather than being silent. Real DDB Streams records
+// always carry a sequence number; an empty one means a synthetic event.
 func (p *Projector) HandleEvent(ctx context.Context, evt events.DynamoDBEvent) []events.DynamoDBBatchItemFailure {
 	var failures []events.DynamoDBBatchItemFailure
 	for i := range evt.Records {
 		if err := p.Handle(ctx, &evt.Records[i]); err != nil {
+			seq := evt.Records[i].Change.SequenceNumber
+			if seq == "" {
+				p.stats.Unreportable.Add(1)
+				continue
+			}
 			failures = append(failures, events.DynamoDBBatchItemFailure{
-				ItemIdentifier: evt.Records[i].EventID,
+				ItemIdentifier: seq,
 			})
 		}
 	}
@@ -208,12 +232,15 @@ func (s *Stats) MarshalJSON() ([]byte, error) {
 		Indexed     int64 `json:"indexed"`
 		IndexErrors int64 `json:"index_errors"`
 		DecodeErrs  int64 `json:"decode_errors"`
+
+		Unreportable int64 `json:"unreportable_failures"`
 	}{
-		Decoded:     s.Decoded.Load(),
-		Skipped:     s.Skipped.Load(),
-		Indexed:     s.Indexed.Load(),
-		IndexErrors: s.IndexErrors.Load(),
-		DecodeErrs:  s.DecodeErrs.Load(),
+		Decoded:      s.Decoded.Load(),
+		Skipped:      s.Skipped.Load(),
+		Indexed:      s.Indexed.Load(),
+		IndexErrors:  s.IndexErrors.Load(),
+		DecodeErrs:   s.DecodeErrs.Load(),
+		Unreportable: s.Unreportable.Load(),
 	})
 }
 

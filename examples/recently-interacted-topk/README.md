@@ -48,6 +48,12 @@ pipeline.NewPipeline[Interaction, []byte]("recently_interacted").
 The Lambda binary leaves `Source` unset (Lambda owns polling). The Kafka
 worker calls `AttachKafkaSource(pipe, cfg)` to attach a franz-go source.
 
+`K` is one number for the whole deployment: `Config.ResolveK()`, which is
+`TOPK_K` in each binary's environment and `DefaultK` (32) when unset. Both
+writers and the query server go through it. Sketches sized for different K
+refuse to merge, and the symptom is an empty or stale Top-N at query time
+rather than an error at startup — so never hard-code K anywhere.
+
 ## Run locally
 
 Stand up dependencies:

@@ -47,10 +47,25 @@
 // # Partial-batch failure handling
 //
 // Records that exhaust their retry budget are reported via BatchItemFailures
-// with the DDB Streams `eventID` as ItemIdentifier. Configure your
-// event-source mapping with `FunctionResponseTypes=["ReportBatchItemFailures"]`
-// so Lambda only redelivers the failures (or, in shard-order replay mode,
-// all records from the earliest failure forward).
+// with the record's `SequenceNumber` as ItemIdentifier — NOT its `eventID`.
+// Lambda resolves an ItemIdentifier against the shard's sequence numbers, so
+// an eventID there names nothing it can find: depending on the event-source
+// mapping that degrades to whole-batch redelivery, a stalled iterator, or a
+// silently discarded failure. The eventID is still what feeds the Deduper —
+// it is the stream-unique record identity, just not the checkpoint cursor.
+//
+// A record that fails with an EMPTY `SequenceNumber` gets no
+// BatchItemFailures entry at all. An empty or null ItemIdentifier makes
+// Lambda treat the response as malformed and redeliver the WHOLE batch —
+// worse than losing the one entry — so the handler drops it, counts a
+// `<name>:unreportable_failure` event, and reports it through
+// metrics.RecordError. Real DDB Streams records always carry a sequence
+// number; an empty one means a synthetic or hand-constructed event.
+//
+// Configure your event-source mapping with
+// `FunctionResponseTypes=["ReportBatchItemFailures"]` so Lambda only
+// redelivers the failures (or, in shard-order replay mode, all records from
+// the earliest failure forward).
 package dynamodbstreams
 
 import (
@@ -97,8 +112,10 @@ type handlerConfig struct {
 // WithMetrics installs a metrics.Recorder. Defaults to metrics.Noop{}.
 // The handler records events under the pipeline's Name; retries under
 // "<name>:retry"; dedup skips under "<name>:dedup_skip"; dead letters under
-// "<name>:dead_letter"; and skipped records (ErrSkipRecord) under
-// "<name>:skip" — same conventions as the streaming runtime.
+// "<name>:dead_letter"; skipped records (ErrSkipRecord) under "<name>:skip"
+// — same conventions as the streaming runtime — and failures that cannot be
+// reported to Lambda because the record carries no SequenceNumber under
+// "<name>:unreportable_failure".
 func WithMetrics(r metrics.Recorder) HandlerOption {
 	return func(c *handlerConfig) {
 		if r != nil {
@@ -230,8 +247,28 @@ func NewHandler[T any, V any](
 
 			if err := processor.MergeMany(ctx, &cfg.Config, name, rec.EventID, eventTime,
 				keysFn(value), valueFn(value), store, cacheStore, window); err != nil {
+				// SequenceNumber, not EventID: Lambda checkpoints the shard by
+				// sequence number, and an identifier it can't resolve is either
+				// ignored or takes the whole batch down with it.
+				seq := rec.Change.SequenceNumber
+				if seq == "" {
+					// An empty ItemIdentifier is worse than no entry at all:
+					// Lambda rejects the whole response as malformed and
+					// redelivers the ENTIRE batch, re-merging every record
+					// that already succeeded (dedup is off by default). Drop
+					// the unreportable entry and make the drop loud instead.
+					// Real DDB Streams records always carry a sequence
+					// number; an empty one means a synthetic event.
+					cfg.Recorder.RecordEvent(name + ":unreportable_failure")
+					cfg.Recorder.RecordError(name, fmt.Errorf(
+						"record %q exhausted retries but carries no Change.SequenceNumber; "+
+							"dropping its BatchItemFailures entry rather than sending an empty "+
+							"ItemIdentifier (which would redeliver the whole batch): %w",
+						rec.EventID, err))
+					continue
+				}
 				resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
-					ItemIdentifier: rec.EventID,
+					ItemIdentifier: seq,
 				})
 			}
 		}

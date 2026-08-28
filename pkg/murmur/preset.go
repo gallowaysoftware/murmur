@@ -371,8 +371,15 @@ func (b *TrendingBuilder[T]) Hourly(retention time.Duration) *TrendingBuilder[T]
 	return b
 }
 
-// Clock overrides time.Now for the per-event timestamp. Useful for tests
-// with deterministic clocks; production code should leave this unset.
+// Clock overrides time.Now for the per-event decay timestamp. It takes a
+// func() time.Time, not a func(T) time.Time: an observation is stamped when
+// it is PROCESSED, so a late-arriving event decays from arrival rather than
+// from when it happened, and a replay of last week's archive scores every
+// record as fresh. Pin the clock for such a replay, or aggregate a windowed
+// Sum and decay from the bucket's time at query instead.
+//
+// Useful for tests with deterministic clocks; production code should leave
+// this unset.
 func (b *TrendingBuilder[T]) Clock(now func() time.Time) *TrendingBuilder[T] {
 	if now != nil {
 		b.now = now

@@ -3,6 +3,7 @@ package murmur_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +126,69 @@ func TestDynamoDBStreamsHandler_BuildsAndProcesses(t *testing.T) {
 	}
 	if got := store.m[state.Key{Entity: "a"}]; got != 1 {
 		t.Errorf("a: got %d, want 1", got)
+	}
+}
+
+// failingLambdaStore fails every MergeUpdate, so every record exhausts its
+// retry budget and lands in BatchItemFailures.
+type failingLambdaStore struct{}
+
+func (failingLambdaStore) Get(context.Context, state.Key) (int64, bool, error) {
+	return 0, false, nil
+}
+func (failingLambdaStore) GetMany(context.Context, []state.Key) ([]int64, []bool, error) {
+	return nil, nil, nil
+}
+func (failingLambdaStore) MergeUpdate(context.Context, state.Key, int64, time.Duration) error {
+	return errors.New("store down")
+}
+func (failingLambdaStore) Close() error { return nil }
+
+// TestDynamoDBStreamsHandler_ReportsSequenceNumberOnFailure guards the facade
+// against the same mistake the underlying handler had: Lambda resolves a
+// BatchItemFailures ItemIdentifier against the shard's sequence numbers, so an
+// eventID there costs a whole-batch redelivery, a stalled iterator, or a
+// silently dropped failure.
+func TestDynamoDBStreamsHandler_ReportsSequenceNumberOnFailure(t *testing.T) {
+	handler, err := murmur.DynamoDBStreamsHandler(newLambdaPipe(failingLambdaStore{}),
+		func(rec *events.DynamoDBEventRecord) (lambdaEvent, error) {
+			pk := rec.Change.Keys["pk"]
+			return lambdaEvent{K: pk.String()}, nil
+		},
+		murmur.LambdaConfig{},
+	)
+	if err != nil {
+		t.Fatalf("DynamoDBStreamsHandler: %v", err)
+	}
+	// eventID and SequenceNumber share no characters on purpose.
+	const doomSeq = "49590338271490256608559692538361571095921575989136588898"
+	records := []events.DynamoDBEventRecord{
+		{
+			EventID:   "ev-doom",
+			EventName: "INSERT",
+			Change: events.DynamoDBStreamRecord{
+				SequenceNumber: doomSeq,
+				Keys: map[string]events.DynamoDBAttributeValue{
+					"pk": events.NewStringAttribute("a"),
+				},
+			},
+		},
+	}
+	resp, err := handler(context.Background(), events.DynamoDBEvent{Records: records})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if len(resp.BatchItemFailures) != 1 {
+		t.Fatalf("BatchItemFailures: got %d, want 1", len(resp.BatchItemFailures))
+	}
+	got := resp.BatchItemFailures[0].ItemIdentifier
+	if got != doomSeq {
+		t.Errorf("ItemIdentifier: got %q, want the record's SequenceNumber %q", got, doomSeq)
+	}
+	for _, rec := range records {
+		if got == rec.EventID {
+			t.Errorf("ItemIdentifier is eventID %q; Lambda checkpoints on sequence numbers", rec.EventID)
+		}
 	}
 }
 

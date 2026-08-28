@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -46,6 +47,7 @@ func run() int {
 		DDBEndpoint:     os.Getenv("DDB_ENDPOINT"),
 		DDBTable:        envOr("DDB_TABLE", "recently_interacted"),
 		DDBRegion:       envOr("AWS_REGION", "us-east-1"),
+		K:               envU32("TOPK_K", example.DefaultK),
 		WindowRetention: 30 * 24 * time.Hour,
 	}
 	addr := envOr("GRPC_ADDR", ":50051")
@@ -65,8 +67,11 @@ func run() int {
 
 	window := windowed.Daily(cfg.WindowRetention)
 	srv := mgrpc.NewServer(mgrpc.Config[[]byte]{
-		Store:  store,
-		Monoid: topk.New(32), // K must match the Build() default; pin via env in production
+		Store: store,
+		// Same Config, same ResolveK: a query server whose K differs from the
+		// writers' reads a sketch that refuses to merge, and the Top-N comes
+		// back empty instead of erroring.
+		Monoid: topk.New(cfg.ResolveK()),
 		Window: &window,
 		Encode: mgrpc.BytesIdentity(),
 	})
@@ -120,4 +125,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envU32 mirrors the writers' TOPK_K parsing so one env var pins K across
+// every binary in the deployment.
+func envU32(key string, fallback uint32) uint32 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil || n == 0 {
+		slog.Warn("invalid TopK size, using default", "key", key, "value", v, "default", fallback, "err", err)
+		return fallback
+	}
+	return uint32(n)
 }
