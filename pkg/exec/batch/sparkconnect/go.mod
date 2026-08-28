@@ -1,6 +1,6 @@
 module github.com/gallowaysoftware/murmur/pkg/exec/batch/sparkconnect
 
-go 1.26.2
+go 1.25.0
 
 // Spark Connect support is shipped as its own Go module so that the rest of
 // Murmur (95% of consumers) doesn't need to mirror this fork-replace into

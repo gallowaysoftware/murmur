@@ -57,7 +57,7 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 go get github.com/gallowaysoftware/murmur@v0.2.0
 ```
 
-Requires Go 1.24 or newer. The framework is a library — there is no daemon to
+Requires Go 1.25 or newer. The framework is a library — there is no daemon to
 run. `cmd/murmur-ui` (a demo dashboard) and `cmd/murmur-codegen-typed` (typed
 RPC codegen) are the only binaries, and both are optional:
 

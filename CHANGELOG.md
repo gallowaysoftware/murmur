@@ -479,6 +479,15 @@ processor core, Kafka per-partition concurrency).
 
 #### Breaking changes
 
+- **`go.mod` now declares `go 1.25.0`** (was `go 1.26.2`). The old
+  patch-level directive was never a deliberate choice — it is whatever
+  `go mod init` wrote against a local toolchain in the initial commit — and it
+  forced every consumer onto Go >= 1.26.2. 1.25.0 is the real floor: five
+  direct dependencies (`golang.org/x/net`, `google.golang.org/grpc`,
+  `golang.org/x/sys`, `connectrpc.com/connect`, `apache/arrow-go`) declare it.
+  *Action:* none, unless you were on 1.24 or older, in which case this is the
+  first release you can build.
+
 Pre-1.0, so these are permitted. Each names what an operator or caller must do.
 
 - **`state.Deduper` gains `Release(ctx, eventID) error`.** Breaking for anyone
