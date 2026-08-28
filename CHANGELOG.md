@@ -6,6 +6,59 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — DynamoDB state-layer limits and dedup key scoping
+
+- `pkg/state/dynamodb`: `BytesStore` now pre-flights DynamoDB's 400KB item
+  limit before `PutItem` and returns a typed `ErrItemTooLarge` (with
+  `*ItemTooLargeError` carrying the key and measured size). Sketch size tracks
+  key length, not just K — a TopK that lifts an unbounded wire field into its
+  keys overflows the row on a couple of entries — and previously the oversized
+  write failed non-retryably on every attempt while `Get` kept serving the last
+  value that fit, as `Present:true`. A key that had silently stopped updating
+  read as healthy.
+- `pkg/state/dynamodb`: dedup claim keys are namespaced by pipeline name
+  (`"<pipeline>#<EventID>"`). EventIDs are only unique within a source, so two
+  pipelines sharing one dedup table — the layout `doc/design.md` §13.4
+  recommends — starved each other: whichever claimed an ID first made the other
+  skip a merge that never ran. This is the key format §13.4 already described.
+- `pkg/state/dynamodb`: each `Deduper.MarkSeen` stamps a per-call `claimant`
+  token into the claim row and admits it in the condition
+  (`attribute_not_exists(#pk) OR #claimant = :me`). A claim DynamoDB had
+  committed whose response was lost to a connection reset previously came back
+  as a plain `ConditionalCheckFailedException` on the SDK's retry,
+  indistinguishable from a peer's claim, and dropped a first delivery. The
+  token works because the SDK's retry middleware sits after serialization, so
+  the replay carries the identical value.
+
+#### Added alongside
+
+- `pkg/state/dynamodb`: `BytesStore` CAS retries are configurable via
+  `WithCASRetries` and `WithCASBackoff` (previously 8 attempts and ~17s of
+  backoff, hardcoded with no setter), and contention is counted under
+  `<pipeline>:cas_conflict` via `WithCASMetrics` — a hot key used to burn its
+  whole budget and dead-letter with nothing in the metrics to say the writes
+  were racing rather than failing. `ErrMaxRetriesExceeded` now carries the
+  table, key and attempt count.
+- `pkg/state/dynamodb`: `(*Deduper).ForPipeline` derives a sibling scope over
+  the same table for a worker process hosting several pipelines.
+
+#### Changed alongside
+
+- **BREAKING** `pkg/state/dynamodb.NewDeduper` takes a pipeline name:
+  `NewDeduper(client, table, pipeline, ttl)`. This changes the on-disk dedup
+  key format. An operator with an existing dedup table gets one window of
+  re-processing as previously-claimed IDs re-claim under their namespaced keys;
+  for non-idempotent monoids (Sum, HLL, TopK), drain in-flight records before
+  deploying, or let the old rows age out via the table's TTL first. No table
+  schema change — the partition key attribute is unchanged, only its contents.
+- **BREAKING** `pkg/state/dynamodb.NewBytesStore` takes variadic
+  `BytesStoreOption`s. Existing three-argument calls compile unchanged.
+- `examples/recently-interacted-topk`: `Config.Metrics` hands a
+  `metrics.Recorder` to the byte store, and both binaries build the recorder
+  before the pipeline so CAS contention on that pipeline's single `"global"`
+  row is visible.
+
+
 ### Fixed — graceful shutdown silently lost every in-flight record
 
 `streaming.Run` treated a cancelled context as a poison record. The comment at
