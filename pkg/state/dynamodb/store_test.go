@@ -207,6 +207,13 @@ func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, fmt.Errorf("fakeTransport: decode BatchGetItem body: %w", err)
 		}
+		// Real DynamoDB rejects the whole request when the key list repeats a
+		// key, so the fake has to as well — otherwise a store that forwards
+		// duplicates looks fine here and fails only in production.
+		if dup, ok := duplicateKey(req); ok {
+			return validationException(fmt.Sprintf(
+				"Provided list of item keys contains duplicates (%s)", dup)), nil
+		}
 		resp := f.handle(inv, req)
 		buf, err := json.Marshal(resp)
 		if err != nil {
