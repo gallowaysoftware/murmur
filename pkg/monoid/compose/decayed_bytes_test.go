@@ -33,22 +33,27 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecodeDecayed_EmptyIsIdentity(t *testing.T) {
-	// An absent DDB item reads back as no bytes at all; that is the identity,
-	// not a failure.
-	got, err := compose.DecodeDecayed(nil)
-	if err != nil {
-		t.Fatalf("decode(nil): unexpected error %v", err)
-	}
-	if got.Set {
+func TestDecodeDecayed_LengthContract(t *testing.T) {
+	// Exactly two lengths are legal, and the empty case has to stay legal: an
+	// absent DDB item reads back as no bytes at all, which is the identity, not
+	// a failure. Every other length is somebody else's bytes — decoding the
+	// first 17 of them yields a Set=true observation made of noise that then
+	// merges into the row and never comes out.
+	//
+	// The two halves are one test because they are one rule, and because
+	// asserting "empty is not an error" on its own would pass against the old
+	// decoder too, which returned the identity for anything short.
+	if got, err := compose.DecodeDecayed(nil); err != nil {
+		t.Errorf("decode(nil): unexpected error %v", err)
+	} else if got.Set {
 		t.Errorf("decode(nil): expected Identity, got %+v", got)
 	}
-}
+	if got, err := compose.DecodeDecayed([]byte{}); err != nil {
+		t.Errorf("decode(empty): unexpected error %v", err)
+	} else if got.Set {
+		t.Errorf("decode(empty): expected Identity, got %+v", got)
+	}
 
-func TestDecodeDecayed_WrongLengthIsAnError(t *testing.T) {
-	// Any length but 0 and 17 is somebody else's bytes. Decoding the first 17
-	// of them yields a Set=true observation made of noise, which then merges
-	// into the row and never comes out.
 	for _, n := range []int{1, 3, 16, 18, 200} {
 		got, err := compose.DecodeDecayed(make([]byte, n))
 		if err == nil {
@@ -109,9 +114,23 @@ func TestDecayedSumBytes_ForeignBlobIsReported(t *testing.T) {
 func TestDecayedSumBytes_ForeignBlobWithoutHandlerStillRecovers(t *testing.T) {
 	// The hook is optional; without one the recovery must be the same, just
 	// unreported.
+	//
+	// The blob has to be non-zero to test anything. An all-zero 200-byte slice
+	// decodes (under the old decoder) to Set=false, which Combine already
+	// discarded via the identity short-circuit — so a zeroed fixture passed
+	// with or without the length check and proved nothing. Byte 16 is the Set
+	// flag; this pattern makes it 115.
+	foreign := make([]byte, 200)
+	for i := range foreign {
+		foreign[i] = byte(i*7 + 3)
+	}
+	if foreign[16] == 0 {
+		t.Fatal("fixture is broken: byte 16 is the Set flag and must be non-zero")
+	}
+
 	m := compose.DecayedSumBytes(time.Hour)
 	good := compose.DecayedBytes(7, time.Now())
-	if got := m.Combine(make([]byte, 200), good); string(got) != string(good) {
+	if got := m.Combine(foreign, good); string(got) != string(good) {
 		t.Error("Combine must still return the decodable operand")
 	}
 }

@@ -1,7 +1,7 @@
-// Bloom's (m, k) shape is written into every marshaled filter and read back
-// out of it, so the monoid's own parameters survive exactly as long as the call
-// to bloom.New before UnmarshalBinary overwrites them. These tests pin down
-// what happens when the shapes disagree — which used to be nothing at all.
+// Bloom's (m, k) shape is written into every marshaled filter and read back out
+// of it, so the shape a monoid was constructed with never reaches the merge —
+// UnmarshalBinary replaces it. These tests pin down what happens when the
+// shapes disagree, which used to be nothing at all.
 package bloom_test
 
 import (
@@ -98,17 +98,81 @@ func TestBloom_ShapeMismatchIsReported(t *testing.T) {
 	}
 }
 
-func TestBloom_ShapeMismatchWithoutHandlerStillRecovers(t *testing.T) {
-	// The hook is optional; with none installed the behaviour must be exactly
-	// as before — keep the left operand, do not panic.
-	m := bloom.NewWithCapacity(1_000, 0.01)
-	small := bloom.NewSingle(1_000, 0.01, []byte("small"))
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Combine panicked with no handler installed: %v", r)
+func TestBloom_OperandsThatIgnoreTheConfiguredShapeAreReported(t *testing.T) {
+	// The case that made NewWithCapacity's parameters decorative: the operands
+	// agree with EACH OTHER, so the merge is a well-defined bitwise OR and
+	// nothing goes wrong at the bit level — they just are not the shape the
+	// caller configured. A pipeline built with NewWithCapacity(1_000, 0.01)
+	// whose value extractor calls the default-sized Single() aggregates
+	// DefaultCapacity filters forever, at a false-positive rate nothing in the
+	// configuration predicts, and used to do it in total silence.
+	var errs []error
+	m := bloom.NewWithCapacity(1_000, 0.01, bloom.WithDecodeErrorHandler(func(err error) {
+		errs = append(errs, err)
+	}))
+
+	// Both operands are DefaultCapacity — matching each other, not the monoid.
+	got := m.Combine(bloom.Single([]byte("a")), bloom.Single([]byte("b")))
+
+	// The merge still happens: refusing it would throw away real data over a
+	// sizing disagreement.
+	if !bloom.Contains(got, []byte("a")) || !bloom.Contains(got, []byte("b")) {
+		t.Error("Combine must still OR two identically-shaped operands")
+	}
+
+	if len(errs) != 1 {
+		t.Fatalf("configured-shape reports: got %d, want exactly 1 — %v", len(errs), errs)
+	}
+	msg := errs[0].Error()
+
+	wantCap, wantK, _, err := bloom.Inspect(bloom.Single([]byte("x")))
+	if err != nil {
+		t.Fatalf("Inspect(Single): %v", err)
+	}
+	configuredCap, configuredK, _, err := bloom.Inspect(bloom.NewSingle(1_000, 0.01, []byte("x")))
+	if err != nil {
+		t.Fatalf("Inspect(NewSingle): %v", err)
+	}
+	if wantCap == configuredCap && wantK == configuredK {
+		t.Fatalf("fixture is broken: both shapes are (m=%d, k=%d)", wantCap, wantK)
+	}
+	// The report has to name both shapes, or it cannot tell the reader which
+	// half of the pipeline to go fix.
+	for _, want := range []string{
+		strconv.FormatUint(wantCap, 10),
+		strconv.FormatUint(configuredCap, 10),
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error must name the operands' shape AND the configured one: got %q, missing m=%s", msg, want)
 		}
-	}()
-	if got := m.Combine(small, bloom.Single([]byte("large"))); !bloom.Contains(got, []byte("small")) {
-		t.Error("Combine must keep the left operand")
+	}
+
+	// A correctly-sized pipeline stays silent — this must not fire on every
+	// merge of a pipeline that is doing nothing wrong.
+	var quiet []error
+	ok := bloom.NewWithCapacity(1_000, 0.01, bloom.WithDecodeErrorHandler(func(err error) {
+		quiet = append(quiet, err)
+	}))
+	sized := ok.Combine(
+		bloom.NewSingle(1_000, 0.01, []byte("a")),
+		bloom.NewSingle(1_000, 0.01, []byte("b")),
+	)
+	if !bloom.Contains(sized, []byte("a")) || !bloom.Contains(sized, []byte("b")) {
+		t.Error("correctly-sized merge lost an element")
+	}
+	if len(quiet) != 0 {
+		t.Errorf("a correctly-sized pipeline must not report: %v", quiet)
 	}
 }
+
+// There is deliberately no TestBloom_ShapeMismatchWithoutHandlerStillRecovers.
+// It asserted that a nil handler still keeps the left operand and does not
+// panic, which is exactly what the code did before any of this — it passed
+// against the unfixed package, so it could not have caught a regression in the
+// fix it was filed under.
+//
+// The nil-handler path is not uncovered: TestBloom_NonDefaultCapacityMonoid in
+// pkg/monoid/monoidlaws builds NewWithCapacity(2_000, 0.001) with no handler
+// and merges operands sized (1_000, 0.01), so the associativity and identity
+// fuzzers drive every reportDecodeError call site in Combine with
+// onDecodeErr == nil, thousands of times per run.

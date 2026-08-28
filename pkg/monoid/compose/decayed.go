@@ -23,11 +23,17 @@ import (
 // Associativity is exact in real arithmetic; in IEEE-754 floats it holds within ULP
 // for typical inputs but is not bitwise.
 //
-// The reference frame is bounded: an operand timestamped further ahead of the wall
-// clock than the skew bound (WithClockSkewBound, two half-lives by default) is pulled
-// back to that limit before the merge, so no single observation can set a frame the
-// rest of the stream will never reach. Observations in the past — however far — are
-// untouched.
+// # Future-dated timestamps
+//
+// The reference frame Combine adopts is the newer of the two timestamps, so an
+// observation stamped far ahead of real time freezes the key: 2^(-4y/24h) underflows
+// to exactly zero, the accumulated mass is annihilated, and every real event that
+// follows is itself the older operand and is annihilated in turn. The key sits at
+// whatever the bogus observation carried.
+//
+// Combine cannot defend against this, and deliberately does not try — see ClampFuture
+// for where the defense lives and why it cannot live here. EvaluateAt contains the
+// blast radius on the read side: it will not scale a frozen value up.
 type Decayed struct {
 	// Value is the current decayed sum at time T.
 	Value float64
@@ -51,7 +57,8 @@ type Decayed struct {
 //
 // To insert an event at processing time, lift it via DecayedAt(amount, time.Now()).
 // The streaming runtime hands the resulting Decayed value through Combine, the same
-// pattern used by HLL.Single and TopK.SingleN.
+// pattern used by HLL.Single and TopK.SingleN. If the timestamp comes from the EVENT
+// rather than from the clock, run it through ClampFuture first.
 func DecayedSum(halfLife time.Duration, opts ...Option) monoid.Monoid[Decayed] {
 	return decayedMonoid{cfg: newDecayedConfig(halfLife, opts)}
 }
@@ -60,25 +67,6 @@ func DecayedSum(halfLife time.Duration, opts ...Option) monoid.Monoid[Decayed] {
 // DecayedSum and DecayedSumBytes; WithDecodeErrorHandler is only consulted by
 // the bytes variant, which is the only one that parses a wire form.
 type Option func(*decayedConfig)
-
-// WithClockSkewBound sets how far ahead of the wall clock an observation's
-// timestamp may sit before Combine treats it as clock skew and pulls it back.
-// The default is two half-lives (see DecayedSum for why); a non-positive bound
-// disables the clamp entirely, which is what you want for a pipeline that
-// legitimately dates observations into the future.
-func WithClockSkewBound(d time.Duration) Option {
-	return func(c *decayedConfig) { c.skewBound = d }
-}
-
-// WithClock replaces the wall clock Combine measures skew against. Only useful
-// for tests — production callers want time.Now, which is the default.
-func WithClock(now func() time.Time) Option {
-	return func(c *decayedConfig) {
-		if now != nil {
-			c.now = now
-		}
-	}
-}
 
 // WithDecodeErrorHandler installs a callback invoked when DecayedSumBytes'
 // Combine is handed bytes that are not a Decayed wire form.
@@ -98,80 +86,15 @@ func WithDecodeErrorHandler(fn func(error)) Option {
 
 type decayedConfig struct {
 	halfLife    float64 // seconds
-	skewBound   time.Duration
-	now         func() time.Time
 	onDecodeErr func(error)
 }
 
 func newDecayedConfig(halfLife time.Duration, opts []Option) decayedConfig {
-	c := decayedConfig{
-		halfLife: halfLife.Seconds(),
-		now:      time.Now,
-		// Default: two half-lives. Scale-free, and it bounds the damage a
-		// skewed observation can do to a factor of four — see clampSkew.
-		skewBound: defaultSkewBound(halfLife),
-	}
+	c := decayedConfig{halfLife: halfLife.Seconds()}
 	for _, o := range opts {
 		o(&c)
 	}
 	return c
-}
-
-func defaultSkewBound(halfLife time.Duration) time.Duration {
-	switch {
-	case halfLife <= 0:
-		return 0 // no decay, so there is no reference frame to protect
-	case 2*halfLife > halfLife:
-		return 2 * halfLife
-	default:
-		// A half-life past half the Duration range doubles into overflow. The
-		// half-life itself is already a bound nobody reaches by accident.
-		return halfLife
-	}
-}
-
-// clampSkew pulls a timestamp back to now+skewBound.
-//
-// This is what stops one future-dated event from freezing a key forever. The
-// frame Combine adopts is the newer of the two timestamps, so an event stamped
-// four years out becomes a frame nothing can ever catch up to: 2^(-4y/24h)
-// underflows to exactly zero, so the accumulated mass is annihilated, and then
-// every real event that follows is itself the older operand and is annihilated
-// in turn. The key sits at whatever the skewed event carried, and the read path
-// scales that frozen value up by 2^(+gap/halfLife) — +Inf, or 7.5e109 for a
-// one-year skew at halfLife=24h — pinning it to rank #1 for good.
-//
-// A pairwise horizon ("refuse to decay across more than N half-lives") cannot
-// fix this: from inside Combine, a state four years in the future next to a
-// real event is indistinguishable from a real event four years after a key
-// went quiet, and clamping the second case pins legitimately-idle keys at a
-// frame they can never leave. The wall clock is the one piece of information
-// that separates them, so that is what we bound against.
-//
-// With the default bound of two half-lives the worst a skewed observation can
-// cost is a factor of four on the contributions that land while the clock
-// catches up, and it heals on its own once it does.
-func clampSkew(t, limit int64) int64 {
-	if t > limit {
-		return limit
-	}
-	return t
-}
-
-// skewLimit is the newest timestamp Combine will accept as a reference frame.
-// math.MaxInt64 disables the clamp.
-func (c decayedConfig) skewLimit() int64 {
-	if c.skewBound <= 0 {
-		return math.MaxInt64
-	}
-	now := c.now().UnixNano()
-	limit := now + int64(c.skewBound)
-	if limit < now {
-		// The nanosecond clock runs out in 2262; a bound that overflows it
-		// isn't bounding anything.
-		return math.MaxInt64
-	}
-	return limit
 }
 
 func (c decayedConfig) reportDecodeError(err error) {
@@ -186,6 +109,18 @@ type decayedMonoid struct {
 
 func (decayedMonoid) Identity() Decayed { return Decayed{} }
 
+// Combine is a pure function of its two operands. It reads no clock and holds no
+// state, which is not a stylistic preference:
+//
+//   - dynamodb.BytesStore.MergeUpdate recomputes Combine on every CAS retry. A
+//     Combine that consulted the wall clock returned a different answer on the
+//     second attempt than the first, so which value got written depended on how
+//     many times the conditional write lost a race.
+//   - Associativity and identity are fuzzed in CI (pkg/monoid/monoidlaws). A
+//     clock inside Combine makes Combine(Combine(a,b),c) and Combine(a,Combine(b,c))
+//     differ by however long the first evaluation took.
+//
+// So the skew bound cannot live here. See ClampFuture.
 func (m decayedMonoid) Combine(a, b Decayed) Decayed {
 	switch {
 	case !a.Set:
@@ -199,21 +134,17 @@ func (m decayedMonoid) Combine(a, b Decayed) Decayed {
 		older, newer = b, a
 	}
 
-	limit := m.cfg.skewLimit()
-	oldT := clampSkew(older.T, limit)
-	newT := clampSkew(newer.T, limit)
-
 	if m.cfg.halfLife <= 0 {
 		// No decay. EvaluateAt has always read a non-positive half-life this
 		// way; Combine has to agree or the same row means two different things
 		// depending on which side of the pipeline is looking at it.
-		return Decayed{Value: older.Value + newer.Value, T: newT, Set: true}
+		return Decayed{Value: older.Value + newer.Value, T: newer.T, Set: true}
 	}
-	dtSec := float64(newT-oldT) / 1e9
+	dtSec := float64(newer.T-older.T) / 1e9
 	factor := math.Exp2(-dtSec / m.cfg.halfLife)
 	return Decayed{
 		Value: older.Value*factor + newer.Value,
-		T:     newT,
+		T:     newer.T,
 		Set:   true,
 	}
 }
@@ -226,9 +157,77 @@ func (decayedMonoid) Kind() monoid.Kind { return monoid.KindCustom }
 // same final state as N individual MergeUpdate calls, modulo IEEE-754 ULP slop.
 func (decayedMonoid) IsAdditive() bool { return true }
 
+// DefaultSkewBound is the skew allowance ClampFuture uses when a caller has no
+// better number: two half-lives. It is scale-free, and it bounds the damage a
+// skewed observation can do to a factor of four on the contributions that land
+// while the clock catches up.
+//
+// A half-life past half the Duration range would double into overflow, so it is
+// returned unmultiplied; nobody reaches that by accident.
+func DefaultSkewBound(halfLife time.Duration) time.Duration {
+	switch {
+	case halfLife <= 0:
+		return 0 // no decay, so there is no reference frame to protect
+	case 2*halfLife > halfLife:
+		return 2 * halfLife
+	default:
+		return halfLife
+	}
+}
+
+// ClampFuture pulls a timestamp more than bound ahead of now back to now+bound.
+// Timestamps in the past — however far — are returned untouched, as are all
+// timestamps when bound is non-positive.
+//
+// Use it in a pipeline whose value extractor takes the timestamp from the EVENT
+// rather than from the clock, which is the only way a future-dated observation
+// can enter the aggregate:
+//
+//	Value(func(e Event) []byte {
+//	    ts := compose.ClampFuture(e.OccurredAt, time.Now(), compose.DefaultSkewBound(halfLife))
+//	    return compose.DecayedBytes(1, ts)
+//	})
+//
+// murmur.Trending already stamps every event at its configured clock, so a
+// pipeline built through that preset cannot produce a future frame and does not
+// need this.
+//
+// # Why here and not in Combine
+//
+// The wall clock is the one piece of information that separates a bogus
+// timestamp from a legitimate one, and it is exactly the piece Combine is not
+// allowed to have: Combine must be pure, or CAS retries and the associativity
+// fuzzer both stop being meaningful (see Combine).
+//
+// A pairwise bound — clamp the newer operand to the older operand's timestamp
+// plus a limit, using no clock — is the obvious substitute and it does not
+// work. From inside Combine, a state four years in the future beside a real
+// event is indistinguishable from a real event four years after a key went
+// quiet, so any pairwise clamp large enough to be safe for the first case pins
+// legitimately-idle keys at a frame they can never leave: a key idle for 18
+// hours at a one-minute half-life would come back holding a quarter of its
+// old mass instead of essentially none.
+//
+// The lift is where an untrusted event timestamp becomes state, it runs once
+// per observation rather than once per merge attempt, and it is the last point
+// at which a clock reading is still honest. So that is where the bound goes.
+func ClampFuture(t, now time.Time, bound time.Duration) time.Time {
+	if bound <= 0 {
+		return t
+	}
+	limit := now.Add(bound)
+	if t.After(limit) {
+		return limit
+	}
+	return t
+}
+
 // DecayedAt builds a Decayed observation for use as a per-event delta. amount is the
 // raw contribution at time t. The returned value has Set=true so it round-trips
 // through Combine(Identity, ...) correctly.
+//
+// t is honoured exactly. If it came off an event rather than off a clock, wrap it
+// in ClampFuture — Combine will not second-guess it later.
 func DecayedAt(amount float64, t time.Time) Decayed {
 	return Decayed{Value: amount, T: t.UnixNano(), Set: true}
 }
@@ -248,7 +247,10 @@ func DecayedNow(amount float64) Decayed {
 // — and the over-estimate is unbounded: one event stamped a year ahead
 // evaluates to 7.5e109 at halfLife=24h, and one stamped four years ahead to
 // +Inf. A single such row outranks every honest score in the index forever,
-// which is not a defensible reading of "the value as of now".
+// which is not a defensible reading of "the value as of now". This is also the
+// read-side backstop for a row that was frozen by a future-dated observation
+// before ClampFuture was in the pipeline: the key is stuck, but it is stuck at
+// a finite value rather than at infinity.
 //
 // Returns 0 for an unset Decayed, and d.Value for a non-positive halfLife.
 func EvaluateAt(d Decayed, halfLife time.Duration, t time.Time) float64 {

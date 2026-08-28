@@ -13,6 +13,12 @@
 // but whose value extractor called the default-sized Single merged every event into a
 // shape mismatch, and the row stayed the empty filter forever.
 //
+// Because every filter carries its own (m, k), the shape a monoid was CONSTRUCTED
+// with never reaches the merge. NewWithCapacity's parameters are therefore a
+// declaration rather than a constraint, and Combine reports operands that do not
+// match it — see WithDecodeErrorHandler. Without that report the parameters would be
+// decorative, which is exactly what they had become.
+//
 // Default parameters: 1M bits, k=7 hash functions, ~1% false-positive rate at ~100K
 // inserts. Use NewWithCapacity for custom sizing.
 package bloom
@@ -38,9 +44,18 @@ func Bloom(opts ...Option) monoid.Monoid[[]byte] {
 	return NewWithCapacity(DefaultCapacity, DefaultFPR, opts...)
 }
 
-// NewWithCapacity returns a Bloom-filter monoid sized for the expected number of
-// distinct elements n and target false-positive rate p. The shape is fixed for the
-// lifetime of the monoid; all sketches it merges must share these parameters.
+// NewWithCapacity returns a Bloom-filter monoid that DECLARES the shape (n, p)
+// implies: every sketch it merges must have been built with the same parameters,
+// which in practice means the pipeline's value extractor calls NewSingle with the
+// same (n, p) this call got.
+//
+// The monoid never builds a filter itself — Identity is the empty slice and Combine
+// reads (m, k) off the wire — so these parameters cannot force a shape on anything.
+// What they do is make disagreement detectable: Combine reports, through
+// WithDecodeErrorHandler, any pair of operands whose shape is not the declared one.
+// That is the only signal a caller gets that NewWithCapacity(1_000, 0.01) is quietly
+// aggregating DefaultCapacity filters produced by a Single() the extractor forgot to
+// size.
 func NewWithCapacity(n uint, p float64, opts ...Option) monoid.Monoid[[]byte] {
 	probe := bloom.NewWithEstimates(n, p)
 	mBits := probe.Cap()
@@ -73,7 +88,18 @@ type Option func(*bloomMonoid)
 // it, so mismatched filters both decode fine and the merge was abandoned with
 // no error at all.
 //
-// The handler must be cheap and non-blocking; it runs on the merge path.
+// Three distinct conditions reach this hook:
+//
+//   - an operand that will not decode — the other operand is kept;
+//   - two operands whose (m, k) differ, which cannot be OR'd — the left
+//     operand is kept;
+//   - two operands that agree with each other but not with the (n, p) this
+//     monoid was constructed for. That merge is sound and is performed; the
+//     report is what keeps NewWithCapacity's parameters from being decorative.
+//
+// The handler must be cheap and non-blocking; it runs on the merge path, and
+// the third condition fires on every merge for as long as the pipeline is
+// misconfigured — count it, do not log it unsampled.
 func WithDecodeErrorHandler(fn func(error)) Option {
 	return func(m *bloomMonoid) { m.onDecodeErr = fn }
 }
@@ -110,13 +136,17 @@ func (bm bloomMonoid) Combine(a, b []byte) []byte {
 	case len(b) == 0:
 		return a
 	}
-	ba := bloom.New(bm.m, bm.k)
+	// bloom.New(1, 1), not bloom.New(bm.m, bm.k): UnmarshalBinary reads (m, k)
+	// off the wire and replaces the bitset wholesale, so sizing the receiver
+	// first only allocates a DefaultCapacity-sized 120 KB bit array per operand
+	// per merge and throws it away.
+	ba := bloom.New(1, 1)
 	if err := ba.UnmarshalBinary(a); err != nil {
 		// Keep the operand that decoded; report the one that didn't.
 		bm.reportDecodeError(fmt.Errorf("bloom: decode left operand (%d bytes): %w", len(a), err))
 		return b
 	}
-	bb := bloom.New(bm.m, bm.k)
+	bb := bloom.New(1, 1)
 	if err := bb.UnmarshalBinary(b); err != nil {
 		bm.reportDecodeError(fmt.Errorf("bloom: decode right operand (%d bytes): %w", len(b), err))
 		return a
@@ -125,15 +155,28 @@ func (bm bloomMonoid) Combine(a, b []byte) []byte {
 	// were created with different parameters — a configuration bug we surface by
 	// returning unmodified data rather than corrupting state.
 	//
-	// UnmarshalBinary reads (m, k) off the wire and overwrites whatever shape we
-	// constructed the filter with, so both operands decode cleanly and this is the
-	// only place the misconfiguration is visible. It used to return here in silence,
-	// which is how a pipeline could drop every event for the lifetime of a row.
+	// UnmarshalBinary reads (m, k) off the wire, so both operands decode cleanly and
+	// this is the only place the misconfiguration is visible. It used to return here
+	// in silence, which is how a pipeline could drop every event for the lifetime of
+	// a row.
 	if ba.Cap() != bb.Cap() || ba.K() != bb.K() {
 		bm.reportDecodeError(fmt.Errorf(
 			"bloom: shape mismatch, cannot merge: left (m=%d, k=%d), right (m=%d, k=%d) — monoid built for (m=%d, k=%d); keeping the left operand",
 			ba.Cap(), ba.K(), bb.Cap(), bb.K(), bm.m, bm.k))
 		return a
+	}
+	// The operands agree with each other but not with the shape this monoid was
+	// constructed for. That merge is well-defined — it is a bitwise OR of two
+	// identically-shaped filters — so we do it rather than throwing data away, but
+	// it means NewWithCapacity's parameters are describing a filter nobody is
+	// building. Without this the (n, p) a caller passed were decorative: every
+	// sketch on the wire carries its own shape, so a pipeline could aggregate
+	// DefaultCapacity filters under a NewWithCapacity(1_000, 0.01) monoid forever
+	// and get a false-positive rate nothing in the configuration predicted.
+	if ba.Cap() != bm.m || ba.K() != bm.k {
+		bm.reportDecodeError(fmt.Errorf(
+			"bloom: operands are (m=%d, k=%d) but this monoid was built for (m=%d, k=%d) from n=%d, p=%g — merging at the operands' shape; the value extractor and the monoid disagree about sizing",
+			ba.Cap(), ba.K(), bm.m, bm.k, bm.n, bm.p))
 	}
 	merged := ba.Copy()
 	if err := merged.Merge(bb); err != nil {

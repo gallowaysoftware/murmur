@@ -375,9 +375,9 @@ type TopKItem struct {
 	// its stream returns a handful of counts in the single digits and looks
 	// exactly like an exact answer over a handful of events.
 	//
-	// When the difference matters, decode the raw bytes with
-	// pkg/monoid/sketch/topk.Inspect: its Summary carries the ingested weight,
-	// Coverage, Saturated, and the MaxError bound to draw around each count.
+	// The sketch does not record n, so the bound cannot be derived from what
+	// this client returns — carry n out of band (an event counter on the same
+	// pipeline is the usual answer) if the difference matters to you.
 	Count uint64
 }
 

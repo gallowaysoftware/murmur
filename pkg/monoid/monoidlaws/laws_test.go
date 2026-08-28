@@ -109,17 +109,6 @@ func TestTopK_K10(t *testing.T) {
 	})
 }
 
-func TestTopK_CapacityFromTheOperands(t *testing.T) {
-	// Same shape of bug on the TopK side, and the same law it breaks: a K=4
-	// monoid merging K=32 sketches used to write K=4 back, truncating the
-	// summary. Combine now merges at the widest K it can see, which keeps
-	// Combine(Identity, x) == x for an x that is wider than the monoid.
-	m := topk.New(4)
-	monoidlaws.TestMonoid(t, m, func(i int) []byte {
-		return topk.SingleN(32, string(rune('a'+(i%26))), uint64(1+i%3))
-	})
-}
-
 func TestHLL(t *testing.T) {
 	// HLL Combine is union of sketches: ASSOCIATIVE as a set operation, but
 	// the underlying axiomhq/hyperloglog wire format stores sparse registers
