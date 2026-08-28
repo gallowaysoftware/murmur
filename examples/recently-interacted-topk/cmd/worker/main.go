@@ -33,7 +33,22 @@ func main() {
 }
 
 func run() int {
+	// EMF rather than InMemory — the ECS awslogs driver forwards stdout to
+	// CloudWatch Logs, so these become real metrics with no IAM change. The
+	// long-running worker can use the default ticker; unlike Lambda it is
+	// never frozen.
+	//
+	// Built before the pipeline because the byte store takes it too: CAS
+	// contention on the single "global" row is only visible if the recorder
+	// exists by the time the store is constructed.
+	rec := emf.New(emf.Config{
+		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
+		Dimensions: map[string]string{"Source": "kafka"},
+	})
+	defer func() { _ = rec.Close() }()
+
 	cfg := example.Config{
+		Metrics:         rec,
 		KafkaBrokers:    envOr("KAFKA_BROKERS", "localhost:9092"),
 		KafkaTopic:      envOr("KAFKA_TOPIC", "interactions"),
 		ConsumerGroup:   envOr("CONSUMER_GROUP", "recently_interacted_worker"),
@@ -71,16 +86,6 @@ func run() int {
 		logger.Error("attach kafka source", "err", err)
 		return 2
 	}
-
-	// EMF rather than InMemory — the ECS awslogs driver forwards stdout to
-	// CloudWatch Logs, so these become real metrics with no IAM change. The
-	// long-running worker can use the default ticker; unlike Lambda it is
-	// never frozen.
-	rec := emf.New(emf.Config{
-		Namespace:  envOr("MURMUR_METRICS_NAMESPACE", "Murmur"),
-		Dimensions: map[string]string{"Source": "kafka"},
-	})
-	defer func() { _ = rec.Close() }()
 
 	opts := []streaming.RunOption{
 		streaming.WithMetrics(rec),

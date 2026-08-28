@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -172,6 +173,8 @@ type ddbResp struct {
 type fakeTransport struct {
 	batchGetCalls atomic.Int64
 	getItemCalls  atomic.Int64
+	putItemCalls  atomic.Int64
+	deleteCalls   atomic.Int64
 	otherCalls    atomic.Int64
 
 	// handle is invoked for each BatchGetItem call with the parsed request; it
@@ -179,6 +182,12 @@ type fakeTransport struct {
 	// can vary behavior between attempts (e.g. surface UnprocessedKeys once,
 	// then drain).
 	handle func(invocation int, req ddbReq) ddbResp
+
+	// handleOp, when set, answers every op other than BatchGetItem: the CAS and
+	// dedup paths issue GetItem / PutItem / DeleteItem, and both need to shape
+	// the response (a conditional-check failure, a dropped connection) rather
+	// than just be counted. invocation is 1-indexed per op.
+	handleOp func(target string, invocation int, body []byte) (*http.Response, error)
 }
 
 func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -187,9 +196,10 @@ func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	var inv int
 	switch target {
 	case "DynamoDB_20120810.BatchGetItem":
-		inv := int(f.batchGetCalls.Add(1))
+		inv = int(f.batchGetCalls.Add(1))
 		var req ddbReq
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, fmt.Errorf("fakeTransport: decode BatchGetItem body: %w", err)
@@ -205,40 +215,85 @@ func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			Body:       io.NopCloser(bytes.NewReader(buf)),
 		}, nil
 	case "DynamoDB_20120810.GetItem":
-		f.getItemCalls.Add(1)
+		inv = int(f.getItemCalls.Add(1))
+	case "DynamoDB_20120810.PutItem":
+		inv = int(f.putItemCalls.Add(1))
+	case "DynamoDB_20120810.DeleteItem":
+		inv = int(f.deleteCalls.Add(1))
 	default:
-		f.otherCalls.Add(1)
+		inv = int(f.otherCalls.Add(1))
 	}
-	// Unhandled ops: return an empty 200 — none of the tests below trigger this
-	// path; if one does, the call counter surfaces the surprise.
+	if f.handleOp != nil {
+		return f.handleOp(target, inv, body)
+	}
+	// Unhandled ops: return an empty 200 — a GetItem answered this way reads as
+	// "no such row", which is what the size-guard test wants; if a test trips
+	// this path unintentionally, the call counter surfaces the surprise.
+	return okResponse(`{}`), nil
+}
+
+// okResponse builds a 200 with a JSON 1.0 body.
+func okResponse(body string) *http.Response {
 	return &http.Response{
 		StatusCode: 200,
 		Header:     http.Header{"Content-Type": []string{"application/x-amz-json-1.0"}},
-		Body:       io.NopCloser(bytes.NewReader([]byte(`{}`))),
-	}, nil
+		Body:       io.NopCloser(bytes.NewReader([]byte(body))),
+	}
 }
 
-// newFakeStore wires the given transport into a real *dynamodb.Client and
-// returns a store pointed at table "t". Region, creds, and base endpoint are
-// set to dummy values — the fake transport short-circuits before any real
-// network call.
-func newFakeStore(t *testing.T, ft *fakeTransport) *dynamodb.Int64SumStore {
+// ddbErrorResponse builds the 400 the service returns for a modeled exception.
+// The SDK resolves the type from either the X-Amzn-Errortype header or the
+// body's __type; we set both so the deserializer can't miss it.
+func ddbErrorResponse(errType string) *http.Response {
+	body := fmt.Sprintf(`{"__type":"com.amazonaws.dynamodb.v20120810#%s","message":"%s"}`, errType, errType)
+	return &http.Response{
+		StatusCode: 400,
+		Header: http.Header{
+			"Content-Type":     []string{"application/x-amz-json-1.0"},
+			"X-Amzn-Errortype": []string{errType},
+		},
+		Body: io.NopCloser(bytes.NewReader([]byte(body))),
+	}
+}
+
+// newFakeClient wires the given transport into a real *dynamodb.Client. Region,
+// creds, and base endpoint are dummy values — the fake transport short-circuits
+// before any real network call.
+//
+// maxAttempts is the SDK's own retry ceiling. Pass 1 to take the SDK's
+// transparent retry middleware out of the picture, so a store's hand-rolled
+// retry loop is what a test observes. Pass more to exercise the middleware
+// itself; the backoff is stubbed to zero either way so a test that wants a
+// retry doesn't pay for the jittered wait.
+func newFakeClient(t *testing.T, ft *fakeTransport, maxAttempts int) *awsddb.Client {
 	t.Helper()
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion("us-east-1"),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
 		awsconfig.WithHTTPClient(&http.Client{Transport: ft}),
-		// Disable retries inside the SDK so our own UnprocessedKeys retry loop
-		// is what's exercised — not the SDK's transparent retry middleware.
-		awsconfig.WithRetryMaxAttempts(1),
+		awsconfig.WithRetryer(func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = maxAttempts
+				o.Backoff = retry.BackoffDelayerFunc(func(int, error) (time.Duration, error) {
+					return 0, nil
+				})
+			})
+		}),
 	)
 	if err != nil {
 		t.Fatalf("aws config: %v", err)
 	}
-	client := awsddb.NewFromConfig(cfg, func(o *awsddb.Options) {
+	return awsddb.NewFromConfig(cfg, func(o *awsddb.Options) {
 		o.BaseEndpoint = aws.String("http://fake.local")
 	})
-	return dynamodb.NewInt64SumStore(client, "t")
+}
+
+// newFakeStore returns an Int64SumStore over newFakeClient, pointed at table
+// "t". SDK retries are off so the store's own UnprocessedKeys retry loop is
+// what's exercised.
+func newFakeStore(t *testing.T, ft *fakeTransport) *dynamodb.Int64SumStore {
+	t.Helper()
+	return dynamodb.NewInt64SumStore(newFakeClient(t, ft, 1), "t")
 }
 
 // makeKeys returns n distinct keys with predictable entity names.

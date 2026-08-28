@@ -35,6 +35,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
+	"github.com/gallowaysoftware/murmur/pkg/metrics"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/sketch/topk"
 	"github.com/gallowaysoftware/murmur/pkg/monoid/windowed"
 	"github.com/gallowaysoftware/murmur/pkg/pipeline"
@@ -85,6 +86,13 @@ type Config struct {
 	// TopK parameters
 	K               uint32        // sketch size (memory ~K; default 32 if zero)
 	WindowRetention time.Duration // daily-bucket retention (default 30d)
+
+	// Metrics, when set, is handed to the byte store so CAS contention lands
+	// under "<PipelineName>:cas_conflict". This pipeline keys every event to
+	// "global", so the whole ingest rate lands on one DDB row and every
+	// concurrent writer past the first loses a CAS round — the one number
+	// worth watching before the retry budget starts dead-lettering.
+	Metrics metrics.Recorder
 }
 
 // PipelineName is the canonical pipeline identifier — surfaces in metrics,
@@ -125,7 +133,11 @@ func Build(ctx context.Context, cfg Config) (*pipeline.Pipeline[Interaction, []b
 	})
 
 	mon := topk.New(k)
-	store := mddb.NewBytesStore(client, cfg.DDBTable, mon)
+	var storeOpts []mddb.BytesStoreOption
+	if cfg.Metrics != nil {
+		storeOpts = append(storeOpts, mddb.WithCASMetrics(cfg.Metrics, PipelineName))
+	}
+	store := mddb.NewBytesStore(client, cfg.DDBTable, mon, storeOpts...)
 
 	var deduper state.Deduper
 	if cfg.DDBDedupTable != "" {
@@ -133,7 +145,7 @@ func Build(ctx context.Context, cfg Config) (*pipeline.Pipeline[Interaction, []b
 		if ttl == 0 {
 			ttl = 24 * time.Hour
 		}
-		deduper = mddb.NewDeduper(client, cfg.DDBDedupTable, ttl)
+		deduper = mddb.NewDeduper(client, cfg.DDBDedupTable, PipelineName, ttl)
 	}
 
 	window := windowed.Daily(retention)
