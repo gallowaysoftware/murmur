@@ -212,6 +212,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `pkg/monoid/compose.ClampFuture` and `pkg/monoid/compose.DefaultSkewBound` (experimental).
 - `pkg/monoid/sketch/topk`: saturation tests documenting that a `K=32` summary drops from 32 counters covering 45,932 events to 29 counters covering 29 when a 33rd entity appears, and that the counts are Misra-Gries lower bounds with an `n/(K+1)` error bar that callers must size from an `n` the sketch does not record.
 
+- **DynamoDB Streams Lambda: partial-batch failures named an identifier
+  AWS cannot resolve.** The handler reported each failed record's
+  `eventID` as the `BatchItemFailures` ItemIdentifier, where Lambda
+  matches against the shard's **sequence numbers**. Outcome was one of:
+  the whole batch redelivered (duplicate merges — dedup is off by
+  default), a stalled iterator, or the failure silently discarded.
+  `pkg/exec/lambda/dynamodbstreams` and `examples/search-projector` now
+  report `Change.SequenceNumber`; the `eventID` keeps its real job as the
+  dedup key. `pkg/exec/lambda/kinesis` was already correct.
+- **`replay.WithDedup` promised more than it delivers.** Re-running an
+  archive folds idempotently only inside the deduper's TTL horizon:
+  claims expire, and an archive replayed after they do is
+  indistinguishable from new data and merges a second time. Documented on
+  `replay.WithDedup`, the `replay` package, and `dynamodb.NewDeduper`, and
+  pinned by tests (identical re-run → 100; re-run past a 1h TTL → 200).
+- **`recently-interacted-topk` built a K the query server could not
+  read.** `Config{K: 0}` resolved to `topk.DefaultK` (10) while the
+  Config doc, both writers' `TOPK_K` defaults, and the query server all
+  said 32. Mismatched-K Misra-Gries sketches refuse to merge, so the
+  symptom is an empty or stale Top-N rather than an error. K now resolves
+  once through `Config.ResolveK()` (default `example.DefaultK` = 32) for
+  every binary, and `cmd/query` reads `TOPK_K` instead of hard-coding 32.
+  `topk.DefaultK` is unchanged at 10.
+- **Docs that contradicted the code.** The `Trending` decay clock is
+  processing-time (`Clock` is a `func() time.Time` and never sees the
+  event), not per-record `EventTime` — so a replayed archive scores as
+  fresh. And `WithBatchWindow`'s crash story is not "dedup catches the
+  redelivery": the un-flushed records never reached the store, so the
+  redelivery is their first apply.
+
+### Removed
+
+- **BREAKING:** `windowed.Config.EventTimeField`. It was documented as
+  honored by backends and read by nothing — event time has only ever come
+  from `source.Record.EventTime`. Callers setting it were configuring
+  nothing; delete the field from your `Config` literal. To bucket by a
+  timestamp inside the payload, use the source's own `EventTime`
+  extractor (S3 / JSONL / Parquet snapshot readers take one).
+
+### Fixed
+
+- **DDB Streams Lambda docs no longer teach the `eventID` bug.** `doc/design.md` §6.2 claimed the `BatchItemFailures` `ItemIdentifier` is the `eventID` for DynamoDB Streams; it is the stream record's `SequenceNumber`, which is what Lambda resolves against the shard's checkpoint. Replaced with a per-source table and an explanation of why the two identifiers are not interchangeable (`eventID` feeds the `Deduper`; the sequence number is the cursor). The copy-pasteable Lambda handler in `doc/search-integration.md` had the same defect in code form and now reports `rec.Change.SequenceNumber`.
+- **Empty `SequenceNumber` no longer produces an empty `ItemIdentifier`.** Lambda treats a null or empty `itemIdentifier` as a malformed response and redelivers the entire batch, re-merging every record that had already succeeded. `pkg/exec/lambda/dynamodbstreams` and `examples/search-projector` now drop the unreportable entry and surface it — via `metrics.RecordError` plus a `<name>:unreportable_failure` event in the handler, and via a new `Stats.Unreportable` counter in the example.
+- **`WithBatchWindow` crash-safety documentation corrected.** The `pkg/exec/streaming` option doc, `doc/design.md` §5.4, §14.1, §14.4 and the failure-mode diagram all asserted crash safety on the premise that the dedup claim is taken at flush time. It is taken in `aggregator.accept`, when the record enters the accumulator. The consequence — with `WithDedup`, a crash before the flush loses the accumulated batch, because the surviving claim suppresses the very redelivery that would restore it; without a `Deduper`, the redelivery is the records' first apply and nothing is lost — is now stated plainly, along with the contrast to `processor.MergeOne`'s release-on-failed-merge.
+
+### Changed
+
+- `examples/recently-interacted-topk/multisource_test.go` drives the example's real `Build()` instead of a hand-rolled copy that had drifted to `K=10` against the deployment's `K=32`, and asserts the built sketch's K against `Config.ResolveK()`.
+- The replay dedup-TTL contract moved from a unit test asserting against its own hand-rolled expiring fake to `test/e2e/replay_dedup_ttl_test.go`, which exercises the real `pkg/state/dynamodb.Deduper` behind the `DDB_LOCAL_ENDPOINT` gate.
+
 ### Fixed — graceful shutdown silently lost every in-flight record
 
 `streaming.Run` treated a cancelled context as a poison record. The comment at
