@@ -2,9 +2,16 @@
 // approximate set-membership aggregations.
 //
 // Backed by github.com/bits-and-blooms/bloom/v3. Combine is bitwise-OR of the two
-// underlying bit arrays; Identity is an empty bit array of the same size. All sketches
-// in a pipeline must share the same (m, k) parameters — Combine refuses to merge
-// sketches with mismatched shapes (returns the left operand on mismatch).
+// underlying bit arrays. All sketches in a pipeline must share the same (m, k)
+// parameters — a bitwise-OR of two differently-sized bit arrays is not defined, so
+// Combine refuses to merge mismatched shapes: it returns the left operand and reports
+// the mismatch through WithDecodeErrorHandler.
+//
+// Identity is the empty byte slice, deliberately not a marshaled empty filter. The
+// marshaled form carries (m, k), so an Identity that had a shape was only an identity
+// for filters of its own shape: a pipeline whose monoid was built with NewWithCapacity
+// but whose value extractor called the default-sized Single merged every event into a
+// shape mismatch, and the row stayed the empty filter forever.
 //
 // Default parameters: 1M bits, k=7 hash functions, ~1% false-positive rate at ~100K
 // inserts. Use NewWithCapacity for custom sizing.
@@ -27,8 +34,8 @@ const (
 
 // Bloom returns a Bloom-filter monoid with default parameters. To track a different
 // expected cardinality / FPR, use NewWithCapacity.
-func Bloom() monoid.Monoid[[]byte] {
-	return NewWithCapacity(DefaultCapacity, DefaultFPR)
+func Bloom(opts ...Option) monoid.Monoid[[]byte] {
+	return NewWithCapacity(DefaultCapacity, DefaultFPR, opts...)
 }
 
 // NewWithCapacity returns a Bloom-filter monoid sized for the expected number of
@@ -49,16 +56,22 @@ func NewWithCapacity(n uint, p float64, opts ...Option) monoid.Monoid[[]byte] {
 type Option func(*bloomMonoid)
 
 // WithDecodeErrorHandler installs a callback invoked when Combine cannot
-// decode one of its operands.
+// decode one of its operands, or when the two operands have incompatible
+// (m, k) shapes.
 //
 // Combine returns no error — the contract is Combine(a, b) V — so the only
 // recovery on a decode failure is to return the operand that DID decode,
 // silently discarding the other. That recovery is deliberate; doing it
 // silently is not. For Bloom the silent case is especially easy to hit: every
 // sketch merged must share the (m, k) shape, so a single caller constructing
-// the monoid with different capacity parameters produces filters that fail to
-// decode against each other — and without this hook, membership answers just
-// quietly go wrong.
+// the monoid with different capacity parameters produces filters that cannot
+// be OR'd together — and without this hook, membership answers just quietly go
+// wrong.
+//
+// The shape mismatch is the case this hook's doc always claimed to cover and
+// never did: (m, k) is written into the marshaled form and read back out of
+// it, so mismatched filters both decode fine and the merge was abandoned with
+// no error at all.
 //
 // The handler must be cheap and non-blocking; it runs on the merge path.
 func WithDecodeErrorHandler(fn func(error)) Option {
@@ -79,11 +92,16 @@ func (bm bloomMonoid) reportDecodeError(err error) {
 	}
 }
 
-func (bm bloomMonoid) Identity() []byte {
-	bf := bloom.New(bm.m, bm.k)
-	b, _ := bf.MarshalBinary()
-	return b
-}
+// Identity is the empty slice. Combine already short-circuits a zero-length
+// operand, so this is a two-sided identity for a filter of ANY shape, which a
+// marshaled empty filter was not: it carried (m, k), and merging it with a
+// differently-shaped operand hit the mismatch path and returned the empty
+// filter — permanently, since the stored row then stayed empty for every
+// subsequent merge.
+//
+// It also keeps a window with no data from costing 120 KB of zero bits per
+// bucket on the query path.
+func (bloomMonoid) Identity() []byte { return nil }
 
 func (bm bloomMonoid) Combine(a, b []byte) []byte {
 	switch {
@@ -106,11 +124,20 @@ func (bm bloomMonoid) Combine(a, b []byte) []byte {
 	// Cap or K mismatch: return left operand. In practice this happens when sketches
 	// were created with different parameters — a configuration bug we surface by
 	// returning unmodified data rather than corrupting state.
+	//
+	// UnmarshalBinary reads (m, k) off the wire and overwrites whatever shape we
+	// constructed the filter with, so both operands decode cleanly and this is the
+	// only place the misconfiguration is visible. It used to return here in silence,
+	// which is how a pipeline could drop every event for the lifetime of a row.
 	if ba.Cap() != bb.Cap() || ba.K() != bb.K() {
+		bm.reportDecodeError(fmt.Errorf(
+			"bloom: shape mismatch, cannot merge: left (m=%d, k=%d), right (m=%d, k=%d) — monoid built for (m=%d, k=%d); keeping the left operand",
+			ba.Cap(), ba.K(), bb.Cap(), bb.K(), bm.m, bm.k))
 		return a
 	}
 	merged := ba.Copy()
 	if err := merged.Merge(bb); err != nil {
+		bm.reportDecodeError(fmt.Errorf("bloom: merge (m=%d, k=%d): %w", ba.Cap(), ba.K(), err))
 		return a
 	}
 	out, _ := merged.MarshalBinary()

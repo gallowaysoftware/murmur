@@ -89,10 +89,34 @@ func TestBloom(t *testing.T) {
 	}, monoidlaws.WithSamples[[]byte](8))
 }
 
+func TestBloom_NonDefaultCapacityMonoid(t *testing.T) {
+	// The laws have to hold for a monoid whose capacity is NOT the one its
+	// operands were built with. That combination is a configuration bug, but it
+	// is a reachable one — NewWithCapacity on the aggregate, the default-sized
+	// Single in the value extractor — and it used to break the identity law
+	// outright: Combine(Identity, x) returned the identity, so the sketch that
+	// actually held the data was thrown away on every merge.
+	m := bloom.NewWithCapacity(2_000, 0.001)
+	monoidlaws.TestMonoid(t, m, func(i int) []byte {
+		return bloom.NewSingle(1_000, 0.01, []byte{byte(i % 251), byte(i / 251)})
+	}, monoidlaws.WithSamples[[]byte](8))
+}
+
 func TestTopK_K10(t *testing.T) {
 	m := topk.New(10)
 	monoidlaws.TestMonoid(t, m, func(i int) []byte {
 		return topk.SingleN(10, string(rune('a'+(i%26))), 1)
+	})
+}
+
+func TestTopK_CapacityFromTheOperands(t *testing.T) {
+	// Same shape of bug on the TopK side, and the same law it breaks: a K=4
+	// monoid merging K=32 sketches used to write K=4 back, truncating the
+	// summary. Combine now merges at the widest K it can see, which keeps
+	// Combine(Identity, x) == x for an x that is wider than the monoid.
+	m := topk.New(4)
+	monoidlaws.TestMonoid(t, m, func(i int) []byte {
+		return topk.SingleN(32, string(rune('a'+(i%26))), uint64(1+i%3))
 	})
 }
 
@@ -159,8 +183,11 @@ func TestDecayedSumBytes_FloatTolerant(t *testing.T) {
 		})
 	}
 	tol := func(a, b []byte) bool {
-		da := compose.DecodeDecayed(a)
-		db := compose.DecodeDecayed(b)
+		da, errA := compose.DecodeDecayed(a)
+		db, errB := compose.DecodeDecayed(b)
+		if errA != nil || errB != nil {
+			return false
+		}
 		if da.Set != db.Set || da.T != db.T {
 			return false
 		}
