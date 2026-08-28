@@ -28,12 +28,17 @@ are publicly known. The "Known sharp edges" list there enumerates issues that
 are not strictly *security* vulnerabilities but can still cause data loss or
 operational failure if an integrator isn't aware of them — most notably:
 
-- Permissive CORS (`Access-Control-Allow-Origin: *`) on `pkg/admin`. Do not
-  expose the admin server to the public internet without first restricting
-  origins.
-- The `replace` directive in `go.mod` pinning `apache/spark-connect-go` to a
-  fork. If you import `pkg/exec/batch/sparkconnect`, audit the fork yourself
-  before depending on it.
+- `pkg/admin` and `pkg/query/grpc` ship with **auth off by default**. CORS is
+  closed by default (no headers at all unless you pass
+  `admin.WithAllowedOrigins`), but the admin API is still unauthenticated
+  unless you configure `admin.WithAuthToken` or `admin.WithJWTVerifier` — and
+  it leaks pipeline metadata. Do not expose either to the public internet
+  without auth in front.
+- The `replace` directive in **`pkg/exec/batch/sparkconnect/go.mod`** pinning
+  `apache/spark-connect-go` to a fork. If you import that submodule you must
+  mirror the `replace` in your own `go.mod` — Go does not propagate replace
+  directives transitively — which means you are depending on the fork
+  deliberately. Audit it yourself before doing so.
 
 ## Scope
 
