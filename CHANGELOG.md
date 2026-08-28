@@ -485,8 +485,9 @@ processor core, Kafka per-partition concurrency).
   forced every consumer onto Go >= 1.26.2. 1.25.0 is the real floor: five
   direct dependencies (`golang.org/x/net`, `google.golang.org/grpc`,
   `golang.org/x/sys`, `connectrpc.com/connect`, `apache/arrow-go`) declare it.
-  *Action:* none, unless you were on 1.24 or older, in which case this is the
-  first release you can build.
+  `go.work` declares it too — in workspace mode the workspace's directive is
+  the binding constraint, not the module's. *Action:* none, unless you were on
+  1.24 or older, in which case this is the first release you can build.
 
 Pre-1.0, so these are permitted. Each names what an operator or caller must do.
 
