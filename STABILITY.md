@@ -162,7 +162,15 @@ and need either their own soak or an explicit "promoted by analogy" note.
      the soak ends** — it is the one blocker whose resolution date is not ours
      to control.
 
-**4. Release engineering.** There is exactly one tag in the repo's history,
-`v0.1.0`, and it is far behind `main`. Cut an interim `v0.2.0` reflecting the
-current tree — jumping from a stale `v0.1.0` straight to `v1.0.0` is not a
-good look for a framework asking to be adopted.
+**4. Release engineering.** `v0.2.0` was cut on 2026-08-28 — the first tag
+since `v0.1.0` on 2026-05-12, and the interim release this section used to ask
+for. What remains:
+
+   - `pkg/exec/batch/sparkconnect` is still **untagged**, deliberately. Its
+     `go.mod` requires the root module at a placeholder version resolved only
+     by an in-tree `replace`, and Go ignores `replace` directives in
+     non-main modules — so a tag today would publish a module no consumer
+     could build. Tagging it means giving it a real root-module requirement
+     first.
+   - There is no release workflow and `CONTRIBUTING.md` documents no release
+     process: who tags, and how, is still tribal knowledge.

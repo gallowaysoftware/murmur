@@ -51,6 +51,24 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 - **CORS is closed by default.** Pass `admin.WithAllowedOrigins("https://dashboard.example", …)` (or `cmd/murmur-ui --allow-origin=…`) to open it up. The admin API is read-only but still leaks pipeline metadata, so don't expose it to the public internet without auth in front.
 - **CI runs on every PR.** `gofmt` / `go vet` / unit tests with `-race` / `golangci-lint` / web `tsc` + `eslint` + `vite build`. Dependabot is wired up for Go, npm, and Actions.
 
+## Install
+
+```sh
+go get github.com/gallowaysoftware/murmur@v0.2.0
+```
+
+Requires Go 1.24 or newer. The framework is a library — there is no daemon to
+run. `cmd/murmur-ui` (a demo dashboard) and `cmd/murmur-codegen-typed` (typed
+RPC codegen) are the only binaries, and both are optional:
+
+```sh
+go install github.com/gallowaysoftware/murmur/cmd/murmur-codegen-typed@v0.2.0
+```
+
+`pkg/exec/batch/sparkconnect` is a **separate module** and is not covered by
+this tag — see [`STABILITY.md`](STABILITY.md). Everything else, including all
+of `pkg/`, comes from the single import path above.
+
 ## Quick taste
 
 ```go

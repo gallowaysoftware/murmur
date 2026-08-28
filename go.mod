@@ -1,6 +1,6 @@
 module github.com/gallowaysoftware/murmur
 
-go 1.26.2
+go 1.24.0
 
 require (
 	connectrpc.com/connect v1.20.0
