@@ -58,6 +58,77 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before the pipeline so CAS contention on that pipeline's single `"global"`
   row is visible.
 
+### Fixed
+
+- **Dedup claims no longer leak out of the batching write paths.** Both
+  `processor.Coalescer` and `streaming.WithBatchWindow` claim an event's ID at
+  buffer time — a whole batch, or a whole flush window, before the durable write
+  — and both then dropped the buffer without handing the claim back when that
+  write failed. The redelivery each failure explicitly asks for arrived to a
+  `dedup_skip`: no error, no metric, and for the non-idempotent monoids (Sum,
+  HLL, TopK) the counts were simply gone. `processor.MergeMany` was fixed for
+  this previously; the batching paths were not. Covered now on the
+  retry-exhausted branch, the cancelled-flush branch, and the aggregator's
+  dead-letter branch. The aggregator case was the sharpest, because it acks the
+  poison batch — replaying those EventIDs out of the DLQ is the only way to
+  recover them, and that replay was the thing being swallowed.
+- Claim ownership is tracked **per EventID** rather than per batch.
+  `Deduper.MarkSeen` is fail-open, so a dedup-table outage buffers an event
+  without owning its claim; releasing on that path would delete a row another
+  worker won and let a third delivery re-apply the event over the winner's
+  write. Only claims this worker actually won are released.
+- Batched releases run on a context detached from cancellation, matching
+  `MergeMany`. The likeliest reason a flush fails is SIGTERM cancelling the
+  context, and releasing with that same context fails immediately — the claim
+  would have survived exactly the shutdown it must not survive.
+
+### Added
+
+- `processor.ReleaseClaims(ctx, cfg, pipelineName, eventIDs)` — the shared
+  detached-context release path behind `MergeMany`, `Coalescer.Flush` and the
+  streaming aggregator. Out-of-tree drivers that claim EventIDs at buffer time
+  should call it on their failure path. One time budget spans the whole slice so
+  a large failed batch cannot stall shutdown; anything it cannot cover is
+  reported as `dedup_release_failed` instead of going out silently.
+
+### Fixed
+
+- `pkg/exec/processor`: the dedup-release budget now scales with the number of
+  claims instead of being a fixed 5 s. `claimedIDs` holds one entry per event, so
+  a failed flush of a hot key at `DefaultMaxKeys` handed `ReleaseClaims` 10,000
+  IDs and the fixed budget released fewer than half of them — the rest outlived
+  the deltas they were taken for and are lost on redelivery. The budget is now
+  `5 s + 20 ms` per worker-pool round (`ceil(n/16)`), capped at 30 s, and the
+  releases run across a bounded pool of 16.
+- `pkg/exec/streaming`: the write aggregator called `ReleaseClaims` once per
+  batch inside `flushOne`, so a shutdown drain across K failed batches paid K
+  independent release budgets and could outlive the SIGTERM grace period before
+  reaching the last one. `flushAll` now gathers every failed batch's claims and
+  makes a single bounded release call. The visible trade: a dead-lettered
+  record's claim comes back at the end of the drain rather than the instant its
+  own batch failed.
+
+### Changed
+
+- `STABILITY.md`: the `pkg/exec/processor` row now states the over-count exposure
+  plainly. In the Coalescer, a **partial** flush failure releases the claims of
+  events that also contributed to sibling keys whose writes **succeeded**, so
+  redelivery re-applies those events to the successful keys and their
+  Sum / Count / TopK values end up above the true count. The over-count is
+  bounded by the fan-out of the failing record's key set.
+
+### Testing
+
+- The deduper fakes now honour the context on `Release` (returning `ctx.Err()`
+  when it is done), the way the real `dynamodb.Deduper` does. They previously
+  ignored it, which made the detached-context release in `ReleaseClaims`
+  untestable: reverting `context.WithoutCancel(ctx)` to `ctx` left the entire
+  suite green, including the test written to cover it.
+- New coverage: release at `DefaultMaxKeys` scale, budget scaling in isolation,
+  a mixed-outcome flush (one key lands, a sibling fails, disjoint events) whose
+  replay proves the surviving key is not double-counted, a cancellation landing
+  on an in-flight aggregator flush, and a shutdown drain spending exactly one
+  release budget.
 
 ### Fixed — graceful shutdown silently lost every in-flight record
 
@@ -94,7 +165,6 @@ existed to handle: the claim outlived the failed merge, the redelivery hit
 Release now runs on `context.WithoutCancel(ctx)` with a 5s timeout. The two
 fixes are interdependent: not acking is what causes the redelivery, and
 releasing the claim is what lets that redelivery actually apply.
-
 
 ### Changed — Dependabot: catch-all groups, and the sparkconnect submodule is finally covered
 
