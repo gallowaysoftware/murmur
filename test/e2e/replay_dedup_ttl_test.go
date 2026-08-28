@@ -113,7 +113,10 @@ func TestE2E_ReplayDedupExpiryDoubleCounts(t *testing.T) {
 
 	// A generous TTL: this test never waits it out, it evicts the rows the
 	// way DynamoDB's sweeper eventually would.
-	deduper := mddb.NewDeduper(ddbClient, dedupTable, time.Hour)
+	// The pipeline name scopes the claim key ("<pipeline>#<EventID>"), so it
+	// must match the pipeline built below or the claims land in a namespace
+	// nothing reads.
+	deduper := mddb.NewDeduper(ddbClient, dedupTable, "replay_dedup_ttl", time.Hour)
 
 	newPipe := func() *pipeline.Pipeline[int, int64] {
 		return pipeline.NewPipeline[int, int64]("replay_dedup_ttl").
