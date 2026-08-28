@@ -305,9 +305,13 @@ func TestDeployed_PageViewCounters_QueryBootsAgainstDDB(t *testing.T) {
 	// there. It used to answer present=false, which this test then "confirmed" —
 	// an assertion that would have held just as well for an entity with a
 	// million views. The server now says so out loud.
+	// Connect maps CodeFailedPrecondition to HTTP 400, not 412 — see
+	// connectCodeToHTTP in connectrpc.com/connect. The Connect error CODE below
+	// is the real assertion; the status is checked only so a plain 200 with a
+	// zero value cannot pass.
 	status, body := post("Get", `{"entity":"page-never-seen"}`)
-	if status != http.StatusPreconditionFailed {
-		t.Fatalf("Get on a windowed pipeline: status=%d body=%s, want 412", status, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("Get on a windowed pipeline: status=%d body=%s, want 400", status, body)
 	}
 	var connErr struct {
 		Code    string `json:"code"`
