@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/gallowaysoftware/murmur/pkg/metrics"
@@ -108,10 +109,47 @@ func MergeOne[T any, V any](
 		[]string{keyFn(value)}, valueFn(value), store, cache, window)
 }
 
-// releaseTimeout bounds the detached dedup-release call. It has to be short:
-// the caller is usually shutting down and something is waiting on it, but a
-// release that never happens costs an event permanently.
-const releaseTimeout = 5 * time.Second
+// Detached-release budget. Two pressures pull against each other: the caller is
+// usually shutting down and something is waiting on it, but a release that never
+// happens costs an event permanently, so the budget cannot be so tight that a
+// large batch strands most of it.
+const (
+	// releaseConcurrency is the width of the release worker pool. Each release is
+	// one small delete against a distinct dedup key, so they parallelize cleanly
+	// and 16 in flight will not itself throttle the dedup table.
+	releaseConcurrency = 16
+
+	// releaseBudgetBase is the floor: enough for a handful of claims plus a
+	// round-trip's worth of backend latency.
+	releaseBudgetBase = 5 * time.Second
+
+	// releaseBudgetPerRound buys one round of the worker pool. The budget has to
+	// scale with the claim count because claimedIDs holds one entry per EVENT, not
+	// per key: a Coalescer at DefaultMaxKeys, or a 1s FlushTick at a few thousand
+	// events/sec, hands ReleaseClaims thousands of IDs at once, and a fixed budget
+	// covers the first few hundred and silently strands the rest.
+	releaseBudgetPerRound = 20 * time.Millisecond
+
+	// releaseBudgetMax is the hard ceiling, so the scaling cannot itself outrun a
+	// SIGTERM grace period or a Lambda's remaining time. Claims the budget does not
+	// cover surface as dedup_release_failed rather than going out silently.
+	releaseBudgetMax = 30 * time.Second
+)
+
+// releaseBudget scales the detached release budget with the number of distinct
+// claims: the base floor plus one worker-pool round per releaseConcurrency
+// claims, capped at releaseBudgetMax.
+func releaseBudget(n int) time.Duration {
+	if n <= 0 {
+		return releaseBudgetBase
+	}
+	rounds := (n + releaseConcurrency - 1) / releaseConcurrency
+	d := releaseBudgetBase + time.Duration(rounds)*releaseBudgetPerRound
+	if d > releaseBudgetMax {
+		return releaseBudgetMax
+	}
+	return d
+}
 
 // ReleaseClaims hands dedup claims back for events whose delta never reached the
 // store, so the source's redelivery (or a DLQ replay) re-applies them instead of
@@ -127,23 +165,20 @@ const releaseTimeout = 5 * time.Second
 // Repeated IDs are released once. Calling with no Dedup configured, or with an
 // empty slice, is a no-op, so batching drivers can call it unconditionally on
 // their failure path.
+//
+// Cost. One call is one budget, sized by releaseBudget and spent across a pool of
+// releaseConcurrency workers — so batching drivers should gather the claims of a
+// whole failed drain and make ONE call, not one call per failed batch. Deduper and
+// Recorder are invoked from several goroutines concurrently; both interfaces
+// already require that.
 func ReleaseClaims(ctx context.Context, cfg *Config, pipelineName string, eventIDs []string) {
 	if cfg.Dedup == nil || len(eventIDs) == 0 {
 		return
 	}
 
-	// Release on a context DETACHED from ctx. The single most likely reason a
-	// merge fails is that ctx was just cancelled by SIGTERM — and releasing with
-	// the cancelled ctx fails immediately, so the claim survives exactly the
-	// shutdown it most needs to not survive.
-	//
-	// One budget spans the whole slice rather than one per ID: a failed flush of
-	// a 10k-key batch would otherwise stall shutdown for minutes. Whatever the
-	// budget doesn't cover surfaces as dedup_release_failed rather than going out
-	// silently.
-	relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
-	defer cancel()
-
+	// Dedupe first: an event fanned out over several failing keys arrives once per
+	// key, and the budget is sized off the count.
+	ids := make([]string, 0, len(eventIDs))
 	seen := make(map[string]struct{}, len(eventIDs))
 	for _, id := range eventIDs {
 		if id == "" {
@@ -153,15 +188,65 @@ func ReleaseClaims(ctx context.Context, cfg *Config, pipelineName string, eventI
 			continue
 		}
 		seen[id] = struct{}{}
-
-		if err := cfg.Dedup.Release(relCtx, id); err != nil {
-			cfg.Recorder.RecordError(pipelineName,
-				fmt.Errorf("dedup Release %q after failed merge: %w", id, err))
-			cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
-			continue
-		}
-		cfg.Recorder.RecordEvent(pipelineName + ":dedup_release")
+		ids = append(ids, id)
 	}
+	if len(ids) == 0 {
+		return
+	}
+
+	// Release on a context DETACHED from ctx. The single most likely reason a
+	// merge fails is that ctx was just cancelled by SIGTERM — and releasing with
+	// the cancelled ctx fails immediately, so the claim survives exactly the
+	// shutdown it most needs to not survive.
+	//
+	// One budget spans the whole slice rather than one per ID, but it SCALES with
+	// the slice: claimedIDs carries one entry per event, so a flush of a hot key
+	// hands us thousands. Whatever the budget doesn't cover surfaces as
+	// dedup_release_failed rather than going out silently.
+	relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseBudget(len(ids)))
+	defer cancel()
+
+	workers := releaseConcurrency
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+	if workers <= 1 {
+		for _, id := range ids {
+			releaseOne(relCtx, cfg, pipelineName, id)
+		}
+		return
+	}
+
+	work := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for id := range work {
+				releaseOne(relCtx, cfg, pipelineName, id)
+			}
+		}()
+	}
+	for _, id := range ids {
+		work <- id
+	}
+	close(work)
+	wg.Wait()
+}
+
+// releaseOne hands back a single claim and records the outcome. A failure is
+// loud on purpose: the claim is now outliving the delta it was taken for, and
+// dedup_release_failed is the only signal an operator gets before the redelivery
+// arrives to a dedup_skip.
+func releaseOne(ctx context.Context, cfg *Config, pipelineName, id string) {
+	if err := cfg.Dedup.Release(ctx, id); err != nil {
+		cfg.Recorder.RecordError(pipelineName,
+			fmt.Errorf("dedup Release %q after failed merge: %w", id, err))
+		cfg.Recorder.RecordEvent(pipelineName + ":dedup_release_failed")
+		return
+	}
+	cfg.Recorder.RecordEvent(pipelineName + ":dedup_release")
 }
 
 // MergeMany is the multi-key entry point. It claims the EventID via Dedup

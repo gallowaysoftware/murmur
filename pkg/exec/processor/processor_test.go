@@ -3,6 +3,7 @@ package processor_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -88,7 +89,16 @@ func (d *memDeduper) MarkSeen(_ context.Context, id string) (bool, error) {
 	d.seen[id] = true
 	return true, nil
 }
-func (d *memDeduper) Release(_ context.Context, id string) error {
+
+// Release honours ctx the way the real dynamodb.Deduper does: it issues a
+// DeleteItem, and a DeleteItem on a cancelled context fails without touching the
+// table. Fakes that ignore ctx here silently bless a release that would never
+// have landed in production — which is the entire reason ReleaseClaims detaches
+// from the caller's context before releasing.
+func (d *memDeduper) Release(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("dedup Release %q: %w", id, err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.releases++

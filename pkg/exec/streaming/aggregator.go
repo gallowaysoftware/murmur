@@ -212,6 +212,15 @@ func (a *aggregator[T, V]) accept(ctx context.Context, rec source.Record[T]) (du
 // store keys and can run in parallel safely regardless of monoid
 // commutativity. Concurrency=1 (the default) preserves the historical
 // serial flush path.
+//
+// Dedup claims stranded by failed batches are released ONCE for the whole
+// drain, after every batch has been attempted — see the comment on the
+// gathering below. The visible consequence is that a dead-lettered record's
+// claim comes back at the end of the drain rather than the instant its own
+// batch failed, so a DLQ consumer that replays within the drain window can
+// still see a dedup_skip. That is the cheaper half of the trade: the
+// alternative is a per-batch budget that a shutdown cannot afford to pay K
+// times, which strands claims outright.
 func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 	a.mu.Lock()
 	keys := make([]state.Key, 0, len(a.batches))
@@ -220,11 +229,19 @@ func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 	}
 	a.mu.Unlock()
 
+	// Claims are gathered across every batch and handed back in ONE
+	// ReleaseClaims call. Releasing per batch instead would cost up to
+	// K × the release budget for a drain over K failed batches, which on a
+	// shutdown outlives the SIGTERM grace period — and the claims the drain
+	// never reached leak exactly the way the release exists to prevent.
+	var unreleased []string
+
 	n := a.cfg.concurrency
 	if n <= 1 || len(keys) <= 1 {
 		for _, sk := range keys {
-			a.flushOne(ctx, sk)
+			unreleased = append(unreleased, a.flushOneCollecting(ctx, sk)...)
 		}
+		processor.ReleaseClaims(ctx, &a.cfg.Config, a.name, unreleased)
 		return
 	}
 
@@ -239,6 +256,7 @@ func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 	// so this is purely a goroutine-pool dispatch around the existing
 	// per-key flush.
 	sem := make(chan struct{}, n)
+	var relMu sync.Mutex
 	var wg sync.WaitGroup
 	for _, sk := range keys {
 		sem <- struct{}{}
@@ -246,17 +264,35 @@ func (a *aggregator[T, V]) flushAll(ctx context.Context) {
 		go func(sk state.Key) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			a.flushOne(ctx, sk)
+			ids := a.flushOneCollecting(ctx, sk)
+			if len(ids) == 0 {
+				return
+			}
+			relMu.Lock()
+			unreleased = append(unreleased, ids...)
+			relMu.Unlock()
 		}(sk)
 	}
 	wg.Wait()
+	processor.ReleaseClaims(ctx, &a.cfg.Config, a.name, unreleased)
 }
 
-// flushOne removes the named batch from the live map and merges it into the
-// store. On success, all deferred acks fire. On retry-exhaustion, the user's
+// flushOne flushes a single batch and immediately hands back the dedup claims a
+// failed flush stranded. Used by the accept path, where exactly one batch is in
+// play so there is nothing to amortize the release budget across.
+func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
+	processor.ReleaseClaims(ctx, &a.cfg.Config, a.name, a.flushOneCollecting(ctx, sk))
+}
+
+// flushOneCollecting removes the named batch from the live map and merges it into
+// the store. On success, all deferred acks fire. On retry-exhaustion, the user's
 // deadLetter callback receives every EventID in the batch and the acks fire
 // anyway so the source advances past the poison batch.
-func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
+//
+// It RETURNS the claims a failed flush has to give back rather than releasing
+// them, so a caller flushing many batches can pay one release budget for the
+// whole drain instead of one per batch.
+func (a *aggregator[T, V]) flushOneCollecting(ctx context.Context, sk state.Key) []string {
 	a.mu.Lock()
 	b, ok := a.batches[sk]
 	if ok {
@@ -264,7 +300,7 @@ func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
 	}
 	a.mu.Unlock()
 	if !ok || !b.deltaSet {
-		return
+		return nil
 	}
 
 	// Pass eventID="" so processor.MergeMany skips the dedup check (we
@@ -275,13 +311,14 @@ func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
 
 	a.cfg.Recorder.RecordEvent(a.name + ":flush")
 
+	// The delta never landed, so the claims taken at accept time have to go back.
+	// Without that, replaying these EventIDs out of the DLQ hits dedup_skip and
+	// the events are lost for good — silent count loss for Sum / HLL / TopK, which
+	// is the failure the dead-letter callback exists to let the operator recover
+	// from.
+	var unreleased []string
 	if err != nil {
-		// The delta never landed, so the claims taken at accept time have to go
-		// back. Without that, replaying these EventIDs out of the DLQ hits
-		// dedup_skip and the events are lost for good — silent count loss for
-		// Sum / HLL / TopK, which is the failure the dead-letter callback exists
-		// to let the operator recover from.
-		processor.ReleaseClaims(ctx, &a.cfg.Config, a.name, b.claimedIDs)
+		unreleased = b.claimedIDs
 
 		// Retry exhausted: dead-letter every record in the batch.
 		for _, id := range b.eventIDs {
@@ -299,6 +336,7 @@ func (a *aggregator[T, V]) flushOne(ctx context.Context, sk state.Key) {
 			a.cfg.Recorder.RecordError(a.name, fmt.Errorf("source Ack: %w", err))
 		}
 	}
+	return unreleased
 }
 
 // runFlushLoop is the periodic-flush goroutine. Returns on ctx cancellation
