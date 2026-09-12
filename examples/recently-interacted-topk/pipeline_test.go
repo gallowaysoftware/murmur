@@ -19,10 +19,10 @@ func sketchK(t *testing.T, b []byte) uint32 {
 }
 
 // TestBuild_KDefaultsToDocumentedSize pins the K a caller gets when Config.K
-// is left zero. Sketches with mismatched K refuse to merge, so a documented
-// default that disagrees with the built one is not cosmetic: it puts a K=10
-// store under the K=32 query server this example ships, and the Top-N comes
-// back empty rather than erroring.
+// is left zero. A documented default that disagrees with the built one is not
+// cosmetic: a smaller-K writer merging into a larger-K store silently
+// truncates the row (header K is ignored), so DefaultK must match the K=32
+// this example ships everywhere.
 func TestBuild_KDefaultsToDocumentedSize(t *testing.T) {
 	// 32 is the number the README, the Config doc, the TOPK_K default in both
 	// writer binaries, and the query server all name.
