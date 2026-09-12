@@ -102,9 +102,11 @@ type Config struct {
 const DefaultK uint32 = 32
 
 // ResolveK returns the K this Config actually builds with. Every binary in the
-// example goes through it — writers and the query server alike — because
-// sketches with mismatched K refuse to merge, and the failure shows up at
-// query time as an empty or stale Top-N rather than as an error at startup.
+// example goes through it — writers and the query server alike — because a
+// smaller-K binary merging against a larger-K row silently truncates the row
+// to its own K (the wire header K is discarded; merge uses the constructing
+// monoid's K). That is a write-path hazard, not a query-time refusal. See
+// issue #101 for honouring the operand K on the wire.
 func (c Config) ResolveK() uint32 {
 	if c.K == 0 {
 		return DefaultK

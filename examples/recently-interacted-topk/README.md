@@ -50,9 +50,10 @@ worker calls `AttachKafkaSource(pipe, cfg)` to attach a franz-go source.
 
 `K` is one number for the whole deployment: `Config.ResolveK()`, which is
 `TOPK_K` in each binary's environment and `DefaultK` (32) when unset. Both
-writers and the query server go through it. Sketches sized for different K
-refuse to merge, and the symptom is an empty or stale Top-N at query time
-rather than an error at startup — so never hard-code K anywhere.
+writers and the query server go through it. Mismatched K does **not** refuse
+to merge: a smaller-K binary merging against a larger-K row silently
+truncates the row to its own K. Keep every binary on the same K — never
+hard-code it. (Wire-format fix tracked in issue #101.)
 
 ## Run locally
 

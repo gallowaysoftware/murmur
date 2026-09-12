@@ -135,8 +135,8 @@ func buildExamplePipeline(
 	}
 	// Guard the K contradiction this test used to carry in a local const: the
 	// sketch the pipeline actually builds must be the one every binary in the
-	// example resolves to. Sketches sized for different K refuse to merge,
-	// and the symptom is an empty Top-N rather than an error.
+	// example resolves to. A smaller-K merge silently truncates the row, so
+	// the built sketch K and ResolveK must agree.
 	wantK := exampleConfig().ResolveK()
 	if got := sketchK(t, pipe.ValueFn()(example.Interaction{EntityID: "probe"})); got != wantK {
 		t.Fatalf("example builds K=%d sketches, but ResolveK says %d", got, wantK)
