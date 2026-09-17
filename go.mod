@@ -3,7 +3,8 @@ module github.com/gallowaysoftware/murmur
 go 1.25.0
 
 require (
-	connectrpc.com/connect v1.20.0
+	connectrpc.com/connect v1.21.0
+	connectrpc.com/grpchealth v1.5.0
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/aws/aws-lambda-go v1.54.0
 	github.com/aws/aws-sdk-go-v2 v1.44.0
@@ -30,7 +31,6 @@ require (
 )
 
 require (
-	connectrpc.com/grpchealth v1.5.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
