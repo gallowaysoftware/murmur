@@ -42,7 +42,8 @@ make test-unit         # fast unit tests, no infra (-short, 60s timeout)
 make test-integration  # full E2E suite; brings up docker-compose first
                        # sets DDB_LOCAL_ENDPOINT, KAFKA_BROKERS,
                        # VALKEY_ADDRESS, VALKEY_BLOOM_ENABLED,
-                       # S3_ENDPOINT, SPARK_CONNECT_REMOTE, MONGO_URI
+                       # S3_ENDPOINT, MONGO_URI; Spark's separate submodule
+                       # uses SPARK_CONNECT_REMOTE
 
 # Single test (Go's normal -run pattern works)
 go test -run TestE2E_CounterPipeline ./test/e2e/...
@@ -73,8 +74,9 @@ make web-proto         # regenerate TS bindings under web/src/gen/
 
 E2E tests in `test/e2e/` skip themselves when the relevant env vars
 (`KAFKA_BROKERS`, `DDB_LOCAL_ENDPOINT`, `MONGO_URI`, `S3_ENDPOINT`,
-`SPARK_CONNECT_REMOTE`, `VALKEY_BLOOM_ENABLED`) are unset, so
-`make test-unit` is genuinely infra-free.
+`VALKEY_BLOOM_ENABLED`) are unset, so `make test-unit` is genuinely
+infra-free. Spark Connect's separate-module test is
+`pkg/exec/batch/sparkconnect/e2e_test.go` and uses `SPARK_CONNECT_REMOTE`.
 
 ## Architecture: the load-bearing ideas
 
@@ -160,9 +162,10 @@ merging the N most-recent buckets via the monoid's `Combine`.
 The query layer is generic over Kind, hence the `Value{bytes}` shape
 today:
 
-- `pkg/query` — `Get` / `GetMany` / `GetWindow` / `GetRange` /
-  `GetWindowMany` / `GetRangeMany`, plus `LambdaQuery` for batch-view
-  ⊕ realtime-delta merge.
+- `pkg/query` — `Get` / `GetWindow` / `GetRange` / `GetWindowMany` /
+  `GetRangeMany` / `GetTrailing` / `GetTrailingMany`, plus `LambdaQuery`
+  for batch-view ⊕ realtime-delta merge. `GetMany` is a `Store` method and
+  an RPC, not a package-level `pkg/query` function.
 - `pkg/query/grpc` — Connect-RPC server on a single port speaks gRPC
   + gRPC-Web + Connect (HTTP+JSON). Has singleflight coalescing,
   per-RPC metrics, `fresh_read` flag.
