@@ -13,15 +13,15 @@ Murmur is a spiritual successor to [Twitter's Summingbird](https://github.com/tw
 | Pipeline DSL with structural monoids | ✅ |
 | Live mode: Kafka source ([franz-go](https://github.com/twmb/franz-go)) | ✅ |
 | Live mode: Kinesis (production path: AWS Lambda trigger) | ✅ [`pkg/exec/lambda/kinesis`](pkg/exec/lambda/kinesis) — Lambda owns shard discovery, leasing, scaling, checkpointing; [`pkg/source/kinesis`](pkg/source/kinesis) remains as a dev/demo polling consumer |
-| Bootstrap mode: Mongo SnapshotSource + handoff token | ✅ |
+| Bootstrap mode: Mongo, DynamoDB, JSONL, S3, and Parquet snapshot sources + handoff token | ✅ |
 | Replay mode: S3 / MinIO JSON-Lines | ✅ |
 | State: DynamoDB Int64SumStore (atomic ADD) + BytesStore (CAS) | ✅ |
-| Cache: Valkey Int64Cache (write-through, INCRBY) | ✅ |
+| Cache: Valkey Int64Cache, BytesCache, HLLCache, and BloomCache | ✅ |
 | Monoids: Sum, Count, First, Last, Set | ✅ |
 | Monoids: Min, Max (`Bounded[V]`) | ✅ |
 | Sketches: HyperLogLog, TopK (Misra-Gries), Bloom | ✅ |
 | Windowed aggregations + sliding-window queries | ✅ |
-| Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany`) | ✅ [`pkg/query/grpc`](pkg/query/grpc/) Connect-RPC server with singleflight coalescing |
+| Generic gRPC query service (`Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany` / `GetTrailing` / `GetTrailingMany`) | ✅ [`pkg/query/grpc`](pkg/query/grpc/) Connect-RPC server with singleflight coalescing |
 | Atomic state-table swap (alias version pointer) | ✅ |
 | Spark Connect batch executor (user-supplied SQL) | ✅ validated locally against `apache/spark:4.0.1` |
 | Lambda mode (batch view ⊕ realtime delta merge) | ✅ via [`pkg/query.LambdaQuery`](pkg/query/lambda.go) |
@@ -117,7 +117,7 @@ func main() {
 
 For the runnable version, see [`examples/page-view-counters/`](examples/page-view-counters/).
 
-The generic gRPC service exposes `Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany` — wire it up with [`pkg/query/grpc.NewServer`](pkg/query/grpc/server.go); proto definitions in [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto). Values are byte-encoded so one service covers every monoid Kind. For type-safe responses, run [`cmd/murmur-codegen-typed`](cmd/murmur-codegen-typed) against a YAML pipeline-spec: it emits a per-service `.proto` + Connect-RPC Go server stub that delegates to [`pkg/query/typed`](pkg/query/typed) and returns the per-kind shape directly (`int64`, `TopKItem[]`, `BloomShape`, …). Examples in [`examples/typed-rpc-codegen/`](examples/typed-rpc-codegen/).
+The generic gRPC service exposes `Get` / `GetMany` / `GetWindow` / `GetWindowMany` / `GetRange` / `GetRangeMany` / `GetTrailing` / `GetTrailingMany` — wire it up with [`pkg/query/grpc.NewServer`](pkg/query/grpc/server.go); proto definitions in [`proto/murmur/v1/query.proto`](proto/murmur/v1/query.proto). Values are byte-encoded so one service covers every monoid Kind. For type-safe responses, run [`cmd/murmur-codegen-typed`](cmd/murmur-codegen-typed) against a YAML pipeline-spec: it emits a per-service `.proto` + Connect-RPC Go server stub that delegates to [`pkg/query/typed`](pkg/query/typed) and returns the per-kind shape directly (`int64`, `TopKItem[]`, `BloomShape`, …). Examples in [`examples/typed-rpc-codegen/`](examples/typed-rpc-codegen/).
 
 ## Architecture
 
@@ -162,15 +162,15 @@ The end-to-end tests in [`test/e2e/`](test/e2e/) exercise:
 - Mongo bootstrap with Change Stream resume token (`mongo_bootstrap_test.go`)
 - DDB ParallelScan bootstrap with re-run idempotency under DDB-backed Deduper (`ddb_bootstrap_test.go`)
 - S3 replay into a shadow table (`s3_replay_test.go`)
-- Spark Connect batch SUM aggregation → DDB (`spark_connect_test.go`)
+- Spark Connect batch coverage lives in the separate [`pkg/exec/batch/sparkconnect`](pkg/exec/batch/sparkconnect/) module (`e2e_test.go`)
 
 ## Production-readiness packages
 
 Beyond the core pipeline DSL, several packages exist to make Murmur deployable:
 
 - [`pkg/exec/lambda/{kinesis,dynamodbstreams,sqs}`](pkg/exec/lambda/) — three Lambda runtimes for the AWS-native event sources, all sharing the same retry / dedup / BatchItemFailures contract via [`pkg/exec/processor`](pkg/exec/processor/).
-- [`pkg/source/snapshot/{mongo,dynamodb,jsonl,s3}`](pkg/source/snapshot/) — bootstrap sources for the four common shapes: Mongo collections, DynamoDB ParallelScan, raw JSON Lines, and S3-prefix-scan-of-JSON-Lines for partitioned archives.
-- [`pkg/state/{dynamodb,valkey}`](pkg/state/) — DDB as source-of-truth (Int64SumStore / BytesStore + Deduper), Valkey as cache (Int64Cache / BytesCache + warmup helpers in `pkg/query`).
+- [`pkg/source/snapshot/{mongo,dynamodb,jsonl,s3,parquet}`](pkg/source/snapshot/) — bootstrap sources for Mongo collections, DynamoDB ParallelScan, raw JSON Lines, S3-prefix JSON Lines, and Parquet archives.
+- [`pkg/state/{dynamodb,valkey}`](pkg/state/) — DDB as source-of-truth (Int64SumStore / BytesStore + Deduper), Valkey as cache (Int64Cache / BytesCache / HLLCache / BloomCache + warmup helpers in `pkg/query`).
 - [`pkg/query/grpc`](pkg/query/grpc/) — Connect-RPC server speaking gRPC + gRPC-Web + Connect/HTTP-JSON on one port. Singleflight coalescing + `fresh_read` flag + per-RPC metrics + batched windowed reads (`GetWindowMany` / `GetRangeMany`).
 - [`pkg/projection`](pkg/projection/) — bucket functions (`LogBucket` / `LinearBucket` / `ManualBucket`) + `HysteresisBucket` for change-data-capture into search indices.
 - [`pkg/observability/autoscale`](pkg/observability/autoscale/) — `Signal → Emitter` loop for publishing scaling-signal metrics. Reference CloudWatch emitter for ECS Fargate target tracking on Kafka consumer lag / Kinesis iterator-age / events-per-second.
@@ -185,6 +185,8 @@ Beyond the core pipeline DSL, several packages exist to make Murmur deployable:
 - [`examples/search-projector/`](examples/search-projector/) — runnable Pattern B from [`doc/search-integration.md`](doc/search-integration.md): a Lambda that tails Murmur's counter table via DDB Streams and projects bucket transitions into an OpenSearch index, reducing search-side index write rate from per-event to per-order-of-magnitude (~6 reindexes for a 0→1M counter rise vs 1M).
 - [`examples/search-rerank/`](examples/search-rerank/) — runnable Pattern A from the same doc: an HTTP search service that does two-stage retrieval (OpenSearch recall + Murmur counter rerank). Pairs with the search-projector to form the canonical "filter on bucket + rank by live counters" shape.
 - [`examples/typed-wrapper/`](examples/typed-wrapper/) — count-core-shaped reference for the typed-wrapper pattern: how application services expose Murmur counter pipelines through their own typed Connect-RPC API instead of the generic `Value{bytes}` shape. Uses [`pkg/query/typed`](pkg/query/typed/) as the building block.
+- [`examples/backfill-from-spark/`](examples/backfill-from-spark/) — Spark-produced Parquet bootstrap into a Murmur pipeline.
+- [`examples/typed-rpc-codegen/`](examples/typed-rpc-codegen/) — generated typed Connect-RPC server and client stubs for a pipeline specification.
 
 ## Web UI and admin API
 
